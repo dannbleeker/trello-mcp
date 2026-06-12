@@ -1,0 +1,48 @@
+/**
+ * Trello MCP — Cloudflare Worker configuration.
+ * Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * Required secrets (set via `wrangler secret put NAME`):
+ *   GITHUB_CLIENT_ID         — from your GitHub OAuth app
+ *   GITHUB_CLIENT_SECRET     — from your GitHub OAuth app
+ *   COOKIE_ENCRYPTION_KEY    — `openssl rand -hex 32`
+ *   TRELLO_KEY               — Trello API key
+ *   TRELLO_TOKEN             — Trello user token
+ *
+ * Required KV namespace:
+ *   wrangler kv namespace create "OAUTH_KV"
+ *   then paste the returned id into the `id` field below.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "trello-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TrelloMCP"],
+      "tag": "v1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TrelloMCP",
+        "name": "MCP_OBJECT"
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "<run: wrangler kv namespace create OAUTH_KV>"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "dev": {
+    "port": 8788
+  }
+}

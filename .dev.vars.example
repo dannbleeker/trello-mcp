@@ -1,0 +1,11 @@
+# Local dev secrets. Copy to .dev.vars (which is gitignored) and fill in.
+# Production secrets are set via `wrangler secret put NAME`.
+
+# --- GitHub OAuth (sign-in to the connector) ---
+GITHUB_CLIENT_ID=<your github oauth client id>
+GITHUB_CLIENT_SECRET=<your github oauth client secret>
+COOKIE_ENCRYPTION_KEY=<openssl rand -hex 32>
+
+# --- Trello (server-side credentials, never leave the Worker) ---
+TRELLO_KEY=<trello api key>
+TRELLO_TOKEN=<trello user token>

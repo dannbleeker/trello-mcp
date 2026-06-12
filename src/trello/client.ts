@@ -1,0 +1,312 @@
+/**
+ * File: src/trello/client.ts
+ * Author: Dann Bleeker Pedersen
+ * Created: 2026-06-12
+ * Last Updated: 2026-06-12
+ * Version: 1.0.0
+ * Description: Thin typed Trello REST client. Handles auth (key+token in query
+ *              params), JSON encoding, error mapping, and gentle 429/5xx retry.
+ *              Uses the Web Fetch API — works in Cloudflare Workers AND Node 18+,
+ *              which lets us unit-test the tools without spinning up a Worker.
+ *
+ * Change log:
+ *   1.0.0 (2026-06-12) — Initial.
+ */
+
+const BASE = "https://api.trello.com/1";
+const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRY_MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 5000;
+
+/** Thrown when Trello returns a non-2xx response after retries. */
+export class TrelloError extends Error {
+	readonly status: number;
+	readonly body: string;
+	constructor(status: number, body: string, message?: string) {
+		super(message ?? `Trello API error ${status}: ${body.slice(0, 200)}`);
+		this.name = "TrelloError";
+		this.status = status;
+		this.body = body;
+	}
+}
+
+/** Minimal Trello card shape used across tools. */
+export interface TrelloCard {
+	id: string;
+	name: string;
+	desc: string;
+	idList: string;
+	idBoard: string;
+	labels: { id: string; name: string; color: string }[];
+	due: string | null;
+	dueComplete: boolean;
+	url: string;
+	dateLastActivity: string;
+	closed: boolean;
+}
+
+/** Minimal list shape. */
+export interface TrelloList {
+	id: string;
+	name: string;
+	idBoard: string;
+	closed: boolean;
+}
+
+/** Minimal board shape. */
+export interface TrelloBoard {
+	id: string;
+	name: string;
+	url: string;
+	closed: boolean;
+}
+
+/** Minimal label shape. */
+export interface TrelloLabel {
+	id: string;
+	name: string;
+	color: string;
+	idBoard: string;
+}
+
+/** Minimal checklist item shape. */
+export interface ChecklistItem {
+	id: string;
+	name: string;
+	state: "complete" | "incomplete";
+	pos: number;
+	idChecklist: string;
+}
+
+/** Minimal checklist shape. */
+export interface Checklist {
+	id: string;
+	name: string;
+	idCard: string;
+	checkItems: ChecklistItem[];
+}
+
+/**
+ * Trello client. Construct once per request/session with the user's key+token.
+ * Do not log the instance — `key` and `token` would leak.
+ */
+export class TrelloClient {
+	private readonly key: string;
+	private readonly token: string;
+
+	constructor(key: string, token: string) {
+		this.key = key;
+		this.token = token;
+	}
+
+	/** Internal: build the URL with auth params merged in. */
+	private url(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+		const u = new URL(`${BASE}${path}`);
+		u.searchParams.set("key", this.key);
+		u.searchParams.set("token", this.token);
+		for (const [k, v] of Object.entries(params)) {
+			if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
+		}
+		return u.toString();
+	}
+
+	/** Internal: execute with retry on 429 + transient 5xx. */
+	private async request(method: string, path: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<unknown> {
+		let attempt = 0;
+		while (true) {
+			attempt += 1;
+			const resp = await fetch(this.url(path, params), {
+				method,
+				headers: { Accept: "application/json" },
+			});
+
+			if (resp.ok) {
+				// 204 No Content (rare for Trello) → return null
+				const ct = resp.headers.get("content-type") ?? "";
+				return ct.includes("application/json") ? await resp.json() : null;
+			}
+
+			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
+				const retryAfter = resp.headers.get("Retry-After");
+				const delayMs = retryAfter && /^\d+$/.test(retryAfter)
+					? Math.min(Number(retryAfter) * 1000, RETRY_MAX_DELAY_MS)
+					: Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+				await new Promise((r) => setTimeout(r, delayMs));
+				continue;
+			}
+
+			const body = await resp.text();
+			throw new TrelloError(resp.status, body);
+		}
+	}
+
+	// ---- Boards ----
+
+	async listMyBoards(): Promise<TrelloBoard[]> {
+		const data = await this.request("GET", "/members/me/boards", {
+			fields: "name,url,closed",
+			filter: "open",
+		});
+		return data as TrelloBoard[];
+	}
+
+	async getBoard(boardId: string): Promise<TrelloBoard> {
+		const data = await this.request("GET", `/boards/${boardId}`, {
+			fields: "name,url,closed",
+		});
+		return data as TrelloBoard;
+	}
+
+	// ---- Lists ----
+
+	async listListsOnBoard(boardId: string): Promise<TrelloList[]> {
+		const data = await this.request("GET", `/boards/${boardId}/lists`, {
+			fields: "name,idBoard,closed",
+		});
+		return data as TrelloList[];
+	}
+
+	// ---- Labels ----
+
+	async listLabelsOnBoard(boardId: string): Promise<TrelloLabel[]> {
+		const data = await this.request("GET", `/boards/${boardId}/labels`, {
+			fields: "name,color,idBoard",
+			limit: 1000,
+		});
+		return data as TrelloLabel[];
+	}
+
+	// ---- Cards ----
+
+	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
+		const data = await this.request("GET", `/lists/${listId}/cards`, {
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+		});
+		return data as TrelloCard[];
+	}
+
+	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
+		const data = await this.request("GET", `/boards/${boardId}/cards`, {
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+		});
+		return data as TrelloCard[];
+	}
+
+	async searchCards(query: string, boardId?: string): Promise<TrelloCard[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
+			query,
+			modelTypes: "cards",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+			cards_limit: 50,
+			partial: true,
+		};
+		if (boardId) params.idBoards = boardId;
+		const data = await this.request("GET", "/search", params);
+		const { cards = [] } = data as { cards?: TrelloCard[] };
+		return cards;
+	}
+
+	async getCard(cardId: string): Promise<TrelloCard> {
+		const data = await this.request("GET", `/cards/${cardId}`, {
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+		});
+		return data as TrelloCard;
+	}
+
+	async createCard(input: {
+		idList: string;
+		name: string;
+		desc?: string;
+		due?: string;
+		idLabels?: string[];
+	}): Promise<TrelloCard> {
+		const params: Record<string, string | number | boolean | undefined> = {
+			idList: input.idList,
+			name: input.name,
+		};
+		if (input.desc) params.desc = input.desc;
+		if (input.due) params.due = input.due;
+		if (input.idLabels && input.idLabels.length) params.idLabels = input.idLabels.join(",");
+		const data = await this.request("POST", "/cards", params);
+		return data as TrelloCard;
+	}
+
+	async updateCard(cardId: string, input: {
+		name?: string;
+		desc?: string;
+		due?: string | null;
+		idList?: string;
+		closed?: boolean;
+		dueComplete?: boolean;
+	}): Promise<TrelloCard> {
+		const params: Record<string, string | number | boolean | undefined> = {};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.desc !== undefined) params.desc = input.desc;
+		if (input.due !== undefined) params.due = input.due ?? "";
+		if (input.idList !== undefined) params.idList = input.idList;
+		if (input.closed !== undefined) params.closed = input.closed;
+		if (input.dueComplete !== undefined) params.dueComplete = input.dueComplete;
+		const data = await this.request("PUT", `/cards/${cardId}`, params);
+		return data as TrelloCard;
+	}
+
+	async archiveCard(cardId: string): Promise<TrelloCard> {
+		return this.updateCard(cardId, { closed: true });
+	}
+
+	async setDueComplete(cardId: string, complete: boolean): Promise<TrelloCard> {
+		return this.updateCard(cardId, { dueComplete: complete });
+	}
+
+	async moveCard(cardId: string, listId: string): Promise<TrelloCard> {
+		return this.updateCard(cardId, { idList: listId });
+	}
+
+	// ---- Labels on cards ----
+
+	async addLabelToCard(cardId: string, labelId: string): Promise<void> {
+		await this.request("POST", `/cards/${cardId}/idLabels`, { value: labelId });
+	}
+
+	async removeLabelFromCard(cardId: string, labelId: string): Promise<void> {
+		await this.request("DELETE", `/cards/${cardId}/idLabels/${labelId}`);
+	}
+
+	// ---- Comments ----
+
+	async addComment(cardId: string, text: string): Promise<void> {
+		await this.request("POST", `/cards/${cardId}/actions/comments`, { text });
+	}
+
+	// ---- Checklists ----
+
+	async listChecklistsOnCard(cardId: string): Promise<Checklist[]> {
+		const data = await this.request("GET", `/cards/${cardId}/checklists`, {
+			fields: "name,idCard",
+			checkItem_fields: "name,state,pos,idChecklist",
+		});
+		return data as Checklist[];
+	}
+
+	/**
+	 * Add a checklist item. If the card has no checklist yet, this creates one
+	 * named "Checklist" and adds the item to it.
+	 */
+	async addChecklistItem(cardId: string, text: string): Promise<ChecklistItem> {
+		const existing = await this.listChecklistsOnCard(cardId);
+		let checklistId: string;
+		if (existing.length === 0) {
+			const created = await this.request("POST", `/cards/${cardId}/checklists`, {
+				name: "Checklist",
+			});
+			checklistId = (created as { id: string }).id;
+		} else {
+			checklistId = existing[0].id;
+		}
+		const item = await this.request("POST", `/checklists/${checklistId}/checkItems`, {
+			name: text,
+		});
+		return item as ChecklistItem;
+	}
+}

@@ -3,7 +3,7 @@
  * Author: Dann Bleeker Pedersen
  * Created: 2026-06-12
  * Last Updated: 2026-06-12
- * Version: 1.0.0
+ * Version: 1.1.0
  * Description: The 15 Trello MCP tools. Each export is a pure async function
  *              that takes a TrelloClient + typed input and returns a JSON-safe
  *              result. Tools resolve friendly aliases at the boundary, enforce
@@ -21,6 +21,9 @@
  *                            add_comment, add_checklist_item
  *
  * Change log:
+ *   1.1.0 (2026-06-12) — Add `desc` to CardSummary so list_cards/search_cards
+ *                        return descriptions (regression vs the retired local
+ *                        Python MCP). CardDetail no longer duplicates the field.
  *   1.0.0 (2026-06-12) — Initial.
  */
 
@@ -44,7 +47,7 @@ import {
 	wipWarning,
 } from "./guards";
 
-// ---- Result shapes (deliberately compact so Claude's context isn't flooded) ----
+// ---- Result shapes ----
 
 interface BoardSummary {
 	id: string;
@@ -64,6 +67,7 @@ interface CardSummary {
 	name: string;
 	listId: string;
 	listAlias: string | null;
+	desc: string;
 	labels: string[];
 	due: string | null;
 	dueComplete: boolean;
@@ -72,7 +76,6 @@ interface CardSummary {
 }
 
 interface CardDetail extends CardSummary {
-	desc: string;
 	boardId: string;
 }
 
@@ -82,6 +85,7 @@ function summariseCard(card: TrelloCard): CardSummary {
 		name: card.name,
 		listId: card.idList,
 		listAlias: listAliasFor(card.idList),
+		desc: card.desc,
 		labels: card.labels.map((lb) => lb.name).filter((n) => n.length > 0),
 		due: card.due,
 		dueComplete: card.dueComplete,
@@ -185,7 +189,6 @@ export async function get_card(
 	return {
 		card: {
 			...summariseCard(card),
-			desc: card.desc,
 			boardId: card.idBoard,
 		},
 	};

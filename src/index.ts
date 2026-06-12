@@ -101,7 +101,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.0.0",
+		version: "1.1.0",
 	});
 
 	async init() {

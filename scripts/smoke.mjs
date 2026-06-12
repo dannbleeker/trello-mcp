@@ -44,9 +44,27 @@ const READ_ONLY_LIST_BIG_ROCKS = "5b6189409662065780670709";
 
 // ---- Setup ----
 
-const cfgPath = join(homedir(), ".claude", ".mcp.json");
-const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-const { TRELLO_API_KEY: KEY, TRELLO_TOKEN: TOKEN } = cfg.mcpServers.trello.env;
+// Prefer env vars (TRELLO_KEY / TRELLO_TOKEN), fall back to legacy ~/.claude/.mcp.json
+// where the retired local Python MCP used to keep the same credentials.
+let KEY = process.env.TRELLO_KEY ?? process.env.TRELLO_API_KEY;
+let TOKEN = process.env.TRELLO_TOKEN;
+if (!KEY || !TOKEN) {
+	const cfgPath = join(homedir(), ".claude", ".mcp.json");
+	try {
+		const text = readFileSync(cfgPath, "utf8").trim();
+		if (text) {
+			const env = JSON.parse(text)?.mcpServers?.trello?.env;
+			KEY ??= env?.TRELLO_API_KEY;
+			TOKEN ??= env?.TRELLO_TOKEN;
+		}
+	} catch {
+		/* fall through to error below */
+	}
+}
+if (!KEY || !TOKEN) {
+	console.error("Set TRELLO_KEY and TRELLO_TOKEN env vars (or restore ~/.claude/.mcp.json).");
+	process.exit(1);
+}
 
 const BASE = "https://api.trello.com/1";
 
@@ -157,10 +175,49 @@ async function main() {
 		const due = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 		await trello("PUT", `/cards/${cardId}`, { due, dueComplete: true });
 	});
+	let checkItemId = "";
 	await step("create + populate checklist", async () => {
 		const cl = await trello("POST", `/cards/${cardId}/checklists`, { name: "Checklist" });
-		await trello("POST", `/checklists/${cl.id}/checkItems`, { name: "Subtask 1" });
+		const item1 = await trello("POST", `/checklists/${cl.id}/checkItems`, { name: "Subtask 1" });
 		await trello("POST", `/checklists/${cl.id}/checkItems`, { name: "Subtask 2" });
+		checkItemId = item1.id;
+	});
+	await step("tick checklist item (set_checklist_item_state)", async () => {
+		const r = await trello("PUT", `/cards/${cardId}/checkItem/${checkItemId}`, {
+			state: "complete",
+		});
+		if (r.state !== "complete") throw new Error(`expected state=complete, got ${r.state}`);
+	});
+	await step("untick checklist item", async () => {
+		const r = await trello("PUT", `/cards/${cardId}/checkItem/${checkItemId}`, {
+			state: "incomplete",
+		});
+		if (r.state !== "incomplete") throw new Error(`expected state=incomplete, got ${r.state}`);
+	});
+
+	let attachmentId = "";
+	await step("add URL attachment", async () => {
+		const a = await trello("POST", `/cards/${cardId}/attachments`, {
+			url: "https://example.com/smoke-test",
+			name: "Smoke test attachment",
+		});
+		if (!a.id) throw new Error("no attachment id");
+		attachmentId = a.id;
+	});
+	await step("list attachments shows the URL we added", async () => {
+		const list = await trello("GET", `/cards/${cardId}/attachments`, { fields: "id,name,url" });
+		const found = list.find((a) => a.id === attachmentId);
+		if (!found) throw new Error("attachment not found in list");
+		if (found.url !== "https://example.com/smoke-test") {
+			throw new Error(`url mismatch: ${found.url}`);
+		}
+	});
+	await step("remove attachment", async () => {
+		await trello("DELETE", `/cards/${cardId}/attachments/${attachmentId}`);
+		const list = await trello("GET", `/cards/${cardId}/attachments`, { fields: "id" });
+		if (list.find((a) => a.id === attachmentId)) {
+			throw new Error("attachment still present after delete");
+		}
 	});
 	await step("add + remove BESTSELLER label", async () => {
 		const labels = await trello("GET", `/boards/${BOARD["dann-to-do"]}/labels`, { fields: "name" });

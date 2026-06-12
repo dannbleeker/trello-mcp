@@ -29,19 +29,23 @@ import type { Props } from "./utils";
 import { TrelloClient, TrelloError } from "./trello/client";
 import { GuardError } from "./trello/guards";
 import {
+	add_attachment,
 	add_checklist_item,
 	add_comment,
 	add_label,
 	archive_card,
 	create_card,
 	get_card,
+	list_attachments,
 	list_boards,
 	list_cards,
 	list_checklist_items,
 	list_lists,
 	move_card,
+	remove_attachment,
 	remove_label,
 	search_cards,
+	set_checklist_item_state,
 	set_due_complete,
 	update_card,
 } from "./trello/tools";
@@ -101,7 +105,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.1.0",
+		version: "1.2.0",
 	});
 
 	async init() {
@@ -258,6 +262,51 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 				text: z.string().min(1).describe("Item text."),
 			},
 			guarded(login, async (i: { cardId: string; text: string }) => add_checklist_item(client, i)),
+		);
+
+		this.server.tool(
+			"set_checklist_item_state",
+			"Tick or untick a single checklist item. Use list_checklist_items first to find the itemId.",
+			{
+				cardId: z.string(),
+				itemId: z.string().describe("Checklist item ID from list_checklist_items."),
+				complete: z.boolean().describe("true = tick, false = untick."),
+			},
+			guarded(login, async (i: { cardId: string; itemId: string; complete: boolean }) =>
+				set_checklist_item_state(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_attachments",
+			"List attachments on a card. Returns id, name, url, date, mimeType.",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => list_attachments(client, i)),
+		);
+
+		this.server.tool(
+			"add_attachment",
+			"Attach a URL to a card. File uploads are not supported by this tool — if you need to attach a file, host it somewhere first and pass the URL.",
+			{
+				cardId: z.string(),
+				url: z.string().url().describe("URL to attach."),
+				name: z.string().optional().describe("Friendly name for the attachment (defaults to the URL)."),
+			},
+			guarded(login, async (i: { cardId: string; url: string; name?: string }) =>
+				add_attachment(client, i),
+			),
+		);
+
+		this.server.tool(
+			"remove_attachment",
+			"Remove an attachment from a card. Use list_attachments first to find the attachmentId.",
+			{
+				cardId: z.string(),
+				attachmentId: z.string().describe("Attachment ID from list_attachments."),
+			},
+			guarded(login, async (i: { cardId: string; attachmentId: string }) =>
+				remove_attachment(client, i),
+			),
 		);
 	}
 }

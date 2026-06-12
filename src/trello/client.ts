@@ -87,6 +87,16 @@ export interface Checklist {
 	checkItems: ChecklistItem[];
 }
 
+/** Minimal attachment shape. */
+export interface TrelloAttachment {
+	id: string;
+	name: string;
+	url: string;
+	date: string;
+	bytes: number | null;
+	mimeType: string | null;
+}
+
 /**
  * Trello client. Construct once per request/session with the user's key+token.
  * Do not log the instance — `key` and `token` would leak.
@@ -308,5 +318,40 @@ export class TrelloClient {
 			name: text,
 		});
 		return item as ChecklistItem;
+	}
+
+	/** Tick / untick a single checklist item. */
+	async setChecklistItemState(
+		cardId: string,
+		itemId: string,
+		complete: boolean,
+	): Promise<ChecklistItem> {
+		const data = await this.request("PUT", `/cards/${cardId}/checkItem/${itemId}`, {
+			state: complete ? "complete" : "incomplete",
+		});
+		return data as ChecklistItem;
+	}
+
+	// ---- Attachments (URL-based) ----
+
+	async listAttachments(cardId: string): Promise<TrelloAttachment[]> {
+		const data = await this.request("GET", `/cards/${cardId}/attachments`, {
+			fields: "id,name,url,date,bytes,mimeType",
+		});
+		return data as TrelloAttachment[];
+	}
+
+	async addAttachment(
+		cardId: string,
+		input: { url: string; name?: string },
+	): Promise<TrelloAttachment> {
+		const params: Record<string, string> = { url: input.url };
+		if (input.name) params.name = input.name;
+		const data = await this.request("POST", `/cards/${cardId}/attachments`, params);
+		return data as TrelloAttachment;
+	}
+
+	async removeAttachment(cardId: string, attachmentId: string): Promise<void> {
+		await this.request("DELETE", `/cards/${cardId}/attachments/${attachmentId}`);
 	}
 }

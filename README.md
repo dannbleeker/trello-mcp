@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (15)
+## Tools (19)
 
 **Reads**
 
@@ -12,10 +12,11 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 |---|---|
 | `list_boards` | All open boards the authenticated Trello user belongs to |
 | `list_lists` | Lists on a board (alias or ID) |
-| `list_cards` | Cards on a list or board; optional `label` / `staleDays` filters |
-| `get_card` | Full details (incl. description) for one card |
-| `search_cards` | Fuzzy name search, scoped or unscoped |
+| `list_cards` | Cards on a list or board; includes `desc`; optional `label` / `staleDays` filters |
+| `get_card` | Full details for one card |
+| `search_cards` | Fuzzy name search, scoped or unscoped; includes `desc` |
 | `list_checklist_items` | Checklists + items on a card |
+| `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
 
 **Writes**
 
@@ -26,10 +27,13 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `update_card` | Edit name / description / due date |
 | `archive_card` | Soft archive (`closed=true`). Hard delete is not implemented. |
 | `set_due_complete` | Mark due date as done (triggers Butler automations) |
+| `set_checklist_item_state` | Tick / untick a single checklist item |
 | `add_label` | Apply a label by ID or name |
 | `remove_label` | Remove a label by ID or name |
 | `add_comment` | Append a comment to a card |
 | `add_checklist_item` | Append an item to the card's checklist |
+| `add_attachment` | Attach a URL to a card (file uploads not supported — host the file first) |
+| `remove_attachment` | Remove an attachment from a card |
 
 ## Safety guards
 

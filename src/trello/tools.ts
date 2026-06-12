@@ -3,8 +3,8 @@
  * Author: Dann Bleeker Pedersen
  * Created: 2026-06-12
  * Last Updated: 2026-06-12
- * Version: 1.1.0
- * Description: The 15 Trello MCP tools. Each export is a pure async function
+ * Version: 1.2.0
+ * Description: The 19 Trello MCP tools. Each export is a pure async function
  *              that takes a TrelloClient + typed input and returns a JSON-safe
  *              result. Tools resolve friendly aliases at the boundary, enforce
  *              guards, and emit WIP warnings in their response shape so Claude
@@ -13,14 +13,18 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (15):
- *                Reads (6):  list_boards, list_lists, list_cards, get_card,
- *                            search_cards, list_checklist_items
- *                Writes (9): create_card, move_card, update_card, archive_card,
- *                            set_due_complete, add_label, remove_label,
- *                            add_comment, add_checklist_item
+ *              Tool surface (19):
+ *                Reads (7):   list_boards, list_lists, list_cards, get_card,
+ *                             search_cards, list_checklist_items, list_attachments
+ *                Writes (12): create_card, move_card, update_card, archive_card,
+ *                             set_due_complete, set_checklist_item_state,
+ *                             add_label, remove_label, add_comment,
+ *                             add_checklist_item, add_attachment, remove_attachment
  *
  * Change log:
+ *   1.2.0 (2026-06-12) — Add set_checklist_item_state (tick/untick individual
+ *                        checklist items) and 3 attachment tools (list/add/remove).
+ *                        Attachments are URL-only; file uploads not supported.
  *   1.1.0 (2026-06-12) — Add `desc` to CardSummary so list_cards/search_cards
  *                        return descriptions (regression vs the retired local
  *                        Python MCP). CardDetail no longer duplicates the field.
@@ -352,6 +356,53 @@ export async function add_checklist_item(
 	await assertCardWritable(client, input.cardId);
 	const item = await client.addChecklistItem(input.cardId, input.text);
 	return { item: { id: item.id, name: item.name, state: item.state } };
+}
+
+/** set_checklist_item_state — tick/untick a single checklist item. */
+export async function set_checklist_item_state(
+	client: TrelloClient,
+	input: { cardId: string; itemId: string; complete: boolean },
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete" } }> {
+	await assertCardWritable(client, input.cardId);
+	const item = await client.setChecklistItemState(input.cardId, input.itemId, input.complete);
+	return { item: { id: item.id, name: item.name, state: item.state } };
+}
+
+/** list_attachments — attachments on a card (id, name, url, date, mimeType). */
+export async function list_attachments(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ attachments: { id: string; name: string; url: string; date: string; mimeType: string | null }[] }> {
+	const attachments = await client.listAttachments(input.cardId);
+	return {
+		attachments: attachments.map((a) => ({
+			id: a.id,
+			name: a.name,
+			url: a.url,
+			date: a.date,
+			mimeType: a.mimeType,
+		})),
+	};
+}
+
+/** add_attachment — attach a URL to a card (file uploads not supported). */
+export async function add_attachment(
+	client: TrelloClient,
+	input: { cardId: string; url: string; name?: string },
+): Promise<{ attachment: { id: string; name: string; url: string } }> {
+	await assertCardWritable(client, input.cardId);
+	const a = await client.addAttachment(input.cardId, { url: input.url, name: input.name });
+	return { attachment: { id: a.id, name: a.name, url: a.url } };
+}
+
+/** remove_attachment — remove an attachment from a card by attachment ID. */
+export async function remove_attachment(
+	client: TrelloClient,
+	input: { cardId: string; attachmentId: string },
+): Promise<{ ok: true }> {
+	await assertCardWritable(client, input.cardId);
+	await client.removeAttachment(input.cardId, input.attachmentId);
+	return { ok: true };
 }
 
 // ---- Helpers ----

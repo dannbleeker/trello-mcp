@@ -219,6 +219,37 @@ async function main() {
 			throw new Error("attachment still present after delete");
 		}
 	});
+
+	// add_file_attachment (multipart file upload): mirrors what the Worker does
+	// at runtime — build FormData with a Blob and POST to /attachments.
+	let fileAttachmentId = "";
+	await step("add_file_attachment: multipart file upload", async () => {
+		const text = "Hello from the smoke test.\nThis was uploaded via multipart.\n";
+		const blob = new Blob([text], { type: "text/markdown" });
+		const form = new FormData();
+		form.append("name", "smoke-upload.md");
+		form.append("file", blob, "smoke-upload.md");
+		const url = new URL(`${BASE}/cards/${cardId}/attachments`);
+		url.searchParams.set("key", KEY);
+		url.searchParams.set("token", TOKEN);
+		const r = await fetch(url, { method: "POST", body: form });
+		if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+		const a = await r.json();
+		if (!a.id) throw new Error("no attachment id");
+		if (a.url?.startsWith("http") === false) throw new Error(`url looks wrong: ${a.url}`);
+		fileAttachmentId = a.id;
+	});
+	await step("list attachments shows the uploaded file", async () => {
+		const list = await trello("GET", `/cards/${cardId}/attachments`, { fields: "id,name,bytes,mimeType" });
+		const found = list.find((a) => a.id === fileAttachmentId);
+		if (!found) throw new Error("uploaded file not in attachments list");
+		if (found.name !== "smoke-upload.md") throw new Error(`name mismatch: ${found.name}`);
+		if (!found.bytes || found.bytes < 10) throw new Error(`bytes looks wrong: ${found.bytes}`);
+	});
+	await step("remove uploaded file attachment", async () => {
+		await trello("DELETE", `/cards/${cardId}/attachments/${fileAttachmentId}`);
+	});
+
 	await step("add + remove BESTSELLER label", async () => {
 		const labels = await trello("GET", `/boards/${BOARD["dann-to-do"]}/labels`, { fields: "name" });
 		const bs = labels.find((l) => l.name === "BESTSELLER");

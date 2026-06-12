@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 15 Trello tools.
+ *              GitHub-login allowlist, and registers the 20 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,8 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.3.0 (2026-06-12) — Add add_file_attachment (base64 → multipart upload).
+ *   1.2.0 (2026-06-12) — Add set_checklist_item_state + 3 URL-attachment tools (19 tools).
  *   1.0.0 (2026-06-12) — Initial; 15 tools, allowlist=[dannbleeker].
  */
 
@@ -32,6 +34,7 @@ import {
 	add_attachment,
 	add_checklist_item,
 	add_comment,
+	add_file_attachment,
 	add_label,
 	archive_card,
 	create_card,
@@ -105,7 +108,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.2.0",
+		version: "1.3.0",
 	});
 
 	async init() {
@@ -286,7 +289,7 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 
 		this.server.tool(
 			"add_attachment",
-			"Attach a URL to a card. File uploads are not supported by this tool — if you need to attach a file, host it somewhere first and pass the URL.",
+			"Attach a URL to a card. For real file uploads, use add_file_attachment instead.",
 			{
 				cardId: z.string(),
 				url: z.string().url().describe("URL to attach."),
@@ -294,6 +297,20 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 			guarded(login, async (i: { cardId: string; url: string; name?: string }) =>
 				add_attachment(client, i),
+			),
+		);
+
+		this.server.tool(
+			"add_file_attachment",
+			"Upload an actual file (not a URL) as a card attachment. Pass the file as base64 in `contentBase64`; the server decodes it and posts multipart to Trello. Hard cap 10 MB after decoding. For larger files, host them somewhere and use add_attachment with the URL.",
+			{
+				cardId: z.string(),
+				filename: z.string().min(1).describe("File name as it should appear on the card, including extension (e.g. \"weekly-review.md\")."),
+				mimeType: z.string().optional().describe("MIME type (e.g. \"text/markdown\", \"application/pdf\"). Defaults to application/octet-stream."),
+				contentBase64: z.string().min(1).describe("File contents, base64-encoded. `data:...;base64,` prefix is tolerated."),
+			},
+			guarded(login, async (i: { cardId: string; filename: string; mimeType?: string; contentBase64: string }) =>
+				add_file_attachment(client, i),
 			),
 		);
 

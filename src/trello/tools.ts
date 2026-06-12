@@ -13,15 +13,20 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (19):
+ *              Tool surface (20):
  *                Reads (7):   list_boards, list_lists, list_cards, get_card,
  *                             search_cards, list_checklist_items, list_attachments
- *                Writes (12): create_card, move_card, update_card, archive_card,
+ *                Writes (13): create_card, move_card, update_card, archive_card,
  *                             set_due_complete, set_checklist_item_state,
  *                             add_label, remove_label, add_comment,
- *                             add_checklist_item, add_attachment, remove_attachment
+ *                             add_checklist_item, add_attachment,
+ *                             add_file_attachment, remove_attachment
  *
  * Change log:
+ *   1.3.0 (2026-06-12) — Add add_file_attachment for real file uploads via
+ *                        base64 (multipart under the hood). Hard cap at 10 MB
+ *                        decoded — past that, host the file and use
+ *                        add_attachment with a URL instead.
  *   1.2.0 (2026-06-12) — Add set_checklist_item_state (tick/untick individual
  *                        checklist items) and 3 attachment tools (list/add/remove).
  *                        Attachments are URL-only; file uploads not supported.
@@ -385,7 +390,7 @@ export async function list_attachments(
 	};
 }
 
-/** add_attachment — attach a URL to a card (file uploads not supported). */
+/** add_attachment — attach a URL to a card. */
 export async function add_attachment(
 	client: TrelloClient,
 	input: { cardId: string; url: string; name?: string },
@@ -393,6 +398,50 @@ export async function add_attachment(
 	await assertCardWritable(client, input.cardId);
 	const a = await client.addAttachment(input.cardId, { url: input.url, name: input.name });
 	return { attachment: { id: a.id, name: a.name, url: a.url } };
+}
+
+const FILE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * add_file_attachment — upload an actual file (not a URL). The caller passes
+ * the file as base64 in `contentBase64`; we decode it server-side and post
+ * multipart to Trello.
+ *
+ * Hard cap at 10 MB decoded. The cap exists because anything larger is
+ * (a) over Trello's free-tier limit and (b) impractical to round-trip through
+ * an MCP tool argument anyway — host the file and use add_attachment with a
+ * URL instead.
+ */
+export async function add_file_attachment(
+	client: TrelloClient,
+	input: { cardId: string; filename: string; mimeType?: string; contentBase64: string },
+): Promise<{ attachment: { id: string; name: string; url: string; bytes: number | null; mimeType: string | null } }> {
+	await assertCardWritable(client, input.cardId);
+
+	const bytes = decodeBase64(input.contentBase64);
+	if (bytes.length === 0) {
+		throw new GuardError("contentBase64 decoded to 0 bytes — nothing to upload.");
+	}
+	if (bytes.length > FILE_ATTACHMENT_MAX_BYTES) {
+		throw new GuardError(
+			`File is ${bytes.length} bytes; this tool caps uploads at ${FILE_ATTACHMENT_MAX_BYTES} bytes (10 MB). Host the file and use add_attachment with a URL instead.`,
+		);
+	}
+
+	const a = await client.addFileAttachment(input.cardId, {
+		bytes,
+		filename: input.filename,
+		mimeType: input.mimeType,
+	});
+	return {
+		attachment: {
+			id: a.id,
+			name: a.name,
+			url: a.url,
+			bytes: a.bytes,
+			mimeType: a.mimeType,
+		},
+	};
 }
 
 /** remove_attachment — remove an attachment from a card by attachment ID. */
@@ -406,6 +455,26 @@ export async function remove_attachment(
 }
 
 // ---- Helpers ----
+
+/**
+ * Decode a base64 string to a Uint8Array. Works in Workers (atob is global)
+ * and Node 18+ (atob is also global). Tolerates whitespace/newlines and the
+ * `data:...;base64,` URL prefix so callers can paste either form.
+ */
+function decodeBase64(input: string): Uint8Array {
+	let s = input.trim();
+	const commaIdx = s.indexOf(",");
+	if (s.startsWith("data:") && commaIdx > 0) s = s.slice(commaIdx + 1);
+	s = s.replace(/\s+/g, "");
+	try {
+		const bin = atob(s);
+		const out = new Uint8Array(bin.length);
+		for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+		return out;
+	} catch {
+		throw new GuardError("contentBase64 is not valid base64.");
+	}
+}
 
 /** Resolve a label by ID-or-name, scoped to the card's board. Throws GuardError if not found. */
 async function resolveLabel(

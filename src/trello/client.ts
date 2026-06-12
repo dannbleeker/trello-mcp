@@ -10,6 +10,7 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.3.0 (2026-06-12) — Add addFileAttachment (real file upload via multipart).
  *   1.0.0 (2026-06-12) — Initial.
  */
 
@@ -349,6 +350,54 @@ export class TrelloClient {
 		if (input.name) params.name = input.name;
 		const data = await this.request("POST", `/cards/${cardId}/attachments`, params);
 		return data as TrelloAttachment;
+	}
+
+	/**
+	 * Upload a real file as a card attachment. `bytes` is the raw file payload
+	 * (the tool layer decodes base64 from the caller's input). Posts
+	 * multipart/form-data with the standard `file` field name. Auth stays on
+	 * the query string so we don't have to mix it into the form body.
+	 *
+	 * Retries 429/5xx the same way request() does, but with the form rebuilt
+	 * each attempt (Blobs are single-shot).
+	 */
+	async addFileAttachment(
+		cardId: string,
+		input: { bytes: Uint8Array; filename: string; mimeType?: string },
+	): Promise<TrelloAttachment> {
+		const u = new URL(`${BASE}/cards/${cardId}/attachments`);
+		u.searchParams.set("key", this.key);
+		u.searchParams.set("token", this.token);
+
+		let attempt = 0;
+		while (true) {
+			attempt += 1;
+			const form = new FormData();
+			form.append("name", input.filename);
+			form.append(
+				"file",
+				new Blob([input.bytes], { type: input.mimeType ?? "application/octet-stream" }),
+				input.filename,
+			);
+
+			const resp = await fetch(u.toString(), { method: "POST", body: form });
+			if (resp.ok) {
+				const ct = resp.headers.get("content-type") ?? "";
+				return (ct.includes("application/json") ? await resp.json() : null) as TrelloAttachment;
+			}
+
+			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
+				const retryAfter = resp.headers.get("Retry-After");
+				const delayMs = retryAfter && /^\d+$/.test(retryAfter)
+					? Math.min(Number(retryAfter) * 1000, RETRY_MAX_DELAY_MS)
+					: Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+				await new Promise((r) => setTimeout(r, delayMs));
+				continue;
+			}
+
+			const body = await resp.text();
+			throw new TrelloError(resp.status, body);
+		}
 	}
 
 	async removeAttachment(cardId: string, attachmentId: string): Promise<void> {

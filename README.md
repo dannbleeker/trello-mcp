@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (34)
+## Tools (35)
 
 **Reads**
 
@@ -40,6 +40,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `add_label` | Apply a label by ID or name |
 | `remove_label` | Remove a label by ID or name |
 | `create_label` | Create a new label on a board (palette token or null for no color) |
+| `delete_label` | Delete a label board-wide (destructive — strips it from every card carrying it) |
 | `add_comment` | Append a comment to a card |
 | `add_checklist_item` | Append an item to the card's checklist |
 | `remove_checklist_item` | Remove an item from a checklist |
@@ -135,7 +136,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 34 tool implementations (testable in plain Node)
+    tools.ts                — 35 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

@@ -13,24 +13,27 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (34):
+ *              Tool surface (35):
  *                Reads (13):  list_boards, list_lists, list_cards,
  *                             list_cards_by_list, list_cards_due, get_card,
  *                             search_cards, search_cards_advanced,
  *                             list_checklist_items, list_attachments,
  *                             list_labels, read_comments, card_activity_log,
  *                             snooze_read
- *                Writes (21): create_card, move_card, update_card, archive_card,
+ *                Writes (22): create_card, move_card, update_card, archive_card,
  *                             set_due_complete, set_card_position, set_start_date,
  *                             set_checklist_item_state, add_label, remove_label,
- *                             create_label, add_comment, add_checklist_item,
- *                             remove_checklist_item,
+ *                             create_label, delete_label, add_comment,
+ *                             add_checklist_item, remove_checklist_item,
  *                             convert_checklist_item_to_card,
  *                             add_attachment, add_file_attachment,
  *                             remove_attachment, batch_add_label,
  *                             batch_move_cards
  *
  * Change log:
+ *   1.4.1 (2026-06-13) — Add delete_label (board-wide, destructive) for
+ *                        symmetry with create_label. Removes the label from
+ *                        every card that carries it.
  *   1.4.0 (2026-06-13) — Add 14 new tools spanning reflect/engage GTD phases:
  *                        list_cards_due, list_cards_by_list, search_cards_advanced,
  *                        read_comments, list_labels, create_label,
@@ -812,6 +815,21 @@ export async function create_label(
 	}
 	const created = await client.createLabel(boardId, input.name, color);
 	return { label: { id: created.id, name: created.name, color: created.color } };
+}
+
+/**
+ * delete_label — board-wide delete. `label` accepts an ID or a name (resolved
+ * against the named board). Destructive: every card that carried this label
+ * loses it. Recovery is recreate + reapply.
+ */
+export async function delete_label(
+	client: TrelloClient,
+	input: { board?: string; label: string },
+): Promise<{ deleted: { id: string; name: string; color: string } }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const resolved = await resolveLabel(client, boardId, input.label);
+	await client.deleteLabel(resolved.id);
+	return { deleted: resolved };
 }
 
 /** remove_checklist_item — remove one item from a checklist. */

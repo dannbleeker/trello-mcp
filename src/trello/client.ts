@@ -10,6 +10,8 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.4.1 (2026-06-13) — Add deleteLabel (DELETE /labels/{id}) — symmetric with createLabel,
+ *                        used by the delete_label tool.
  *   1.4.0 (2026-06-13) — Add start + dueReminder to TrelloCard. New types: TrelloAction,
  *                        TrelloComment. New methods: listActions, listComments, createLabel,
  *                        removeChecklistItem, convertChecklistItemToCard, setCardPosition,
@@ -364,6 +366,15 @@ export class TrelloClient {
 		params.color = color === null || color === undefined ? "" : color;
 		const data = await this.request("POST", "/labels", params);
 		return data as TrelloLabel;
+	}
+
+	/**
+	 * Delete a label outright. Board-wide, destructive — removes the label
+	 * from every card that carries it. Recovery requires recreating the label
+	 * and re-applying it everywhere.
+	 */
+	async deleteLabel(labelId: string): Promise<void> {
+		await this.request("DELETE", `/labels/${labelId}`);
 	}
 
 	// ---- Comments ----

@@ -379,9 +379,15 @@ async function main() {
 		if (!Array.isArray(snoozed)) throw new Error("snooze filter failed");
 	});
 
-	// Cleanup the test label
-	await step("cleanup: delete test label", async () => {
-		if (createdLabelId) await trello("DELETE", `/labels/${createdLabelId}`);
+	// delete_label (1.4.1): real DELETE /labels/{id} round-trip
+	await step("delete_label: created label is gone afterwards", async () => {
+		if (!createdLabelId) throw new Error("no test label to delete (create_label step skipped?)");
+		await trello("DELETE", `/labels/${createdLabelId}`);
+		const labels = await trello("GET", `/boards/${BOARD["dann-to-do"]}/labels`, { fields: "id" });
+		if (labels.find((l) => l.id === createdLabelId)) {
+			throw new Error("label still on the board after DELETE");
+		}
+		createdLabelId = ""; // prevent the legacy cleanup step from re-deleting
 	});
 
 	// 7. Cleanup

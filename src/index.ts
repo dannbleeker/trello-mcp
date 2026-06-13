@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 34 Trello tools.
+ *              GitHub-login allowlist, and registers the 35 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,7 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.4.1 (2026-06-13) — Add delete_label (board-wide, destructive). Total: 35.
  *   1.4.0 (2026-06-13) — Add 14 reflect/engage tools (due/snooze reads, advanced
  *                        search, labels, checklist ops, batch ops, activity log).
  *                        Total tool surface: 34.
@@ -46,6 +47,7 @@ import {
 	convert_checklist_item_to_card,
 	create_card,
 	create_label,
+	delete_label,
 	get_card,
 	list_attachments,
 	list_boards,
@@ -125,7 +127,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.4.0",
+		version: "1.4.1",
 	});
 
 	async init() {
@@ -416,6 +418,18 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 			guarded(login, async (i: { board?: string; name: string; color?: string | null }) =>
 				create_label(client, i),
+			),
+		);
+
+		this.server.tool(
+			"delete_label",
+			"Delete a label board-wide. Destructive: every card that carries this label loses it. `label` accepts the label ID or name; `board` defaults to dann-to-do.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+				label: z.string().describe("Label ID or name."),
+			},
+			guarded(login, async (i: { board?: string; label: string }) =>
+				delete_label(client, i),
 			),
 		);
 

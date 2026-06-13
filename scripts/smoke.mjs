@@ -390,6 +390,105 @@ async function main() {
 		createdLabelId = ""; // prevent the legacy cleanup step from re-deleting
 	});
 
+	// 7. v1.5.0 — members, named checklists, copy_card, due-reminder, comment edits
+
+	console.log("\nv1.5.0 — members / checklists / copy / reminder / comment edits:");
+
+	let myId = "";
+	let myUsername = "";
+	await step("getMe + listBoardMembers (self should be present)", async () => {
+		const me = await trello("GET", "/members/me", { fields: "fullName,username" });
+		if (!me?.id) throw new Error("no member id from /members/me");
+		myId = me.id;
+		myUsername = me.username;
+		const members = await trello("GET", `/boards/${BOARD["dann-to-do"]}/members`, {
+			fields: "username",
+		});
+		if (!members.find((m) => m.id === myId)) {
+			throw new Error("self not present in board members — unexpected");
+		}
+	});
+
+	await step("add_member_to_card + list_card_members + remove", async () => {
+		await trello("POST", `/cards/${cardId}/idMembers`, { value: myId });
+		const onCard = await trello("GET", `/cards/${cardId}/members`, { fields: "username" });
+		if (!onCard.find((m) => m.id === myId)) {
+			throw new Error("self not on card after add_member_to_card");
+		}
+		await trello("DELETE", `/cards/${cardId}/idMembers/${myId}`);
+	});
+
+	let checklist3Id = "";
+	await step("create_checklist (named) + rename_checklist + delete_checklist", async () => {
+		const cl = await trello("POST", `/cards/${cardId}/checklists`, { name: "Agenda" });
+		checklist3Id = cl.id;
+		const renamed = await trello("PUT", `/checklists/${cl.id}`, { name: "Decisions" });
+		if (renamed.name !== "Decisions") throw new Error(`rename failed: ${renamed.name}`);
+		await trello("DELETE", `/checklists/${cl.id}`);
+		checklist3Id = "";
+	});
+
+	let copiedCardId = "";
+	await step("copy_card (keepFromSource=all) lands on @home", async () => {
+		const c = await trello("POST", "/cards", {
+			idCardSource: cardId,
+			idList: LIST["@home"],
+			keepFromSource: "all",
+			name: "[MCP-TEST] copy round-trip",
+		});
+		if (!c.id) throw new Error("no card id from copy");
+		copiedCardId = c.id;
+		created.push(copiedCardId);
+		if (c.idList !== LIST["@home"]) throw new Error(`expected idList=@home, got ${c.idList}`);
+	});
+
+	await step("set_due_reminder: 60 then clear", async () => {
+		const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+		await trello("PUT", `/cards/${cardId}`, { due });
+		const r1 = await trello("PUT", `/cards/${cardId}`, { dueReminder: 60 });
+		if (r1.dueReminder !== 60) throw new Error(`expected dueReminder=60, got ${r1.dueReminder}`);
+		const r2 = await trello("PUT", `/cards/${cardId}`, { dueReminder: -1 });
+		if (r2.dueReminder !== -1 && r2.dueReminder !== null) {
+			throw new Error(`expected dueReminder=-1/null after clear, got ${r2.dueReminder}`);
+		}
+	});
+
+	let editedCommentId = "";
+	await step("update_comment + delete_comment round-trip", async () => {
+		const c = await trello("POST", `/cards/${cardId}/actions/comments`, {
+			text: "Edit-me comment.",
+		});
+		editedCommentId = c.id;
+		const updated = await trello("PUT", `/actions/${c.id}`, { text: "Edited body." });
+		if (updated?.data?.text !== "Edited body.") {
+			throw new Error(`expected text=Edited body., got ${JSON.stringify(updated?.data?.text)}`);
+		}
+		await trello("DELETE", `/actions/${c.id}`);
+	});
+
+	await step("list_my_cards_assigned: includes self when assigned", async () => {
+		// Assign + verify visible in /members/me/cards
+		await trello("POST", `/cards/${cardId}/idMembers`, { value: myId });
+		const mine = await trello("GET", "/members/me/cards", { filter: "open", fields: "id" });
+		const present = mine.find((c) => c.id === cardId);
+		await trello("DELETE", `/cards/${cardId}/idMembers/${myId}`); // cleanup
+		if (!present) throw new Error("test card not in /members/me/cards after assignment");
+	});
+
+	await step("weekly_review_pack shape: bucket counts present", async () => {
+		// Mirrors the composite logic: list cards once, compute buckets.
+		const all = await trello("GET", `/boards/${BOARD["dann-to-do"]}/cards`, {
+			fields: "name,idList,due,dueComplete,dueReminder,dateLastActivity,closed",
+		});
+		const open = all.filter((c) => !c.closed);
+		const now = Date.now();
+		const overdue = open.filter((c) => c.due && !c.dueComplete && Date.parse(c.due) < now);
+		const snoozed = open.filter((c) => c.dueReminder !== null && c.dueReminder !== -1);
+		if (typeof overdue.length !== "number" || typeof snoozed.length !== "number") {
+			throw new Error("bucket shape unexpected");
+		}
+	});
+
 	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {

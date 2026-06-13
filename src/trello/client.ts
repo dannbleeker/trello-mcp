@@ -10,6 +10,11 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.5.0 (2026-06-13) — New TrelloMember type. idMembers added to TrelloCard. New methods:
+ *                        getMe, listBoardMembers, listCardMembers, addMemberToCard,
+ *                        removeMemberFromCard, listMyAssignedCards, createChecklist,
+ *                        renameChecklist, deleteChecklist, copyCard, setDueReminder,
+ *                        updateComment, deleteComment. updateCard learns dueReminder.
  *   1.4.1 (2026-06-13) — Add deleteLabel (DELETE /labels/{id}) — symmetric with createLabel,
  *                        used by the delete_label tool.
  *   1.4.0 (2026-06-13) — Add start + dueReminder to TrelloCard. New types: TrelloAction,
@@ -55,10 +60,19 @@ export interface TrelloCard {
 	 * no native snooze in its REST API; that's a Power-Up concern.
 	 */
 	dueReminder: number | null;
+	idMembers: string[];
 	url: string;
 	dateLastActivity: string;
 	closed: boolean;
 	pos?: number;
+}
+
+/** Minimal Trello member shape. */
+export interface TrelloMember {
+	id: string;
+	fullName: string;
+	username: string;
+	initials: string;
 }
 
 /** Minimal list shape. */
@@ -186,6 +200,50 @@ export class TrelloClient {
 		}
 	}
 
+	// ---- Members ----
+
+	/** The authenticated user. Useful for resolving "me" in list_my_cards_assigned. */
+	async getMe(): Promise<TrelloMember> {
+		const data = await this.request("GET", "/members/me", {
+			fields: "fullName,username,initials",
+		});
+		return data as TrelloMember;
+	}
+
+	async listBoardMembers(boardId: string): Promise<TrelloMember[]> {
+		const data = await this.request("GET", `/boards/${boardId}/members`, {
+			fields: "fullName,username,initials",
+		});
+		return data as TrelloMember[];
+	}
+
+	async listCardMembers(cardId: string): Promise<TrelloMember[]> {
+		const data = await this.request("GET", `/cards/${cardId}/members`, {
+			fields: "fullName,username,initials",
+		});
+		return data as TrelloMember[];
+	}
+
+	async addMemberToCard(cardId: string, memberId: string): Promise<void> {
+		await this.request("POST", `/cards/${cardId}/idMembers`, { value: memberId });
+	}
+
+	async removeMemberFromCard(cardId: string, memberId: string): Promise<void> {
+		await this.request("DELETE", `/cards/${cardId}/idMembers/${memberId}`);
+	}
+
+	/**
+	 * Cards where the authenticated user is a member. Trello's /members/me/cards
+	 * is cross-board and respects board membership — perfect for "my dashboard".
+	 */
+	async listMyAssignedCards(): Promise<TrelloCard[]> {
+		const data = await this.request("GET", "/members/me/cards", {
+			filter: "open",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+		});
+		return data as TrelloCard[];
+	}
+
 	// ---- Boards ----
 
 	async listMyBoards(): Promise<TrelloBoard[]> {
@@ -226,14 +284,14 @@ export class TrelloClient {
 
 	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/lists/${listId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard[];
 	}
 
 	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/boards/${boardId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard[];
 	}
@@ -242,7 +300,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
 			cards_limit: 50,
 			partial: true,
 		};
@@ -266,7 +324,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query: input.query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
 			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
 			partial: true,
 		};
@@ -278,7 +336,7 @@ export class TrelloClient {
 
 	async getCard(cardId: string): Promise<TrelloCard> {
 		const data = await this.request("GET", `/cards/${cardId}`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard;
 	}
@@ -310,6 +368,7 @@ export class TrelloClient {
 		closed?: boolean;
 		dueComplete?: boolean;
 		pos?: string | number;
+		dueReminder?: number | null;
 	}): Promise<TrelloCard> {
 		const params: Record<string, string | number | boolean | undefined> = {};
 		if (input.name !== undefined) params.name = input.name;
@@ -320,6 +379,8 @@ export class TrelloClient {
 		if (input.closed !== undefined) params.closed = input.closed;
 		if (input.dueComplete !== undefined) params.dueComplete = input.dueComplete;
 		if (input.pos !== undefined) params.pos = input.pos;
+		// dueReminder: -1 = no reminder. We forward exactly what the caller asks.
+		if (input.dueReminder !== undefined) params.dueReminder = input.dueReminder ?? -1;
 		const data = await this.request("PUT", `/cards/${cardId}`, params);
 		return data as TrelloCard;
 	}
@@ -344,6 +405,37 @@ export class TrelloClient {
 	/** Set the start date (or pass null to clear it). */
 	async setStartDate(cardId: string, start: string | null): Promise<TrelloCard> {
 		return this.updateCard(cardId, { start });
+	}
+
+	/**
+	 * Set the reminder offset. `minutes` is "fire this many minutes before due".
+	 * 0 = at due time. Pass null to clear (sent as -1 to Trello).
+	 */
+	async setDueReminder(cardId: string, minutes: number | null): Promise<TrelloCard> {
+		return this.updateCard(cardId, { dueReminder: minutes });
+	}
+
+	/**
+	 * Copy a card to a target list. `keepFromSource` is comma-separated of:
+	 * attachments,checklists,comments,due,start,labels,members,stickers — or "all".
+	 * Defaults to "all" so the duplicate mirrors the source.
+	 */
+	async copyCard(input: {
+		sourceCardId: string;
+		idList: string;
+		name?: string;
+		keepFromSource?: string;
+		pos?: string | number;
+	}): Promise<TrelloCard> {
+		const params: Record<string, string | number | undefined> = {
+			idCardSource: input.sourceCardId,
+			idList: input.idList,
+			keepFromSource: input.keepFromSource ?? "all",
+		};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.pos !== undefined) params.pos = input.pos;
+		const data = await this.request("POST", "/cards", params);
+		return data as TrelloCard;
 	}
 
 	// ---- Labels on cards ----
@@ -383,6 +475,17 @@ export class TrelloClient {
 		await this.request("POST", `/cards/${cardId}/actions/comments`, { text });
 	}
 
+	/** Edit an existing comment (Trello stores comments as actions). */
+	async updateComment(actionId: string, text: string): Promise<TrelloAction> {
+		const data = await this.request("PUT", `/actions/${actionId}`, { text });
+		return data as TrelloAction;
+	}
+
+	/** Delete an existing comment by its action id. */
+	async deleteComment(actionId: string): Promise<void> {
+		await this.request("DELETE", `/actions/${actionId}`);
+	}
+
 	// ---- Checklists ----
 
 	async listChecklistsOnCard(cardId: string): Promise<Checklist[]> {
@@ -391,6 +494,23 @@ export class TrelloClient {
 			checkItem_fields: "name,state,pos,idChecklist",
 		});
 		return data as Checklist[];
+	}
+
+	/** Create a new checklist on a card with an explicit name. */
+	async createChecklist(cardId: string, name: string): Promise<Checklist> {
+		const data = await this.request("POST", `/cards/${cardId}/checklists`, { name });
+		return data as Checklist;
+	}
+
+	/** Rename a checklist (the PUT response includes the updated shape). */
+	async renameChecklist(checklistId: string, name: string): Promise<Checklist> {
+		const data = await this.request("PUT", `/checklists/${checklistId}`, { name });
+		return data as Checklist;
+	}
+
+	/** Delete a checklist outright (removes all its items). */
+	async deleteChecklist(checklistId: string): Promise<void> {
+		await this.request("DELETE", `/checklists/${checklistId}`);
 	}
 
 	/**

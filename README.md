@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (35)
+## Tools (48)
 
 **Reads**
 
@@ -21,19 +21,25 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `list_checklist_items` | Checklists + items on a card |
 | `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
 | `list_labels` | All labels on a board (id, name, color) |
+| `list_board_members` | Everyone with access to a board (id, fullName, username, initials) |
+| `list_card_members` | Members assigned to one card |
+| `list_my_cards_assigned` | Cross-board "everything assigned to me"; optional board filter |
 | `read_comments` | Chronological comment thread on a card |
 | `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
 | `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
+| `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, snoozed, big-rocks |
 
 **Writes**
 
 | Tool | Purpose |
 |---|---|
 | `create_card` | New card on a list (with guards + WIP warning) |
+| `copy_card` | Duplicate a card to a target list; `keepFromSource` picks what carries over |
 | `move_card` | Move card between lists (guards source AND destination) |
 | `update_card` | Edit name / description / due date |
 | `archive_card` | Soft archive (`closed=true`). Hard delete is not implemented. |
 | `set_due_complete` | Mark due date as done (triggers Butler automations) |
+| `set_due_reminder` | Set minutes-before-due reminder offset; null clears |
 | `set_card_position` | Move a card to top / bottom / numeric position within its list |
 | `set_start_date` | Set or clear a card's start date (ISO 8601 or null) |
 | `set_checklist_item_state` | Tick / untick a single checklist item |
@@ -41,9 +47,16 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `remove_label` | Remove a label by ID or name |
 | `create_label` | Create a new label on a board (palette token or null for no color) |
 | `delete_label` | Delete a label board-wide (destructive — strips it from every card carrying it) |
+| `add_member_to_card` | Assign a member (ID, username, or full name resolved on the card's board) |
+| `remove_member_from_card` | Unassign a member |
 | `add_comment` | Append a comment to a card |
+| `update_comment` | Edit an existing comment (by action ID from `read_comments`) |
+| `delete_comment` | Delete an existing comment |
 | `add_checklist_item` | Append an item to the card's checklist |
 | `remove_checklist_item` | Remove an item from a checklist |
+| `create_checklist` | Create a new named checklist (e.g. "Agenda", "Decisions") |
+| `rename_checklist` | Change a checklist's name |
+| `delete_checklist` | Delete a checklist and all its items |
 | `convert_checklist_item_to_card` | Promote a checklist item to a standalone card; optional `targetList` |
 | `add_attachment` | Attach a URL to a card |
 | `add_file_attachment` | Upload a real file (base64 → multipart). 10 MB hard cap — for larger files, host the file and use `add_attachment` with a URL. |
@@ -136,7 +149,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 35 tool implementations (testable in plain Node)
+    tools.ts                — 48 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

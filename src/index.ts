@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 35 Trello tools.
+ *              GitHub-login allowlist, and registers the 48 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,10 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.5.0 (2026-06-13) — +13 tools: members (list/add/remove + list_my_cards_assigned),
+ *                        named checklists (create/rename/delete), copy_card,
+ *                        set_due_reminder, comment edits (update/delete),
+ *                        weekly_review_pack composite. Total: 48.
  *   1.4.1 (2026-06-13) — Add delete_label (board-wide, destructive). Total: 35.
  *   1.4.0 (2026-06-13) — Add 14 reflect/engage tools (due/snooze reads, advanced
  *                        search, labels, checklist ops, batch ops, activity log).
@@ -40,36 +44,49 @@ import {
 	add_comment,
 	add_file_attachment,
 	add_label,
+	add_member_to_card,
 	archive_card,
 	batch_add_label,
 	batch_move_cards,
 	card_activity_log,
 	convert_checklist_item_to_card,
+	copy_card,
 	create_card,
+	create_checklist,
 	create_label,
+	delete_checklist,
+	delete_comment,
 	delete_label,
 	get_card,
 	list_attachments,
+	list_board_members,
 	list_boards,
+	list_card_members,
 	list_cards,
 	list_cards_by_list,
 	list_cards_due,
 	list_checklist_items,
 	list_labels,
 	list_lists,
+	list_my_cards_assigned,
 	move_card,
 	read_comments,
 	remove_attachment,
 	remove_checklist_item,
 	remove_label,
+	remove_member_from_card,
+	rename_checklist,
 	search_cards,
 	search_cards_advanced,
 	set_card_position,
 	set_checklist_item_state,
 	set_due_complete,
+	set_due_reminder,
 	set_start_date,
 	snooze_read,
 	update_card,
+	update_comment,
+	weekly_review_pack,
 } from "./trello/tools";
 
 /** Only these GitHub logins may call any tool. Any other authenticated user is refused. */
@@ -127,7 +144,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.4.1",
+		version: "1.5.0",
 	});
 
 	async init() {
@@ -531,6 +548,153 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 			guarded(login, async (i: { cardId: string; filter?: string; limit?: number }) =>
 				card_activity_log(client, i),
+			),
+		);
+
+		// ============================================================
+		// v1.5.0 — members, named checklists, copy/reminder, comment edits,
+		// cross-board assignments, weekly review composite
+		// ============================================================
+
+		this.server.tool(
+			"list_board_members",
+			"All members with access to a board (id, fullName, username, initials).",
+			{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_board_members(client, i)),
+		);
+
+		this.server.tool(
+			"list_card_members",
+			"Members assigned to a single card.",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => list_card_members(client, i)),
+		);
+
+		this.server.tool(
+			"add_member_to_card",
+			"Assign a member to a card. `member` accepts the Trello member ID, username, or full name (resolved against the card's board).",
+			{
+				cardId: z.string(),
+				member: z.string().describe("Member ID, username, or full name."),
+			},
+			guarded(login, async (i: { cardId: string; member: string }) => add_member_to_card(client, i)),
+		);
+
+		this.server.tool(
+			"remove_member_from_card",
+			"Unassign a member from a card. `member` accepts ID, username, or full name.",
+			{
+				cardId: z.string(),
+				member: z.string().describe("Member ID, username, or full name."),
+			},
+			guarded(login, async (i: { cardId: string; member: string }) => remove_member_from_card(client, i)),
+		);
+
+		this.server.tool(
+			"list_my_cards_assigned",
+			"All open cards assigned to the authenticated user across every accessible board. Optional `board` filter narrows to a single board.",
+			{ board: z.string().optional().describe("Optional board alias or ID to narrow scope.") },
+			guarded(login, async (i: { board?: string }) => list_my_cards_assigned(client, i)),
+		);
+
+		this.server.tool(
+			"create_checklist",
+			"Create a new checklist on a card with an explicit name (e.g. \"Agenda\", \"Decisions\"). Use add_checklist_item to populate it.",
+			{
+				cardId: z.string(),
+				name: z.string().min(1).describe("Checklist name."),
+			},
+			guarded(login, async (i: { cardId: string; name: string }) => create_checklist(client, i)),
+		);
+
+		this.server.tool(
+			"rename_checklist",
+			"Change a checklist's name.",
+			{
+				cardId: z.string(),
+				checklistId: z.string(),
+				name: z.string().min(1).describe("New checklist name."),
+			},
+			guarded(login, async (i: { cardId: string; checklistId: string; name: string }) =>
+				rename_checklist(client, i),
+			),
+		);
+
+		this.server.tool(
+			"delete_checklist",
+			"Delete a checklist outright (removes all its items). Use list_checklist_items to find the checklistId.",
+			{
+				cardId: z.string(),
+				checklistId: z.string(),
+			},
+			guarded(login, async (i: { cardId: string; checklistId: string }) =>
+				delete_checklist(client, i),
+			),
+		);
+
+		this.server.tool(
+			"copy_card",
+			"Duplicate a card to a target list. `keepFromSource` controls what to copy: comma-separated subset of attachments,checklists,comments,due,start,labels,members,stickers, or \"all\" (default). Optional `newName` overrides the source name; `position` is top/bottom/numeric.",
+			{
+				cardId: z.string().describe("Source card to copy."),
+				targetList: z.string().describe("Destination list alias or ID."),
+				newName: z.string().min(1).optional(),
+				keepFromSource: z.string().optional().describe("e.g. \"all\" or \"checklists,labels,members\"."),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+			},
+			guarded(login, async (i: { cardId: string; targetList: string; newName?: string; keepFromSource?: string; position?: "top" | "bottom" | number }) =>
+				copy_card(client, i),
+			),
+		);
+
+		this.server.tool(
+			"set_due_reminder",
+			"Set the minutes-before-due reminder offset on a card. 0 = at due time, 60 = 1h before, 1440 = 1d before. Pass null to clear (becomes -1 / no reminder). This writes Trello's reminder offset field, not a snooze/hide field.",
+			{
+				cardId: z.string(),
+				minutesBeforeDue: z.union([z.number().int().nonnegative(), z.null()])
+					.describe("Non-negative integer minutes, or null to clear."),
+			},
+			guarded(login, async (i: { cardId: string; minutesBeforeDue: number | null }) =>
+				set_due_reminder(client, i),
+			),
+		);
+
+		this.server.tool(
+			"update_comment",
+			"Edit an existing comment. `commentId` is the action ID returned by read_comments.",
+			{
+				cardId: z.string(),
+				commentId: z.string().describe("Action ID from read_comments."),
+				text: z.string().min(1).describe("New comment body (Markdown supported)."),
+			},
+			guarded(login, async (i: { cardId: string; commentId: string; text: string }) =>
+				update_comment(client, i),
+			),
+		);
+
+		this.server.tool(
+			"delete_comment",
+			"Delete an existing comment by its action ID (from read_comments).",
+			{
+				cardId: z.string(),
+				commentId: z.string().describe("Action ID from read_comments."),
+			},
+			guarded(login, async (i: { cardId: string; commentId: string }) =>
+				delete_comment(client, i),
+			),
+		);
+
+		this.server.tool(
+			"weekly_review_pack",
+			"One-call GTD weekly-review snapshot: inbox sample, overdue, due-today, due-this-week, context-list counts (@computer/@home/@phone/@errands/@lene), waiting-list stale items, could-do horizon counts, snoozed count, big-rocks count. Defaults to dann-to-do.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				staleDays: z.number().int().positive().optional().describe("Waiting-list stale threshold. Default 7."),
+				maxPerBucket: z.number().int().positive().max(200).optional().describe("Max cards returned per bucket. Default 25."),
+			},
+			guarded(login, async (i: { board?: string; staleDays?: number; maxPerBucket?: number }) =>
+				weekly_review_pack(client, i),
 			),
 		);
 	}

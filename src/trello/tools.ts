@@ -13,24 +13,41 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (35):
- *                Reads (13):  list_boards, list_lists, list_cards,
- *                             list_cards_by_list, list_cards_due, get_card,
+ *              Tool surface (48):
+ *                Reads (16):  list_boards, list_lists, list_cards,
+ *                             list_cards_by_list, list_cards_due,
+ *                             list_my_cards_assigned, get_card,
  *                             search_cards, search_cards_advanced,
  *                             list_checklist_items, list_attachments,
- *                             list_labels, read_comments, card_activity_log,
- *                             snooze_read
- *                Writes (22): create_card, move_card, update_card, archive_card,
- *                             set_due_complete, set_card_position, set_start_date,
+ *                             list_labels, list_board_members, list_card_members,
+ *                             read_comments, card_activity_log,
+ *                             snooze_read, weekly_review_pack
+ *                Writes (32): create_card, copy_card, move_card, update_card,
+ *                             archive_card, set_due_complete, set_card_position,
+ *                             set_start_date, set_due_reminder,
  *                             set_checklist_item_state, add_label, remove_label,
  *                             create_label, delete_label, add_comment,
+ *                             update_comment, delete_comment,
  *                             add_checklist_item, remove_checklist_item,
+ *                             create_checklist, rename_checklist, delete_checklist,
  *                             convert_checklist_item_to_card,
+ *                             add_member_to_card, remove_member_from_card,
  *                             add_attachment, add_file_attachment,
  *                             remove_attachment, batch_add_label,
  *                             batch_move_cards
  *
  * Change log:
+ *   1.5.0 (2026-06-13) — +13 tools across 4 themes:
+ *                        Members (4):    list_board_members, list_card_members,
+ *                                        add_member_to_card, remove_member_from_card
+ *                        Checklists (3): create_checklist (named), rename_checklist,
+ *                                        delete_checklist
+ *                        Card-ops (2):   copy_card, set_due_reminder
+ *                        Comments (2):   update_comment, delete_comment
+ *                        Cross-board (1): list_my_cards_assigned
+ *                        Composite (1):  weekly_review_pack — single call returning
+ *                                        inbox/overdue/today/week/waiting/contexts.
+ *                        CardSummary + CardDetail gain idMembers.
  *   1.4.1 (2026-06-13) — Add delete_label (board-wide, destructive) for
  *                        symmetry with create_label. Removes the label from
  *                        every card that carries it.
@@ -73,6 +90,7 @@ import type {
 	TrelloClient,
 	TrelloComment,
 	TrelloList,
+	TrelloMember,
 } from "./client";
 import {
 	GuardError,
@@ -110,6 +128,7 @@ interface CardSummary {
 	start: string | null;
 	/** Minutes-before-due reminder offset; -1 = no reminder, null = unset. NOT a snooze field. */
 	dueReminder: number | null;
+	memberIds: string[];
 	updated: string;
 	url: string;
 }
@@ -130,6 +149,7 @@ function summariseCard(card: TrelloCard): CardSummary {
 		dueComplete: card.dueComplete,
 		start: card.start,
 		dueReminder: card.dueReminder,
+		memberIds: card.idMembers ?? [],
 		updated: card.dateLastActivity,
 		url: card.url,
 	};
@@ -974,6 +994,337 @@ export async function batch_move_cards(
 	return { moved, skipped, warning };
 }
 
+// ============================================================================
+// v1.5.0 — members, named checklists, copy_card, due-reminder, comment edits,
+// cross-board "my cards", weekly_review_pack composite
+// ============================================================================
+
+// ---- Members ----
+
+/** list_board_members — everyone with access to a board. */
+export async function list_board_members(
+	client: TrelloClient,
+	input: { board?: string },
+): Promise<{ board: BoardSummary; members: TrelloMember[] }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const [board, members] = await Promise.all([
+		client.getBoard(boardId),
+		client.listBoardMembers(boardId),
+	]);
+	return { board: summariseBoard(board), members };
+}
+
+/** list_card_members — assignees on a single card. */
+export async function list_card_members(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ cardId: string; members: TrelloMember[] }> {
+	const members = await client.listCardMembers(input.cardId);
+	return { cardId: input.cardId, members };
+}
+
+/**
+ * add_member_to_card — assign by member ID or username (resolved against the
+ * card's board). Idempotent: re-assigning an existing member is a no-op on
+ * Trello's side.
+ */
+export async function add_member_to_card(
+	client: TrelloClient,
+	input: { cardId: string; member: string },
+): Promise<{ added: TrelloMember }> {
+	const card = await assertCardWritable(client, input.cardId);
+	const member = await resolveMember(client, card.idBoard, input.member);
+	await client.addMemberToCard(input.cardId, member.id);
+	return { added: member };
+}
+
+/** remove_member_from_card — unassign by ID or username. */
+export async function remove_member_from_card(
+	client: TrelloClient,
+	input: { cardId: string; member: string },
+): Promise<{ removed: TrelloMember }> {
+	const card = await assertCardWritable(client, input.cardId);
+	const member = await resolveMember(client, card.idBoard, input.member);
+	await client.removeMemberFromCard(input.cardId, member.id);
+	return { removed: member };
+}
+
+/**
+ * list_my_cards_assigned — cross-board "all cards assigned to me", optionally
+ * filtered by board. Useful for daily kickoff across Dann to-do + Zoo.
+ */
+export async function list_my_cards_assigned(
+	client: TrelloClient,
+	input: { board?: string },
+): Promise<{ me: { id: string; username: string }; cards: CardSummary[]; truncated: boolean }> {
+	const [me, raw] = await Promise.all([client.getMe(), client.listMyAssignedCards()]);
+	let cards = raw.filter((c) => !c.closed);
+	if (input.board) {
+		const boardId = resolveBoard(input.board);
+		cards = cards.filter((c) => c.idBoard === boardId);
+	}
+	const slice = cards.slice(0, MAX_RESULTS);
+	return {
+		me: { id: me.id, username: me.username },
+		cards: slice.map(summariseCard),
+		truncated: slice.length === MAX_RESULTS,
+	};
+}
+
+// ---- Checklists (named) ----
+
+/** create_checklist — create a new checklist on a card with an explicit name. */
+export async function create_checklist(
+	client: TrelloClient,
+	input: { cardId: string; name: string },
+): Promise<{ checklist: { id: string; name: string } }> {
+	await assertCardWritable(client, input.cardId);
+	const cl = await client.createChecklist(input.cardId, input.name);
+	return { checklist: { id: cl.id, name: cl.name } };
+}
+
+/** rename_checklist — change a checklist's name. */
+export async function rename_checklist(
+	client: TrelloClient,
+	input: { cardId: string; checklistId: string; name: string },
+): Promise<{ checklist: { id: string; name: string } }> {
+	await assertCardWritable(client, input.cardId);
+	const cl = await client.renameChecklist(input.checklistId, input.name);
+	return { checklist: { id: cl.id, name: cl.name } };
+}
+
+/** delete_checklist — remove a checklist and all its items. */
+export async function delete_checklist(
+	client: TrelloClient,
+	input: { cardId: string; checklistId: string },
+): Promise<{ ok: true }> {
+	await assertCardWritable(client, input.cardId);
+	await client.deleteChecklist(input.checklistId);
+	return { ok: true };
+}
+
+// ---- Card ops: copy + due-reminder ----
+
+const COPY_KEEP_TOKENS = new Set([
+	"all",
+	"attachments",
+	"checklists",
+	"comments",
+	"due",
+	"start",
+	"labels",
+	"members",
+	"stickers",
+]);
+
+/**
+ * copy_card — duplicate a card to a target list. `keepFromSource` defaults to
+ * "all"; pass a comma-separated subset to copy only some facets. Optional
+ * `newName` overrides the source name.
+ */
+export async function copy_card(
+	client: TrelloClient,
+	input: {
+		cardId: string;
+		targetList: string;
+		newName?: string;
+		keepFromSource?: string;
+		position?: "top" | "bottom" | number;
+	},
+): Promise<{ card: CardSummary; warning?: string }> {
+	// Validate keepFromSource tokens early — Trello silently ignores bad ones.
+	if (input.keepFromSource) {
+		const tokens = input.keepFromSource.split(",").map((t) => t.trim()).filter(Boolean);
+		for (const t of tokens) {
+			if (!COPY_KEEP_TOKENS.has(t)) {
+				throw new GuardError(
+					`keepFromSource token "${t}" is not recognised. Use any of: ${[...COPY_KEEP_TOKENS].join(", ")}, comma-separated.`,
+				);
+			}
+		}
+	}
+
+	const destListId = resolveList(input.targetList);
+	assertCanWriteTo(destListId);
+	// Guard the SOURCE too — copying out of Butler/Repeater Cards would replicate automation rows.
+	await assertCardWritable(client, input.cardId);
+
+	const copied = await client.copyCard({
+		sourceCardId: input.cardId,
+		idList: destListId,
+		name: input.newName,
+		keepFromSource: input.keepFromSource,
+		pos: input.position,
+	});
+
+	const [destCards, allLists] = await Promise.all([
+		client.listCardsOnList(destListId),
+		client.listListsOnBoard(copied.idBoard),
+	]);
+	const warning = wipWarning(destListId, destCards.length, allLists) ?? undefined;
+
+	return { card: summariseCard(copied), warning };
+}
+
+/**
+ * set_due_reminder — set the minutes-before-due reminder offset.
+ *   0   = at due time
+ *   60  = 1 hour before
+ *   1440 = 1 day before
+ * Pass null to clear the reminder.
+ *
+ * NOTE: this writes Trello's `dueReminder` field, which is the reminder
+ * offset — not a hide/snooze field. There is no native snooze in Trello.
+ */
+export async function set_due_reminder(
+	client: TrelloClient,
+	input: { cardId: string; minutesBeforeDue: number | null },
+): Promise<{ card: CardSummary }> {
+	await assertCardWritable(client, input.cardId);
+	if (input.minutesBeforeDue !== null) {
+		if (!Number.isFinite(input.minutesBeforeDue) || input.minutesBeforeDue < 0) {
+			throw new GuardError(
+				`minutesBeforeDue must be null or a non-negative number; got ${input.minutesBeforeDue}.`,
+			);
+		}
+	}
+	const updated = await client.setDueReminder(input.cardId, input.minutesBeforeDue);
+	return { card: summariseCard(updated) };
+}
+
+// ---- Comment edits ----
+
+/** update_comment — edit the text of an existing comment by its action ID. */
+export async function update_comment(
+	client: TrelloClient,
+	input: { cardId: string; commentId: string; text: string },
+): Promise<{ ok: true }> {
+	await assertCardWritable(client, input.cardId);
+	await client.updateComment(input.commentId, input.text);
+	return { ok: true };
+}
+
+/** delete_comment — remove a comment by its action ID. */
+export async function delete_comment(
+	client: TrelloClient,
+	input: { cardId: string; commentId: string },
+): Promise<{ ok: true }> {
+	await assertCardWritable(client, input.cardId);
+	await client.deleteComment(input.commentId);
+	return { ok: true };
+}
+
+// ---- Composite: weekly_review_pack ----
+
+/**
+ * weekly_review_pack — one call returning the buckets Dann walks through every
+ * Friday: inbox count + sample, overdue, due today, due this week, context-list
+ * counts, waiting list (stale), could-do horizon counts, snoozed (reminder set),
+ * and the Rolling Big Rocks count.
+ *
+ * Defaults to dann-to-do. The context/horizon buckets are populated only when
+ * the board's lists match LIST_ALIASES — for other boards (e.g. zoo) you still
+ * get the date-based buckets but the GTD-section breakdown is empty.
+ */
+const WEEKLY_REVIEW_CONTEXT_LISTS = ["@computer", "@home", "@phone", "@errands", "@lene"] as const;
+const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "someday"] as const;
+const WAITING_LIST_ALIAS = "waiting";
+const INBOX_LIST_ALIAS = "inbox";
+// Rolling Big Rocks list id (READ_ONLY). Pulled from constants.ts.
+const ROLLING_BIG_ROCKS_ID = "5b6189409662065780670709";
+
+export async function weekly_review_pack(
+	client: TrelloClient,
+	input: { board?: string; staleDays?: number; maxPerBucket?: number },
+): Promise<{
+	asOf: string;
+	board: BoardSummary;
+	inbox: { count: number; sample: CardSummary[] };
+	overdue: { count: number; cards: CardSummary[] };
+	due_today: { count: number; cards: CardSummary[] };
+	due_this_week: { count: number; cards: CardSummary[] };
+	contexts: Record<string, number>;
+	waiting: { count: number; stale: CardSummary[]; staleDays: number };
+	could_do: Record<string, number>;
+	big_rocks: { count: number };
+	snoozed: { count: number };
+}> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const staleDays = input.staleDays ?? 7;
+	const cap = Math.min(input.maxPerBucket ?? 25, MAX_RESULTS);
+
+	const [board, allCards] = await Promise.all([
+		client.getBoard(boardId),
+		client.listCardsOnBoard(boardId),
+	]);
+	const open = allCards.filter((c) => !c.closed);
+
+	const now = Date.now();
+	const todayStart = new Date(now);
+	todayStart.setUTCHours(0, 0, 0, 0);
+	const todayEnd = todayStart.getTime() + 24 * 60 * 60 * 1000;
+	const weekEnd = now + 7 * 24 * 60 * 60 * 1000;
+	const staleCutoff = now - staleDays * 24 * 60 * 60 * 1000;
+
+	// Resolve known list aliases ONCE.
+	const aliasToId = (alias: string): string => resolveList(alias);
+	const inboxId = aliasToId(INBOX_LIST_ALIAS);
+	const waitingId = aliasToId(WAITING_LIST_ALIAS);
+
+	const inboxCards = open.filter((c) => c.idList === inboxId);
+	const waitingCards = open.filter((c) => c.idList === waitingId);
+	const overdueCards = open.filter(
+		(c) => c.due && !c.dueComplete && Date.parse(c.due) < now,
+	);
+	const dueTodayCards = open.filter((c) => {
+		if (!c.due) return false;
+		const t = Date.parse(c.due);
+		return t >= todayStart.getTime() && t < todayEnd;
+	});
+	const dueThisWeekCards = open.filter((c) => {
+		if (!c.due) return false;
+		const t = Date.parse(c.due);
+		return t >= now && t <= weekEnd;
+	});
+
+	const contexts: Record<string, number> = {};
+	for (const alias of WEEKLY_REVIEW_CONTEXT_LISTS) {
+		const id = aliasToId(alias);
+		contexts[alias] = open.filter((c) => c.idList === id).length;
+	}
+
+	const couldDo: Record<string, number> = {};
+	for (const alias of WEEKLY_REVIEW_COULD_LISTS) {
+		const id = aliasToId(alias);
+		couldDo[alias] = open.filter((c) => c.idList === id).length;
+	}
+
+	const bigRocksCount = open.filter((c) => c.idList === ROLLING_BIG_ROCKS_ID).length;
+
+	const snoozedCount = open.filter(
+		(c) => c.dueReminder !== null && c.dueReminder !== -1,
+	).length;
+
+	const waitingStale = waitingCards
+		.filter((c) => Date.parse(c.dateLastActivity) <= staleCutoff)
+		.slice(0, cap)
+		.map(summariseCard);
+
+	return {
+		asOf: new Date(now).toISOString(),
+		board: summariseBoard(board),
+		inbox: { count: inboxCards.length, sample: inboxCards.slice(0, cap).map(summariseCard) },
+		overdue: { count: overdueCards.length, cards: overdueCards.slice(0, cap).map(summariseCard) },
+		due_today: { count: dueTodayCards.length, cards: dueTodayCards.slice(0, cap).map(summariseCard) },
+		due_this_week: { count: dueThisWeekCards.length, cards: dueThisWeekCards.slice(0, cap).map(summariseCard) },
+		contexts,
+		waiting: { count: waitingCards.length, stale: waitingStale, staleDays },
+		could_do: couldDo,
+		big_rocks: { count: bigRocksCount },
+		snoozed: { count: snoozedCount },
+	};
+}
+
 // ---- Helpers ----
 
 /**
@@ -1007,6 +1358,30 @@ function decodeBase64(input: string): Uint8Array {
 	} catch {
 		throw new GuardError("contentBase64 is not valid base64.");
 	}
+}
+
+/**
+ * Resolve a member by ID, username, or full name, scoped to the card's board.
+ * Throws GuardError if not found. Used by add_member_to_card / remove_member_from_card.
+ */
+async function resolveMember(
+	client: TrelloClient,
+	boardId: string,
+	keyOrName: string,
+): Promise<TrelloMember> {
+	const members = await client.listBoardMembers(boardId);
+	const lower = keyOrName.toLowerCase();
+	const byId = members.find((m) => m.id === keyOrName);
+	if (byId) return byId;
+	const byUsername = members.find((m) => m.username.toLowerCase() === lower);
+	if (byUsername) return byUsername;
+	const byFullName = members.find((m) => m.fullName.toLowerCase() === lower);
+	if (byFullName) return byFullName;
+	throw new GuardError(
+		`Member not found on board ${boardId}: "${keyOrName}". Available members: ${members
+			.map((m) => `${m.fullName} (${m.username})`)
+			.join(", ")}`,
+	);
 }
 
 /** Resolve a label by ID-or-name, scoped to the card's board. Throws GuardError if not found. */

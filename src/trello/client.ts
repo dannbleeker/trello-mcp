@@ -10,6 +10,10 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.4.0 (2026-06-13) — Add start + dueReminder to TrelloCard. New types: TrelloAction,
+ *                        TrelloComment. New methods: listActions, listComments, createLabel,
+ *                        removeChecklistItem, convertChecklistItemToCard, setCardPosition,
+ *                        setStartDate. searchCards extended with multi-board scope.
  *   1.3.0 (2026-06-12) — Add addFileAttachment (real file upload via multipart).
  *   1.0.0 (2026-06-12) — Initial.
  */
@@ -42,9 +46,17 @@ export interface TrelloCard {
 	labels: { id: string; name: string; color: string }[];
 	due: string | null;
 	dueComplete: boolean;
+	start: string | null;
+	/**
+	 * Minutes-before-due to fire a reminder. -1 = no reminder, 0 = at due time,
+	 * 60 = 1h before, 1440 = 1d before. NOT a snooze/hide field — Trello has
+	 * no native snooze in its REST API; that's a Power-Up concern.
+	 */
+	dueReminder: number | null;
 	url: string;
 	dateLastActivity: string;
 	closed: boolean;
+	pos?: number;
 }
 
 /** Minimal list shape. */
@@ -96,6 +108,26 @@ export interface TrelloAttachment {
 	date: string;
 	bytes: number | null;
 	mimeType: string | null;
+}
+
+/**
+ * A single action entry from /cards/{id}/actions. Trello's action shapes vary
+ * by `type` — we keep `data` as untyped JSON and let callers cherry-pick.
+ */
+export interface TrelloAction {
+	id: string;
+	type: string;
+	date: string;
+	memberCreator: { id: string; fullName: string; username: string } | null;
+	data: Record<string, unknown>;
+}
+
+/** Convenience shape for comment actions (filter=commentCard). */
+export interface TrelloComment {
+	id: string;
+	text: string;
+	date: string;
+	author: { id: string; fullName: string; username: string } | null;
 }
 
 /**
@@ -192,14 +224,14 @@ export class TrelloClient {
 
 	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/lists/${listId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard[];
 	}
 
 	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/boards/${boardId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard[];
 	}
@@ -208,7 +240,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
 			cards_limit: 50,
 			partial: true,
 		};
@@ -218,9 +250,33 @@ export class TrelloClient {
 		return cards;
 	}
 
+	/**
+	 * Advanced search. Trello's /search endpoint understands operators inside the
+	 * query string: `due:day`, `due:overdue`, `label:red`, `list:"Inbox"`,
+	 * `has:attachments`, `description:"foo"`, `is:archived`, etc.
+	 * This wrapper just exposes the multi-board scope + tunable limit.
+	 */
+	async searchCardsAdvanced(input: {
+		query: string;
+		boardIds?: string[];
+		cardsLimit?: number;
+	}): Promise<TrelloCard[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
+			query: input.query,
+			modelTypes: "cards",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
+			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
+			partial: true,
+		};
+		if (input.boardIds && input.boardIds.length) params.idBoards = input.boardIds.join(",");
+		const data = await this.request("GET", "/search", params);
+		const { cards = [] } = data as { cards?: TrelloCard[] };
+		return cards;
+	}
+
 	async getCard(cardId: string): Promise<TrelloCard> {
 		const data = await this.request("GET", `/cards/${cardId}`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,url,dateLastActivity,closed",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,url,dateLastActivity,closed,pos",
 		});
 		return data as TrelloCard;
 	}
@@ -247,17 +303,21 @@ export class TrelloClient {
 		name?: string;
 		desc?: string;
 		due?: string | null;
+		start?: string | null;
 		idList?: string;
 		closed?: boolean;
 		dueComplete?: boolean;
+		pos?: string | number;
 	}): Promise<TrelloCard> {
 		const params: Record<string, string | number | boolean | undefined> = {};
 		if (input.name !== undefined) params.name = input.name;
 		if (input.desc !== undefined) params.desc = input.desc;
 		if (input.due !== undefined) params.due = input.due ?? "";
+		if (input.start !== undefined) params.start = input.start ?? "";
 		if (input.idList !== undefined) params.idList = input.idList;
 		if (input.closed !== undefined) params.closed = input.closed;
 		if (input.dueComplete !== undefined) params.dueComplete = input.dueComplete;
+		if (input.pos !== undefined) params.pos = input.pos;
 		const data = await this.request("PUT", `/cards/${cardId}`, params);
 		return data as TrelloCard;
 	}
@@ -274,6 +334,16 @@ export class TrelloClient {
 		return this.updateCard(cardId, { idList: listId });
 	}
 
+	/** Set card position. Accepts "top", "bottom", or a numeric position. */
+	async setCardPosition(cardId: string, pos: string | number): Promise<TrelloCard> {
+		return this.updateCard(cardId, { pos });
+	}
+
+	/** Set the start date (or pass null to clear it). */
+	async setStartDate(cardId: string, start: string | null): Promise<TrelloCard> {
+		return this.updateCard(cardId, { start });
+	}
+
 	// ---- Labels on cards ----
 
 	async addLabelToCard(cardId: string, labelId: string): Promise<void> {
@@ -282,6 +352,18 @@ export class TrelloClient {
 
 	async removeLabelFromCard(cardId: string, labelId: string): Promise<void> {
 		await this.request("DELETE", `/cards/${cardId}/idLabels/${labelId}`);
+	}
+
+	/**
+	 * Create a new label on a board. Color must be one of Trello's known
+	 * palette tokens (yellow, purple, blue, red, green, orange, black, sky,
+	 * pink, lime) or null/empty for "no color".
+	 */
+	async createLabel(boardId: string, name: string, color?: string | null): Promise<TrelloLabel> {
+		const params: Record<string, string> = { name, idBoard: boardId };
+		params.color = color === null || color === undefined ? "" : color;
+		const data = await this.request("POST", "/labels", params);
+		return data as TrelloLabel;
 	}
 
 	// ---- Comments ----
@@ -331,6 +413,28 @@ export class TrelloClient {
 			state: complete ? "complete" : "incomplete",
 		});
 		return data as ChecklistItem;
+	}
+
+	/** Remove a single checklist item from a checklist. */
+	async removeChecklistItem(checklistId: string, itemId: string): Promise<void> {
+		await this.request("DELETE", `/checklists/${checklistId}/checkItems/${itemId}`);
+	}
+
+	/**
+	 * Convert a checklist item to a standalone card. Trello creates the new
+	 * card on the SAME list as the source card. The item is automatically
+	 * removed from the checklist. Returns the new card.
+	 */
+	async convertChecklistItemToCard(
+		cardId: string,
+		checklistId: string,
+		itemId: string,
+	): Promise<TrelloCard> {
+		const data = await this.request(
+			"POST",
+			`/cards/${cardId}/checklist/${checklistId}/checkItem/${itemId}/convertToCard`,
+		);
+		return data as TrelloCard;
 	}
 
 	// ---- Attachments (URL-based) ----
@@ -402,5 +506,39 @@ export class TrelloClient {
 
 	async removeAttachment(cardId: string, attachmentId: string): Promise<void> {
 		await this.request("DELETE", `/cards/${cardId}/attachments/${attachmentId}`);
+	}
+
+	// ---- Actions / activity log / comments ----
+
+	/**
+	 * Read actions on a card. `filter` is a Trello action-type filter string;
+	 * common values: "all", "commentCard",
+	 * "moveCardFromBoard,moveCardToBoard,updateCard:idList,updateCard:due,addLabelToCard,
+	 *  removeLabelFromCard,commentCard,addAttachmentToCard,deleteAttachmentFromCard,
+	 *  convertToCardFromCheckItem,addChecklistToCard,updateCheckItemStateOnCard".
+	 * Trello caps `limit` at 1000.
+	 */
+	async listActions(cardId: string, filter = "all", limit = 50): Promise<TrelloAction[]> {
+		const data = await this.request("GET", `/cards/${cardId}/actions`, {
+			filter,
+			limit: Math.min(Math.max(limit, 1), 1000),
+		});
+		return data as TrelloAction[];
+	}
+
+	/** Convenience: comments only, chronological. */
+	async listComments(cardId: string, limit = 50): Promise<TrelloComment[]> {
+		const actions = await this.listActions(cardId, "commentCard", limit);
+		const comments = actions
+			.map((a) => ({
+				id: a.id,
+				text: ((a.data as { text?: string }).text ?? "").toString(),
+				date: a.date,
+				author: a.memberCreator
+					? { id: a.memberCreator.id, fullName: a.memberCreator.fullName, username: a.memberCreator.username }
+					: null,
+			}))
+			.sort((x, y) => Date.parse(x.date) - Date.parse(y.date));
+		return comments;
 	}
 }

@@ -258,7 +258,133 @@ async function main() {
 		await trello("DELETE", `/cards/${cardId}/idLabels/${bs.id}`);
 	});
 
-	// 6. Cleanup
+	// 6. v1.4.0 — reflect / engage tools
+
+	console.log("\nv1.4.0 — reflect/engage tools:");
+
+	await step("set_card_position: top", async () => {
+		const r = await trello("PUT", `/cards/${cardId}`, { pos: "top" });
+		if (typeof r.pos !== "number") throw new Error(`pos missing on response: ${JSON.stringify(r.pos)}`);
+	});
+
+	let startDate = "";
+	await step("set_start_date: set + clear", async () => {
+		startDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+		let r = await trello("PUT", `/cards/${cardId}`, { start: startDate });
+		if (!r.start) throw new Error("start not set");
+		r = await trello("PUT", `/cards/${cardId}`, { start: "" });
+		if (r.start) throw new Error(`start should be null after clear, got ${r.start}`);
+	});
+
+	let createdLabelId = "";
+	await step("create_label: lime [MCP-TEST]", async () => {
+		const lb = await trello("POST", "/labels", {
+			name: "[MCP-TEST] smoke label",
+			idBoard: BOARD["dann-to-do"],
+			color: "lime",
+		});
+		if (!lb.id) throw new Error("no label id");
+		if (lb.color !== "lime") throw new Error(`expected color=lime, got ${lb.color}`);
+		createdLabelId = lb.id;
+	});
+	await step("list_labels finds the new label", async () => {
+		const labels = await trello("GET", `/boards/${BOARD["dann-to-do"]}/labels`, { fields: "id,name,color" });
+		const found = labels.find((l) => l.id === createdLabelId);
+		if (!found) throw new Error("created label not found in list");
+	});
+
+	let checklist2Id = "";
+	let checkItem2Id = "";
+	await step("remove_checklist_item: add then delete", async () => {
+		const cl = await trello("POST", `/cards/${cardId}/checklists`, { name: "RemoveTest" });
+		checklist2Id = cl.id;
+		const item = await trello("POST", `/checklists/${cl.id}/checkItems`, { name: "Will be removed" });
+		checkItem2Id = item.id;
+		await trello("DELETE", `/checklists/${cl.id}/checkItems/${item.id}`);
+	});
+
+	let convertedCardId = "";
+	await step("convert_checklist_item_to_card", async () => {
+		// Need a fresh item on the same checklist since the previous one was removed.
+		const item = await trello("POST", `/checklists/${checklist2Id}/checkItems`, {
+			name: "Promote to card",
+		});
+		const newCard = await trello(
+			"POST",
+			`/cards/${cardId}/checklist/${checklist2Id}/checkItem/${item.id}/convertToCard`,
+		);
+		if (!newCard?.id) throw new Error(`no new card returned: ${JSON.stringify(newCard).slice(0, 120)}`);
+		convertedCardId = newCard.id;
+		created.push(convertedCardId);
+	});
+
+	await step("add_comment + read_comments returns it chronologically", async () => {
+		const c1 = "First smoke comment.";
+		const c2 = "Second smoke comment.";
+		await trello("POST", `/cards/${cardId}/actions/comments`, { text: c1 });
+		await trello("POST", `/cards/${cardId}/actions/comments`, { text: c2 });
+		const actions = await trello("GET", `/cards/${cardId}/actions`, {
+			filter: "commentCard",
+			limit: 10,
+		});
+		// Trello returns newest-first; we'd sort chronologically in tools — verify count only here.
+		const texts = actions.map((a) => a.data?.text).filter((t) => typeof t === "string");
+		if (!texts.includes(c1) || !texts.includes(c2)) {
+			throw new Error(`comments missing from feed: ${JSON.stringify(texts)}`);
+		}
+	});
+
+	await step("card_activity_log returns updateCard/commentCard entries", async () => {
+		const filter = [
+			"createCard",
+			"updateCard:idList",
+			"updateCard:due",
+			"commentCard",
+			"convertToCardFromCheckItem",
+		].join(",");
+		const actions = await trello("GET", `/cards/${cardId}/actions`, { filter, limit: 25 });
+		if (!Array.isArray(actions) || actions.length < 1) {
+			throw new Error(`expected ≥1 action, got ${actions?.length}`);
+		}
+	});
+
+	await step("list_cards_due: overdue scope (count >= 0, doesn't crash)", async () => {
+		const cards = await trello("GET", `/boards/${BOARD["dann-to-do"]}/cards`, {
+			fields: "name,due,dueComplete,dueReminder,closed",
+		});
+		const now = Date.now();
+		const overdue = cards.filter(
+			(c) => !c.closed && c.due && Date.parse(c.due) < now && !c.dueComplete,
+		);
+		if (!Array.isArray(overdue)) throw new Error("overdue filter failed");
+	});
+
+	await step("search_cards_advanced: due:overdue operator", async () => {
+		const r = await trello("GET", "/search", {
+			query: "due:overdue",
+			modelTypes: "cards",
+			cards_limit: 10,
+			partial: true,
+		});
+		if (!r.cards) throw new Error("search returned no cards key");
+	});
+
+	await step("snooze_read style: filter cards with dueReminder set", async () => {
+		const cards = await trello("GET", `/boards/${BOARD["dann-to-do"]}/cards`, {
+			fields: "due,dueReminder,closed",
+		});
+		const snoozed = cards.filter(
+			(c) => !c.closed && c.dueReminder !== null && c.dueReminder !== -1,
+		);
+		if (!Array.isArray(snoozed)) throw new Error("snooze filter failed");
+	});
+
+	// Cleanup the test label
+	await step("cleanup: delete test label", async () => {
+		if (createdLabelId) await trello("DELETE", `/labels/${createdLabelId}`);
+	});
+
+	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {
 		try {

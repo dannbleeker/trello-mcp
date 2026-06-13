@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 20 Trello tools.
+ *              GitHub-login allowlist, and registers the 34 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,9 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.4.0 (2026-06-13) — Add 14 reflect/engage tools (due/snooze reads, advanced
+ *                        search, labels, checklist ops, batch ops, activity log).
+ *                        Total tool surface: 34.
  *   1.3.0 (2026-06-12) — Add add_file_attachment (base64 → multipart upload).
  *   1.2.0 (2026-06-12) — Add set_checklist_item_state + 3 URL-attachment tools (19 tools).
  *   1.0.0 (2026-06-12) — Initial; 15 tools, allowlist=[dannbleeker].
@@ -37,19 +40,33 @@ import {
 	add_file_attachment,
 	add_label,
 	archive_card,
+	batch_add_label,
+	batch_move_cards,
+	card_activity_log,
+	convert_checklist_item_to_card,
 	create_card,
+	create_label,
 	get_card,
 	list_attachments,
 	list_boards,
 	list_cards,
+	list_cards_by_list,
+	list_cards_due,
 	list_checklist_items,
+	list_labels,
 	list_lists,
 	move_card,
+	read_comments,
 	remove_attachment,
+	remove_checklist_item,
 	remove_label,
 	search_cards,
+	search_cards_advanced,
+	set_card_position,
 	set_checklist_item_state,
 	set_due_complete,
+	set_start_date,
+	snooze_read,
 	update_card,
 } from "./trello/tools";
 
@@ -108,7 +125,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.3.0",
+		version: "1.4.0",
 	});
 
 	async init() {
@@ -323,6 +340,183 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 			guarded(login, async (i: { cardId: string; attachmentId: string }) =>
 				remove_attachment(client, i),
+			),
+		);
+
+		// ============================================================
+		// v1.4.0 — reflect / engage tools
+		// ============================================================
+
+		this.server.tool(
+			"list_cards_due",
+			"List cards filtered by a due-date scope. `scope` is one of \"today\", \"overdue\", \"next_seven_days\". Optionally narrow to one list and/or label. Each card includes `snoozed` and `wakeUp` (computed from due - dueReminder).",
+			{
+				scope: z.enum(["today", "overdue", "next_seven_days"]).describe("Due-date filter."),
+				list: z.string().optional().describe("List alias or ID. Narrows scope to one list."),
+				label: z.string().optional().describe("Filter to this label name (case-insensitive)."),
+				board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+			},
+			guarded(login, async (i: { scope: "today" | "overdue" | "next_seven_days"; list?: string; label?: string; board?: string }) =>
+				list_cards_due(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_cards_by_list",
+			"Read every card on one list with extra filters not exposed by list_cards: `excludeDueDates` keeps only cards without a due, `includeSnoozedOnly` keeps only cards whose dueReminder is set, `label` filters by label name, `staleDays` keeps cards untouched for N+ days.",
+			{
+				list: z.string().describe("List alias or ID."),
+				excludeDueDates: z.boolean().optional(),
+				includeSnoozedOnly: z.boolean().optional(),
+				label: z.string().optional(),
+				staleDays: z.number().int().positive().optional(),
+			},
+			guarded(login, async (i: { list: string; excludeDueDates?: boolean; includeSnoozedOnly?: boolean; label?: string; staleDays?: number }) =>
+				list_cards_by_list(client, i),
+			),
+		);
+
+		this.server.tool(
+			"search_cards_advanced",
+			"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`; tunable `limit` up to 1000.",
+			{
+				query: z.string().min(1).describe("Search expression. Trello operators supported."),
+				boards: z.array(z.string()).optional().describe("Board aliases or IDs to scope the search."),
+				limit: z.number().int().min(1).max(1000).optional().describe("Max cards to return (default 50, hard cap 1000)."),
+			},
+			guarded(login, async (i: { query: string; boards?: string[]; limit?: number }) =>
+				search_cards_advanced(client, i),
+			),
+		);
+
+		this.server.tool(
+			"read_comments",
+			"Chronological comment thread on a card. Each comment has text, author, timestamp.",
+			{
+				cardId: z.string(),
+				limit: z.number().int().min(1).max(1000).optional().describe("Max comments to return (default 50)."),
+			},
+			guarded(login, async (i: { cardId: string; limit?: number }) => read_comments(client, i)),
+		);
+
+		this.server.tool(
+			"list_labels",
+			"All labels defined on a board (id, name, color).",
+			{ board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_labels(client, i)),
+		);
+
+		this.server.tool(
+			"create_label",
+			"Create a new label on a board. Color must be one of yellow/purple/blue/red/green/orange/black/sky/pink/lime, or null for no color.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+				name: z.string().min(1).describe("Label name."),
+				color: z.union([z.string(), z.null()]).optional().describe("Trello palette token, or null for none."),
+			},
+			guarded(login, async (i: { board?: string; name: string; color?: string | null }) =>
+				create_label(client, i),
+			),
+		);
+
+		this.server.tool(
+			"remove_checklist_item",
+			"Delete a single item from a checklist. Use list_checklist_items to find the checklistId + itemId.",
+			{
+				cardId: z.string(),
+				checklistId: z.string(),
+				itemId: z.string(),
+			},
+			guarded(login, async (i: { cardId: string; checklistId: string; itemId: string }) =>
+				remove_checklist_item(client, i),
+			),
+		);
+
+		this.server.tool(
+			"convert_checklist_item_to_card",
+			"Promote a checklist item into its own card. Trello creates the new card on the SAME list as the source; pass `targetList` to move it afterwards. The item is auto-removed from the source checklist.",
+			{
+				cardId: z.string(),
+				checklistId: z.string(),
+				itemId: z.string(),
+				targetList: z.string().optional().describe("List alias or ID to move the new card to. Optional."),
+			},
+			guarded(login, async (i: { cardId: string; checklistId: string; itemId: string; targetList?: string }) =>
+				convert_checklist_item_to_card(client, i),
+			),
+		);
+
+		this.server.tool(
+			"set_card_position",
+			"Set a card's position within its list. `position` is \"top\", \"bottom\", or a non-negative numeric position.",
+			{
+				cardId: z.string(),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]),
+			},
+			guarded(login, async (i: { cardId: string; position: "top" | "bottom" | number }) =>
+				set_card_position(client, i),
+			),
+		);
+
+		this.server.tool(
+			"set_start_date",
+			"Set or clear a card's start date. Pass an ISO 8601 string to set; pass null to clear.",
+			{
+				cardId: z.string(),
+				start: z.union([z.string(), z.null()]).describe("ISO 8601 string or null to clear."),
+			},
+			guarded(login, async (i: { cardId: string; start: string | null }) =>
+				set_start_date(client, i),
+			),
+		);
+
+		this.server.tool(
+			"snooze_read",
+			"Cards whose `dueReminder` is set (non-null and not -1), sorted by computed wake-up time. NOTE: Trello has no native snooze in its REST API; `dueReminder` is the minutes-before-due reminder offset, not a hide field. Scope to one list or one board.",
+			{
+				list: z.string().optional().describe("List alias or ID. If given, board is ignored."),
+				board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+				label: z.string().optional().describe("Filter to this label name."),
+			},
+			guarded(login, async (i: { list?: string; board?: string; label?: string }) =>
+				snooze_read(client, i),
+			),
+		);
+
+		this.server.tool(
+			"batch_add_label",
+			"Add the same label to up to 50 cards in one call. Skipped cards are reported with a reason (label not on board, forbidden list, etc.) but the call still completes.",
+			{
+				cardIds: z.array(z.string()).min(1).max(50),
+				label: z.string().describe("Label name or ID."),
+			},
+			guarded(login, async (i: { cardIds: string[]; label: string }) =>
+				batch_add_label(client, i),
+			),
+		);
+
+		this.server.tool(
+			"batch_move_cards",
+			"Move up to 50 cards to the same destination list. Guards both source (per card) and destination. Skipped cards are reported but the call still completes. WIP warning included if applicable.",
+			{
+				cardIds: z.array(z.string()).min(1).max(50),
+				targetList: z.string().describe("Destination list alias or ID."),
+			},
+			guarded(login, async (i: { cardIds: string[]; targetList: string }) =>
+				batch_move_cards(client, i),
+			),
+		);
+
+		this.server.tool(
+			"card_activity_log",
+			"Recent actions on a card (moves, due-date changes, label/attachment/comment activity, checklist edits). Defaults to a useful filter set; pass `filter=\"all\"` to widen it. Sorted newest-first.",
+			{
+				cardId: z.string(),
+				filter: z.string().optional().describe("Trello action-type filter (comma-separated). Default: a curated activity set."),
+				limit: z.number().int().min(1).max(1000).optional().describe("Max actions to return (default 50, hard cap 1000)."),
+			},
+			guarded(login, async (i: { cardId: string; filter?: string; limit?: number }) =>
+				card_activity_log(client, i),
 			),
 		);
 	}

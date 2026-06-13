@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (20)
+## Tools (34)
 
 **Reads**
 
@@ -13,10 +13,17 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `list_boards` | All open boards the authenticated Trello user belongs to |
 | `list_lists` | Lists on a board (alias or ID) |
 | `list_cards` | Cards on a list or board; includes `desc`; optional `label` / `staleDays` filters |
+| `list_cards_by_list` | Read one list with `excludeDueDates` / `includeSnoozedOnly` / `staleDays` filters |
+| `list_cards_due` | Filter by scope: `today` / `overdue` / `next_seven_days`; emits `snoozed` + `wakeUp` |
 | `get_card` | Full details for one card |
 | `search_cards` | Fuzzy name search, scoped or unscoped; includes `desc` |
+| `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, multi-board scope |
 | `list_checklist_items` | Checklists + items on a card |
 | `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
+| `list_labels` | All labels on a board (id, name, color) |
+| `read_comments` | Chronological comment thread on a card |
+| `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
+| `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
 
 **Writes**
 
@@ -27,14 +34,21 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `update_card` | Edit name / description / due date |
 | `archive_card` | Soft archive (`closed=true`). Hard delete is not implemented. |
 | `set_due_complete` | Mark due date as done (triggers Butler automations) |
+| `set_card_position` | Move a card to top / bottom / numeric position within its list |
+| `set_start_date` | Set or clear a card's start date (ISO 8601 or null) |
 | `set_checklist_item_state` | Tick / untick a single checklist item |
 | `add_label` | Apply a label by ID or name |
 | `remove_label` | Remove a label by ID or name |
+| `create_label` | Create a new label on a board (palette token or null for no color) |
 | `add_comment` | Append a comment to a card |
 | `add_checklist_item` | Append an item to the card's checklist |
+| `remove_checklist_item` | Remove an item from a checklist |
+| `convert_checklist_item_to_card` | Promote a checklist item to a standalone card; optional `targetList` |
 | `add_attachment` | Attach a URL to a card |
 | `add_file_attachment` | Upload a real file (base64 → multipart). 10 MB hard cap — for larger files, host the file and use `add_attachment` with a URL. |
 | `remove_attachment` | Remove an attachment from a card |
+| `batch_add_label` | Apply the same label to up to 50 cards (per-card skip reasons reported) |
+| `batch_move_cards` | Move up to 50 cards to the same destination list (guards + WIP warning) |
 
 ## Safety guards
 
@@ -121,7 +135,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 20 tool implementations (testable in plain Node)
+    tools.ts                — 34 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

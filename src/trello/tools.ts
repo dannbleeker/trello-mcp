@@ -13,7 +13,7 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (48):
+ *              Tool surface (65):
  *                Reads (16):  list_boards, list_lists, list_cards,
  *                             list_cards_by_list, list_cards_due,
  *                             list_my_cards_assigned, get_card,
@@ -37,6 +37,18 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.6.0 (2026-06-13) — +17 tools across 6 themes:
+ *                        List mgmt (6):    create_list, rename_list, archive_list,
+ *                                          move_list, move_all_cards, archive_all_cards
+ *                        Card cover (2):   set_card_cover, clear_card_cover
+ *                        Checklist items (3): set_checklist_item_due,
+ *                                          assign_checklist_item_member,
+ *                                          reorder_checklist_item
+ *                        Label edit (1):   update_label
+ *                        Subscribe (2):    subscribe_card, subscribe_list
+ *                        Notifications (3): list_notifications,
+ *                                          mark_notification_read,
+ *                                          mark_all_notifications_read
  *   1.5.0 (2026-06-13) — +13 tools across 4 themes:
  *                        Members (4):    list_board_members, list_card_members,
  *                                        add_member_to_card, remove_member_from_card
@@ -91,6 +103,7 @@ import type {
 	TrelloComment,
 	TrelloList,
 	TrelloMember,
+	TrelloNotification,
 } from "./client";
 import {
 	GuardError,
@@ -1325,7 +1338,408 @@ export async function weekly_review_pack(
 	};
 }
 
+// ============================================================================
+// v1.6.0 — list mgmt, card cover, checklist-item updates, label edit,
+// subscribe, notifications
+// ============================================================================
+
+// ---- List management ----
+
+/** create_list — new list on a board. */
+export async function create_list(
+	client: TrelloClient,
+	input: { board?: string; name: string; position?: "top" | "bottom" | number },
+): Promise<{ list: ListSummary; boardId: string }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const list = await client.createList({
+		boardId,
+		name: input.name,
+		pos: input.position,
+	});
+	return { list: summariseList(list), boardId };
+}
+
+/** rename_list — change a list's name. */
+export async function rename_list(
+	client: TrelloClient,
+	input: { list: string; name: string },
+): Promise<{ list: ListSummary }> {
+	const listId = resolveList(input.list);
+	assertWritable(listId);
+	const updated = await client.updateList(listId, { name: input.name });
+	return { list: summariseList(updated) };
+}
+
+/**
+ * archive_list — close (default) or reopen a list. Guards refuse it on Butler
+ * / Repeater Cards so automation infrastructure can't be hidden.
+ */
+export async function archive_list(
+	client: TrelloClient,
+	input: { list: string; closed?: boolean },
+): Promise<{ list: ListSummary }> {
+	const listId = resolveList(input.list);
+	assertWritable(listId);
+	const updated = await client.updateList(listId, { closed: input.closed ?? true });
+	return { list: summariseList(updated) };
+}
+
+/**
+ * move_list — reposition (`position` = "top" / "bottom" / number) and/or move
+ * the list (with its cards) to another board (`targetBoard` = alias or ID).
+ * At least one must be provided.
+ */
+export async function move_list(
+	client: TrelloClient,
+	input: { list: string; position?: "top" | "bottom" | number; targetBoard?: string },
+): Promise<{ list: ListSummary }> {
+	if (input.position === undefined && input.targetBoard === undefined) {
+		throw new GuardError("Pass at least one of `position` or `targetBoard`.");
+	}
+	const listId = resolveList(input.list);
+	assertWritable(listId);
+	const updated = await client.updateList(listId, {
+		pos: input.position,
+		idBoard: input.targetBoard ? resolveBoard(input.targetBoard) : undefined,
+	});
+	return { list: summariseList(updated) };
+}
+
+/**
+ * move_all_cards — bulk-move every card from one list to another. Guards both
+ * source and destination. The destination's board is derived from the list
+ * itself (so the caller doesn't have to pass it).
+ */
+export async function move_all_cards(
+	client: TrelloClient,
+	input: { sourceList: string; targetList: string },
+): Promise<{ ok: true; sourceListId: string; targetListId: string }> {
+	const sourceListId = resolveList(input.sourceList);
+	const targetListId = resolveList(input.targetList);
+	assertWritable(sourceListId);
+	assertNotReadOnly(sourceListId, "source");
+	assertCanWriteTo(targetListId);
+
+	// Trello needs the destination board id explicitly (cards can cross boards
+	// during the bulk move). Derive it by probing one card on the destination
+	// or, failing that, on the source.
+	let targetBoardId = "";
+	const destProbe = await client.listCardsOnList(targetListId);
+	if (destProbe.length > 0) {
+		targetBoardId = destProbe[0].idBoard;
+	} else {
+		const srcProbe = await client.listCardsOnList(sourceListId);
+		targetBoardId = srcProbe[0]?.idBoard ?? "";
+	}
+	if (!targetBoardId) {
+		throw new GuardError(
+			"Could not derive the destination board id for move_all_cards (both lists are empty — nothing to move anyway).",
+		);
+	}
+
+	await client.moveAllCardsOnList(sourceListId, targetListId, targetBoardId);
+	return { ok: true, sourceListId, targetListId };
+}
+
+/** archive_all_cards — bulk-archive every open card on a list. */
+export async function archive_all_cards(
+	client: TrelloClient,
+	input: { list: string },
+): Promise<{ ok: true; listId: string }> {
+	const listId = resolveList(input.list);
+	assertWritable(listId);
+	await client.archiveAllCardsOnList(listId);
+	return { ok: true, listId };
+}
+
+// ---- Card cover ----
+
+const COVER_COLORS = new Set([
+	"pink",
+	"yellow",
+	"lime",
+	"blue",
+	"black",
+	"orange",
+	"red",
+	"purple",
+	"sky",
+	"green",
+]);
+
+/**
+ * set_card_cover — set the cover via a palette color OR an attachment already
+ * on the card. At least one of `color` / `attachmentId` must be provided.
+ * `size` ∈ "normal" | "full"; `brightness` ∈ "light" | "dark" (color only).
+ */
+export async function set_card_cover(
+	client: TrelloClient,
+	input: {
+		cardId: string;
+		color?: string;
+		attachmentId?: string;
+		size?: "normal" | "full";
+		brightness?: "light" | "dark";
+	},
+): Promise<{ card: CardSummary; cover: { color: string | null; idAttachment: string | null; size: string | null; brightness: string | null } }> {
+	await assertCardWritable(client, input.cardId);
+	if (!input.color && !input.attachmentId) {
+		throw new GuardError("Pass at least one of `color` or `attachmentId`. To remove, use clear_card_cover.");
+	}
+	if (input.color && !COVER_COLORS.has(input.color)) {
+		throw new GuardError(
+			`Unknown cover color "${input.color}". Use one of: ${[...COVER_COLORS].join(", ")}.`,
+		);
+	}
+	const updated = await client.setCardCover(input.cardId, {
+		color: input.color ?? null,
+		idAttachment: input.attachmentId ?? null,
+		size: input.size,
+		brightness: input.brightness,
+	});
+	const cover = updated.cover ?? {};
+	return {
+		card: summariseCard(updated),
+		cover: {
+			color: cover.color ?? null,
+			idAttachment: cover.idAttachment ?? null,
+			size: cover.size ?? null,
+			brightness: cover.brightness ?? null,
+		},
+	};
+}
+
+/** clear_card_cover — strip the card's cover entirely. */
+export async function clear_card_cover(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ card: CardSummary }> {
+	await assertCardWritable(client, input.cardId);
+	const updated = await client.clearCardCover(input.cardId);
+	return { card: summariseCard(updated) };
+}
+
+// ---- Checklist item: due, member, position ----
+
+/** set_checklist_item_due — set or clear an item's due date (ISO 8601 or null). */
+export async function set_checklist_item_due(
+	client: TrelloClient,
+	input: { cardId: string; itemId: string; due: string | null },
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; due: string | null } }> {
+	await assertCardWritable(client, input.cardId);
+	if (input.due !== null && Number.isNaN(Date.parse(input.due))) {
+		throw new GuardError(`due must be a valid ISO 8601 date or null; got "${input.due}".`);
+	}
+	const item = await client.updateChecklistItem(input.cardId, input.itemId, { due: input.due });
+	return {
+		item: {
+			id: item.id,
+			name: item.name,
+			state: item.state,
+			due: (item as ChecklistItemWithExtras).due ?? null,
+		},
+	};
+}
+
+/** assign_checklist_item_member — assign by ID/username/full name, or null to clear. */
+export async function assign_checklist_item_member(
+	client: TrelloClient,
+	input: { cardId: string; itemId: string; member: string | null },
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; memberId: string | null } }> {
+	const card = await assertCardWritable(client, input.cardId);
+	let memberId: string | null = null;
+	if (input.member !== null) {
+		const resolved = await resolveMember(client, card.idBoard, input.member);
+		memberId = resolved.id;
+	}
+	const item = await client.updateChecklistItem(input.cardId, input.itemId, {
+		idMember: memberId,
+	});
+	return {
+		item: {
+			id: item.id,
+			name: item.name,
+			state: item.state,
+			memberId: (item as ChecklistItemWithExtras).idMember ?? null,
+		},
+	};
+}
+
+/** reorder_checklist_item — move an item within its checklist. */
+export async function reorder_checklist_item(
+	client: TrelloClient,
+	input: { cardId: string; itemId: string; position: "top" | "bottom" | number },
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; pos: number } }> {
+	await assertCardWritable(client, input.cardId);
+	if (
+		input.position !== "top" &&
+		input.position !== "bottom" &&
+		(typeof input.position !== "number" || !Number.isFinite(input.position) || input.position < 0)
+	) {
+		throw new GuardError(
+			`position must be "top", "bottom", or a non-negative number; got ${JSON.stringify(input.position)}.`,
+		);
+	}
+	const item = await client.updateChecklistItem(input.cardId, input.itemId, { pos: input.position });
+	return { item: { id: item.id, name: item.name, state: item.state, pos: item.pos } };
+}
+
+// ---- Label edit ----
+
+/**
+ * update_label — rename and/or recolor a label. At least one of `name` /
+ * `color` must be provided. `color` accepts a Trello palette token or null
+ * to clear the color.
+ */
+export async function update_label(
+	client: TrelloClient,
+	input: { board?: string; label: string; name?: string; color?: string | null },
+): Promise<{ label: { id: string; name: string; color: string } }> {
+	if (input.name === undefined && input.color === undefined) {
+		throw new GuardError("Pass at least one of `name` or `color`.");
+	}
+	if (
+		input.color !== undefined &&
+		input.color !== null &&
+		input.color !== "" &&
+		!TRELLO_LABEL_COLORS.has(input.color)
+	) {
+		throw new GuardError(
+			`Unknown color "${input.color}". Use one of: ${[...TRELLO_LABEL_COLORS].join(", ")}, or null for no color.`,
+		);
+	}
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const resolved = await resolveLabel(client, boardId, input.label);
+	const updated = await client.updateLabel(resolved.id, {
+		name: input.name,
+		color: input.color,
+	});
+	return { label: { id: updated.id, name: updated.name, color: updated.color } };
+}
+
+// ---- Subscribe ----
+
+/** subscribe_card — watch / unwatch a single card. */
+export async function subscribe_card(
+	client: TrelloClient,
+	input: { cardId: string; subscribed: boolean },
+): Promise<{ card: CardSummary; subscribed: boolean }> {
+	await assertCardWritable(client, input.cardId);
+	const updated = await client.setCardSubscribed(input.cardId, input.subscribed);
+	return { card: summariseCard(updated), subscribed: updated.subscribed ?? input.subscribed };
+}
+
+/** subscribe_list — watch / unwatch every card on a list (via the list's own watch flag). */
+export async function subscribe_list(
+	client: TrelloClient,
+	input: { list: string; subscribed: boolean },
+): Promise<{ list: ListSummary; subscribed: boolean }> {
+	const listId = resolveList(input.list);
+	assertWritable(listId);
+	const updated = await client.setListSubscribed(listId, input.subscribed);
+	return { list: summariseList(updated), subscribed: updated.subscribed ?? input.subscribed };
+}
+
+// ---- Notifications ----
+
+/**
+ * list_notifications — the authenticated user's notification feed (the bell
+ * icon). `filter` is a comma-separated Trello notification-type filter (default
+ * "all"). `readFilter` ∈ "all" | "read" | "unread". `since` / `before` are
+ * notification IDs (cursor pagination), not dates.
+ */
+export async function list_notifications(
+	client: TrelloClient,
+	input: {
+		filter?: string;
+		readFilter?: "all" | "read" | "unread";
+		limit?: number;
+		since?: string;
+		before?: string;
+	},
+): Promise<{ notifications: SummarisedNotification[] }> {
+	const raw = await client.listNotifications({
+		filter: input.filter,
+		readFilter: input.readFilter,
+		limit: input.limit,
+		since: input.since,
+		before: input.before,
+	});
+	return {
+		notifications: raw
+			.slice(0, MAX_RESULTS)
+			.map(summariseNotification),
+	};
+}
+
+/** mark_notification_read — flip one notification's read/unread flag. */
+export async function mark_notification_read(
+	client: TrelloClient,
+	input: { notificationId: string; unread?: boolean },
+): Promise<{ notification: SummarisedNotification }> {
+	const n = await client.markNotificationRead(input.notificationId, input.unread ?? false);
+	return { notification: summariseNotification(n) };
+}
+
+/**
+ * mark_all_notifications_read — bulk mark every unread notification as read.
+ * Optional `filter` narrows scope (e.g. "cardDueSoon" to clear due-soon pings
+ * only). NOTE: read=false is also supported by Trello to bulk-unread but is
+ * rarely useful — default is read=true.
+ */
+export async function mark_all_notifications_read(
+	client: TrelloClient,
+	input: { filter?: string; read?: boolean },
+): Promise<{ ok: true }> {
+	await client.markAllNotificationsRead({
+		read: input.read ?? true,
+		filter: input.filter,
+	});
+	return { ok: true };
+}
+
 // ---- Helpers ----
+
+/**
+ * Trello returns due/idMember on checkItems when set, but our ChecklistItem
+ * interface doesn't model them yet. Cast to this to read them safely without
+ * widening the public interface in the client.
+ */
+type ChecklistItemWithExtras = {
+	id: string;
+	name: string;
+	state: "complete" | "incomplete";
+	pos: number;
+	idChecklist: string;
+	due?: string | null;
+	idMember?: string | null;
+};
+
+/** Notification shape returned to the caller (terser than the raw Trello object). */
+interface SummarisedNotification {
+	id: string;
+	type: string;
+	date: string;
+	unread: boolean;
+	text: string | null;
+	card: { id: string; name: string } | null;
+	board: { id: string; name: string } | null;
+	list: { id: string; name: string } | null;
+}
+
+function summariseNotification(n: TrelloNotification): SummarisedNotification {
+	const data = n.data ?? {};
+	return {
+		id: n.id,
+		type: n.type,
+		date: n.date,
+		unread: n.unread,
+		text: typeof data.text === "string" ? data.text : null,
+		card: data.card ? { id: data.card.id, name: data.card.name } : null,
+		board: data.board ? { id: data.board.id, name: data.board.name } : null,
+		list: data.list ? { id: data.list.id, name: data.list.name } : null,
+	};
+}
 
 /**
  * Compute the wake-up time for a card with a `dueReminder` set.

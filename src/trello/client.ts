@@ -10,6 +10,13 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.6.0 (2026-06-13) — TrelloNotification + TrelloCardCover types. TrelloCard gains
+ *                        subscribed + cover. TrelloList gains pos + subscribed.
+ *                        New methods: createList, updateList, moveAllCardsOnList,
+ *                        archiveAllCardsOnList, setCardCover, clearCardCover,
+ *                        updateChecklistItem, updateLabel, setCardSubscribed,
+ *                        setListSubscribed, listNotifications, markNotificationRead,
+ *                        markAllNotificationsRead.
  *   1.5.0 (2026-06-13) — New TrelloMember type. idMembers added to TrelloCard. New methods:
  *                        getMe, listBoardMembers, listCardMembers, addMemberToCard,
  *                        removeMemberFromCard, listMyAssignedCards, createChecklist,
@@ -43,6 +50,14 @@ export class TrelloError extends Error {
 	}
 }
 
+/** Card cover shape — sparse object Trello exposes when a cover is set. */
+export interface TrelloCardCover {
+	color: string | null;
+	idAttachment: string | null;
+	size: "normal" | "full" | null;
+	brightness: "light" | "dark" | null;
+}
+
 /** Minimal Trello card shape used across tools. */
 export interface TrelloCard {
 	id: string;
@@ -65,6 +80,8 @@ export interface TrelloCard {
 	dateLastActivity: string;
 	closed: boolean;
 	pos?: number;
+	subscribed?: boolean;
+	cover?: Partial<TrelloCardCover>;
 }
 
 /** Minimal Trello member shape. */
@@ -75,12 +92,37 @@ export interface TrelloMember {
 	initials: string;
 }
 
+/**
+ * Notification shape from /members/me/notifications. The `data` blob varies by
+ * type — keep it untyped so callers can drill in. Common types include
+ * "mentionedOnCard", "cardDueSoon", "addedToCard", "addAttachmentToCard",
+ * "commentCard", "changeCard" (move/due), "removedFromCard".
+ */
+export interface TrelloNotification {
+	id: string;
+	type: string;
+	date: string;
+	unread: boolean;
+	idMemberCreator: string | null;
+	data: {
+		text?: string;
+		card?: { id: string; name: string; idShort?: number; shortLink?: string };
+		board?: { id: string; name: string; shortLink?: string };
+		list?: { id: string; name: string };
+		listAfter?: { id: string; name: string };
+		listBefore?: { id: string; name: string };
+		[k: string]: unknown;
+	};
+}
+
 /** Minimal list shape. */
 export interface TrelloList {
 	id: string;
 	name: string;
 	idBoard: string;
 	closed: boolean;
+	pos?: number;
+	subscribed?: boolean;
 }
 
 /** Minimal board shape. */
@@ -239,7 +281,7 @@ export class TrelloClient {
 	async listMyAssignedCards(): Promise<TrelloCard[]> {
 		const data = await this.request("GET", "/members/me/cards", {
 			filter: "open",
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 		});
 		return data as TrelloCard[];
 	}
@@ -265,9 +307,67 @@ export class TrelloClient {
 
 	async listListsOnBoard(boardId: string): Promise<TrelloList[]> {
 		const data = await this.request("GET", `/boards/${boardId}/lists`, {
-			fields: "name,idBoard,closed",
+			fields: "name,idBoard,closed,pos,subscribed",
 		});
 		return data as TrelloList[];
+	}
+
+	/** Create a new list on a board. `pos` is "top", "bottom", or numeric. */
+	async createList(input: {
+		boardId: string;
+		name: string;
+		pos?: string | number;
+	}): Promise<TrelloList> {
+		const params: Record<string, string | number> = {
+			idBoard: input.boardId,
+			name: input.name,
+		};
+		if (input.pos !== undefined) params.pos = input.pos;
+		const data = await this.request("POST", "/lists", params);
+		return data as TrelloList;
+	}
+
+	/**
+	 * Update a list. Each field is optional.
+	 *   name        — rename
+	 *   closed      — archive (true) / unarchive (false)
+	 *   pos         — reorder ("top" / "bottom" / number)
+	 *   idBoard     — move the list (with its cards) to another board
+	 *   subscribed  — watch / unwatch
+	 */
+	async updateList(listId: string, input: {
+		name?: string;
+		closed?: boolean;
+		pos?: string | number;
+		idBoard?: string;
+		subscribed?: boolean;
+	}): Promise<TrelloList> {
+		const params: Record<string, string | number | boolean | undefined> = {};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.closed !== undefined) params.closed = input.closed;
+		if (input.pos !== undefined) params.pos = input.pos;
+		if (input.idBoard !== undefined) params.idBoard = input.idBoard;
+		if (input.subscribed !== undefined) params.subscribed = input.subscribed;
+		const data = await this.request("PUT", `/lists/${listId}`, params);
+		return data as TrelloList;
+	}
+
+	/** Move every card on one list to another list. */
+	async moveAllCardsOnList(sourceListId: string, targetListId: string, targetBoardId: string): Promise<void> {
+		await this.request("POST", `/lists/${sourceListId}/moveAllCards`, {
+			idBoard: targetBoardId,
+			idList: targetListId,
+		});
+	}
+
+	/** Archive every card on a list (closed=true on each). */
+	async archiveAllCardsOnList(listId: string): Promise<void> {
+		await this.request("POST", `/lists/${listId}/archiveAllCards`);
+	}
+
+	/** Set / unset the watch flag on a list. */
+	async setListSubscribed(listId: string, subscribed: boolean): Promise<TrelloList> {
+		return this.updateList(listId, { subscribed });
 	}
 
 	// ---- Labels ----
@@ -284,14 +384,14 @@ export class TrelloClient {
 
 	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/lists/${listId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 		});
 		return data as TrelloCard[];
 	}
 
 	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/boards/${boardId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 		});
 		return data as TrelloCard[];
 	}
@@ -300,7 +400,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 			cards_limit: 50,
 			partial: true,
 		};
@@ -324,7 +424,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query: input.query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
 			partial: true,
 		};
@@ -336,7 +436,7 @@ export class TrelloClient {
 
 	async getCard(cardId: string): Promise<TrelloCard> {
 		const data = await this.request("GET", `/cards/${cardId}`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos",
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
 		});
 		return data as TrelloCard;
 	}
@@ -369,6 +469,9 @@ export class TrelloClient {
 		dueComplete?: boolean;
 		pos?: string | number;
 		dueReminder?: number | null;
+		subscribed?: boolean;
+		/** JSON-stringified cover object (or "" to clear). */
+		cover?: string;
 	}): Promise<TrelloCard> {
 		const params: Record<string, string | number | boolean | undefined> = {};
 		if (input.name !== undefined) params.name = input.name;
@@ -381,6 +484,8 @@ export class TrelloClient {
 		if (input.pos !== undefined) params.pos = input.pos;
 		// dueReminder: -1 = no reminder. We forward exactly what the caller asks.
 		if (input.dueReminder !== undefined) params.dueReminder = input.dueReminder ?? -1;
+		if (input.subscribed !== undefined) params.subscribed = input.subscribed;
+		if (input.cover !== undefined) params.cover = input.cover;
 		const data = await this.request("PUT", `/cards/${cardId}`, params);
 		return data as TrelloCard;
 	}
@@ -413,6 +518,42 @@ export class TrelloClient {
 	 */
 	async setDueReminder(cardId: string, minutes: number | null): Promise<TrelloCard> {
 		return this.updateCard(cardId, { dueReminder: minutes });
+	}
+
+	/** Set or unset the watch/subscribe flag on a card. */
+	async setCardSubscribed(cardId: string, subscribed: boolean): Promise<TrelloCard> {
+		return this.updateCard(cardId, { subscribed });
+	}
+
+	/**
+	 * Set a cover. Either a palette color or an attachment id (or both — Trello
+	 * uses the attachment if present). `size` ∈ "normal" | "full"; `brightness`
+	 * ∈ "light" | "dark" (only meaningful for color covers).
+	 */
+	async setCardCover(
+		cardId: string,
+		input: {
+			color?: string | null;
+			idAttachment?: string | null;
+			size?: "normal" | "full";
+			brightness?: "light" | "dark";
+		},
+	): Promise<TrelloCard> {
+		const cover: Record<string, unknown> = {};
+		if (input.color !== undefined) cover.color = input.color;
+		if (input.idAttachment !== undefined) cover.idAttachment = input.idAttachment;
+		if (input.size !== undefined) cover.size = input.size;
+		if (input.brightness !== undefined) cover.brightness = input.brightness;
+		return this.updateCard(cardId, { cover: JSON.stringify(cover) });
+	}
+
+	/**
+	 * Clear the cover entirely (color + attachment + size + brightness).
+	 * Trello accepts an empty object or explicit nulls; the empty object is
+	 * the least surprising.
+	 */
+	async clearCardCover(cardId: string): Promise<TrelloCard> {
+		return this.updateCard(cardId, { cover: JSON.stringify({}) });
 	}
 
 	/**
@@ -467,6 +608,18 @@ export class TrelloClient {
 	 */
 	async deleteLabel(labelId: string): Promise<void> {
 		await this.request("DELETE", `/labels/${labelId}`);
+	}
+
+	/**
+	 * Rename or recolor a label. Empty-string color clears the color (Trello's
+	 * "no color" state). Either field is optional.
+	 */
+	async updateLabel(labelId: string, input: { name?: string; color?: string | null }): Promise<TrelloLabel> {
+		const params: Record<string, string> = {};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.color !== undefined) params.color = input.color === null ? "" : input.color;
+		const data = await this.request("PUT", `/labels/${labelId}`, params);
+		return data as TrelloLabel;
 	}
 
 	// ---- Comments ----
@@ -543,6 +696,33 @@ export class TrelloClient {
 		const data = await this.request("PUT", `/cards/${cardId}/checkItem/${itemId}`, {
 			state: complete ? "complete" : "incomplete",
 		});
+		return data as ChecklistItem;
+	}
+
+	/**
+	 * Update any subset of fields on a checklist item: name, state, due
+	 * (ISO 8601 string or null), idMember (assignee, or null to clear), pos
+	 * ("top" / "bottom" / number). Trello's single endpoint handles all of
+	 * these via PUT /cards/{idCard}/checkItem/{idCheckItem}.
+	 */
+	async updateChecklistItem(
+		cardId: string,
+		itemId: string,
+		input: {
+			name?: string;
+			state?: "complete" | "incomplete";
+			due?: string | null;
+			idMember?: string | null;
+			pos?: string | number;
+		},
+	): Promise<ChecklistItem> {
+		const params: Record<string, string | number | undefined> = {};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.state !== undefined) params.state = input.state;
+		if (input.due !== undefined) params.due = input.due ?? "";
+		if (input.idMember !== undefined) params.idMember = input.idMember ?? "";
+		if (input.pos !== undefined) params.pos = input.pos;
+		const data = await this.request("PUT", `/cards/${cardId}/checkItem/${itemId}`, params);
 		return data as ChecklistItem;
 	}
 
@@ -655,6 +835,55 @@ export class TrelloClient {
 			limit: Math.min(Math.max(limit, 1), 1000),
 		});
 		return data as TrelloAction[];
+	}
+
+	// ---- Notifications ----
+
+	/**
+	 * Read the authenticated user's notification feed. `filter` is a comma-
+	 * separated Trello notification-type filter — common values: "all",
+	 * "mentionedOnCard", "cardDueSoon", "addedToCard", "commentCard",
+	 * "changeCard", "addAttachmentToCard". `read` controls read/unread filter:
+	 * "all" | "read" | "unread".
+	 *
+	 * NOTE: `since` / `before` are notification IDs, NOT dates — Trello uses
+	 * cursor pagination here, not time-window queries.
+	 */
+	async listNotifications(input: {
+		filter?: string;
+		readFilter?: "all" | "read" | "unread";
+		limit?: number;
+		since?: string;
+		before?: string;
+	} = {}): Promise<TrelloNotification[]> {
+		const params: Record<string, string | number> = {
+			filter: input.filter ?? "all",
+			read_filter: input.readFilter ?? "all",
+			limit: Math.min(Math.max(input.limit ?? 50, 1), 1000),
+		};
+		if (input.since) params.since = input.since;
+		if (input.before) params.before = input.before;
+		const data = await this.request("GET", "/members/me/notifications", params);
+		return data as TrelloNotification[];
+	}
+
+	/** Mark a single notification read or unread. */
+	async markNotificationRead(notificationId: string, unread: boolean): Promise<TrelloNotification> {
+		const data = await this.request("PUT", `/notifications/${notificationId}/unread`, {
+			value: unread,
+		});
+		return data as TrelloNotification;
+	}
+
+	/**
+	 * Mark every unread notification read. Optional filter narrows scope —
+	 * e.g. "cardDueSoon" to clear due-soon pings only.
+	 */
+	async markAllNotificationsRead(input: { read?: boolean; filter?: string } = {}): Promise<void> {
+		const params: Record<string, string | boolean> = {};
+		if (input.read !== undefined) params.read = input.read;
+		if (input.filter) params.ids = input.filter; // Trello accepts type list here
+		await this.request("POST", "/notifications/all/read", params);
 	}
 
 	/** Convenience: comments only, chronological. */

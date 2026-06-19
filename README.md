@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (48)
+## Tools (65)
 
 **Reads**
 
@@ -28,6 +28,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
 | `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
 | `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, snoozed, big-rocks |
+| `list_notifications` | Authenticated user's bell-icon feed; filter by type + read state |
 
 **Writes**
 
@@ -63,6 +64,22 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `remove_attachment` | Remove an attachment from a card |
 | `batch_add_label` | Apply the same label to up to 50 cards (per-card skip reasons reported) |
 | `batch_move_cards` | Move up to 50 cards to the same destination list (guards + WIP warning) |
+| `create_list` | Create a new list on a board (with position) |
+| `rename_list` | Rename a list |
+| `archive_list` | Archive (default) or reopen a list |
+| `move_list` | Reposition a list and/or move it to another board |
+| `move_all_cards` | Bulk-move every card on a list to another list |
+| `archive_all_cards` | Bulk-archive every open card on a list |
+| `set_card_cover` | Set cover (palette color or attachment); size + brightness optional |
+| `clear_card_cover` | Strip the card's cover |
+| `set_checklist_item_due` | Set or clear a due date on a checklist item |
+| `assign_checklist_item_member` | Assign or unassign a member on a checklist item |
+| `reorder_checklist_item` | Move a checklist item within its checklist (top/bottom/number) |
+| `update_label` | Rename and/or recolor an existing label |
+| `subscribe_card` | Watch / unwatch a card |
+| `subscribe_list` | Watch / unwatch a list |
+| `mark_notification_read` | Flip one notification's read flag |
+| `mark_all_notifications_read` | Bulk mark every (optionally filtered) notification read |
 
 ## Safety guards
 
@@ -149,7 +166,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 48 tool implementations (testable in plain Node)
+    tools.ts                — 65 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

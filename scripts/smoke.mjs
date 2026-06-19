@@ -489,6 +489,97 @@ async function main() {
 		}
 	});
 
+	// 8. v1.6.0 — list mgmt, cover, checklist-item updates, label edit,
+	//             subscribe, notifications
+
+	console.log("\nv1.6.0 — lists / cover / checklist items / subscribe / notifications:");
+
+	let testListId = "";
+	await step("create_list + rename_list + archive_list round-trip", async () => {
+		const created = await trello("POST", "/lists", {
+			idBoard: BOARD["dann-to-do"],
+			name: "[MCP-TEST] smoke list",
+			pos: "bottom",
+		});
+		testListId = created.id;
+		if (!testListId) throw new Error("no list id");
+		const renamed = await trello("PUT", `/lists/${testListId}`, { name: "[MCP-TEST] renamed" });
+		if (renamed.name !== "[MCP-TEST] renamed") throw new Error(`rename failed: ${renamed.name}`);
+		const archived = await trello("PUT", `/lists/${testListId}`, { closed: true });
+		if (!archived.closed) throw new Error("list not archived");
+	});
+
+	await step("set_card_cover (color=red) + clear_card_cover", async () => {
+		const set = await trello("PUT", `/cards/${cardId}`, {
+			cover: JSON.stringify({ color: "red", size: "normal", brightness: "dark" }),
+		});
+		if (set?.cover?.color !== "red") throw new Error(`cover color mismatch: ${JSON.stringify(set?.cover)}`);
+		const cleared = await trello("PUT", `/cards/${cardId}`, { cover: JSON.stringify({}) });
+		if (cleared?.cover?.color) throw new Error(`cover not cleared: ${JSON.stringify(cleared?.cover)}`);
+	});
+
+	await step("update_label: rename + recolor lime → purple", async () => {
+		const lb = await trello("POST", "/labels", {
+			name: "[MCP-TEST] update target",
+			idBoard: BOARD["dann-to-do"],
+			color: "lime",
+		});
+		const updated = await trello("PUT", `/labels/${lb.id}`, {
+			name: "[MCP-TEST] updated",
+			color: "purple",
+		});
+		if (updated.name !== "[MCP-TEST] updated" || updated.color !== "purple") {
+			throw new Error(`label update failed: ${JSON.stringify(updated)}`);
+		}
+		await trello("DELETE", `/labels/${lb.id}`);
+	});
+
+	let updItemId = "";
+	let updChecklistId = "";
+	await step("checklist item: due + member + reorder", async () => {
+		const cl = await trello("POST", `/cards/${cardId}/checklists`, { name: "ItemUpdates" });
+		updChecklistId = cl.id;
+		const item = await trello("POST", `/checklists/${cl.id}/checkItems`, {
+			name: "Item to update",
+		});
+		updItemId = item.id;
+
+		const due = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+		const withDue = await trello("PUT", `/cards/${cardId}/checkItem/${item.id}`, { due });
+		if (!withDue.due) throw new Error(`item due not set: ${JSON.stringify(withDue)}`);
+
+		const me = await trello("GET", "/members/me", { fields: "username" });
+		const assigned = await trello("PUT", `/cards/${cardId}/checkItem/${item.id}`, {
+			idMember: me.id,
+		});
+		if (assigned.idMember !== me.id) throw new Error("item member not assigned");
+
+		// reorder to top
+		await trello("PUT", `/cards/${cardId}/checkItem/${item.id}`, { pos: "top" });
+
+		// cleanup the test checklist
+		await trello("DELETE", `/checklists/${cl.id}`);
+	});
+
+	await step("subscribe_card + subscribe_list flip & flip back", async () => {
+		const sc1 = await trello("PUT", `/cards/${cardId}`, { subscribed: true });
+		if (sc1.subscribed !== true) throw new Error(`card subscribed not set: ${sc1.subscribed}`);
+		const sc2 = await trello("PUT", `/cards/${cardId}`, { subscribed: false });
+		if (sc2.subscribed !== false) throw new Error(`card unsubscribe failed: ${sc2.subscribed}`);
+		const sl1 = await trello("PUT", `/lists/${LIST["@computer"]}`, { subscribed: true });
+		if (sl1.subscribed !== true) throw new Error(`list subscribed not set: ${sl1.subscribed}`);
+		await trello("PUT", `/lists/${LIST["@computer"]}`, { subscribed: false });
+	});
+
+	await step("list_notifications: feed responds with array", async () => {
+		const feed = await trello("GET", "/members/me/notifications", {
+			filter: "all",
+			read_filter: "all",
+			limit: 5,
+		});
+		if (!Array.isArray(feed)) throw new Error("notifications endpoint did not return array");
+	});
+
 	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {

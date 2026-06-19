@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 48 Trello tools.
+ *              GitHub-login allowlist, and registers the 65 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,11 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.6.0 (2026-06-13) — +17 tools across 6 themes: list mgmt (create/rename/archive/move
+ *                        + bulk move-all/archive-all cards), card cover (set/clear),
+ *                        checklist-item updates (due/member/reorder), update_label,
+ *                        subscribe (card/list), notifications (list/mark/mark-all).
+ *                        Total: 65.
  *   1.5.0 (2026-06-13) — +13 tools: members (list/add/remove + list_my_cards_assigned),
  *                        named checklists (create/rename/delete), copy_card,
  *                        set_due_reminder, comment edits (update/delete),
@@ -45,15 +50,20 @@ import {
 	add_file_attachment,
 	add_label,
 	add_member_to_card,
+	archive_all_cards,
 	archive_card,
+	archive_list,
+	assign_checklist_item_member,
 	batch_add_label,
 	batch_move_cards,
 	card_activity_log,
+	clear_card_cover,
 	convert_checklist_item_to_card,
 	copy_card,
 	create_card,
 	create_checklist,
 	create_label,
+	create_list,
 	delete_checklist,
 	delete_comment,
 	delete_label,
@@ -69,23 +79,35 @@ import {
 	list_labels,
 	list_lists,
 	list_my_cards_assigned,
+	list_notifications,
+	mark_all_notifications_read,
+	mark_notification_read,
+	move_all_cards,
 	move_card,
+	move_list,
 	read_comments,
 	remove_attachment,
 	remove_checklist_item,
 	remove_label,
 	remove_member_from_card,
 	rename_checklist,
+	rename_list,
+	reorder_checklist_item,
 	search_cards,
 	search_cards_advanced,
+	set_card_cover,
 	set_card_position,
+	set_checklist_item_due,
 	set_checklist_item_state,
 	set_due_complete,
 	set_due_reminder,
 	set_start_date,
 	snooze_read,
+	subscribe_card,
+	subscribe_list,
 	update_card,
 	update_comment,
+	update_label,
 	weekly_review_pack,
 } from "./trello/tools";
 
@@ -144,7 +166,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.5.0",
+		version: "1.6.0",
 	});
 
 	async init() {
@@ -695,6 +717,214 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 			guarded(login, async (i: { board?: string; staleDays?: number; maxPerBucket?: number }) =>
 				weekly_review_pack(client, i),
+			),
+		);
+
+		// ============================================================
+		// v1.6.0 — list mgmt, cover, checklist-item updates, label edit,
+		// subscribe, notifications
+		// ============================================================
+
+		this.server.tool(
+			"create_list",
+			"Create a new list on a board. Position is \"top\", \"bottom\", or a non-negative number.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				name: z.string().min(1),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+			},
+			guarded(login, async (i: { board?: string; name: string; position?: "top" | "bottom" | number }) =>
+				create_list(client, i),
+			),
+		);
+
+		this.server.tool(
+			"rename_list",
+			"Change a list's name.",
+			{
+				list: z.string().describe("List alias or ID."),
+				name: z.string().min(1),
+			},
+			guarded(login, async (i: { list: string; name: string }) => rename_list(client, i)),
+		);
+
+		this.server.tool(
+			"archive_list",
+			"Archive (default) or reopen a list. Pass `closed=false` to unarchive.",
+			{
+				list: z.string().describe("List alias or ID."),
+				closed: z.boolean().optional().describe("true (default) = archive, false = reopen."),
+			},
+			guarded(login, async (i: { list: string; closed?: boolean }) => archive_list(client, i)),
+		);
+
+		this.server.tool(
+			"move_list",
+			"Reposition a list (`position`) and/or move it to another board (`targetBoard`). At least one is required.",
+			{
+				list: z.string().describe("List alias or ID."),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+				targetBoard: z.string().optional().describe("Board alias or ID to move the list (and its cards) to."),
+			},
+			guarded(login, async (i: { list: string; position?: "top" | "bottom" | number; targetBoard?: string }) =>
+				move_list(client, i),
+			),
+		);
+
+		this.server.tool(
+			"move_all_cards",
+			"Bulk-move every card from one list to another. Guards source AND destination.",
+			{
+				sourceList: z.string().describe("List alias or ID to drain."),
+				targetList: z.string().describe("List alias or ID to receive."),
+			},
+			guarded(login, async (i: { sourceList: string; targetList: string }) =>
+				move_all_cards(client, i),
+			),
+		);
+
+		this.server.tool(
+			"archive_all_cards",
+			"Bulk-archive every open card on a list.",
+			{ list: z.string().describe("List alias or ID.") },
+			guarded(login, async (i: { list: string }) => archive_all_cards(client, i)),
+		);
+
+		this.server.tool(
+			"set_card_cover",
+			"Set a card cover by palette color OR an attachment already on the card. Colors: pink/yellow/lime/blue/black/orange/red/purple/sky/green. Size: normal/full. Brightness: light/dark (color covers only). To remove, use clear_card_cover.",
+			{
+				cardId: z.string(),
+				color: z.string().optional().describe("Trello cover palette color."),
+				attachmentId: z.string().optional().describe("Attachment id (from list_attachments) to use as cover."),
+				size: z.enum(["normal", "full"]).optional(),
+				brightness: z.enum(["light", "dark"]).optional(),
+			},
+			guarded(login, async (i: { cardId: string; color?: string; attachmentId?: string; size?: "normal" | "full"; brightness?: "light" | "dark" }) =>
+				set_card_cover(client, i),
+			),
+		);
+
+		this.server.tool(
+			"clear_card_cover",
+			"Remove the cover from a card.",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => clear_card_cover(client, i)),
+		);
+
+		this.server.tool(
+			"set_checklist_item_due",
+			"Set or clear a due date on a single checklist item. Pass an ISO 8601 string to set, or null to clear.",
+			{
+				cardId: z.string(),
+				itemId: z.string().describe("Checklist item ID from list_checklist_items."),
+				due: z.union([z.string(), z.null()]),
+			},
+			guarded(login, async (i: { cardId: string; itemId: string; due: string | null }) =>
+				set_checklist_item_due(client, i),
+			),
+		);
+
+		this.server.tool(
+			"assign_checklist_item_member",
+			"Assign or unassign a member on a single checklist item. `member` accepts ID, username, or full name; pass null to clear.",
+			{
+				cardId: z.string(),
+				itemId: z.string().describe("Checklist item ID from list_checklist_items."),
+				member: z.union([z.string(), z.null()]).describe("Member ID/username/full name, or null."),
+			},
+			guarded(login, async (i: { cardId: string; itemId: string; member: string | null }) =>
+				assign_checklist_item_member(client, i),
+			),
+		);
+
+		this.server.tool(
+			"reorder_checklist_item",
+			"Move a checklist item within its checklist. Position is \"top\", \"bottom\", or a non-negative number.",
+			{
+				cardId: z.string(),
+				itemId: z.string().describe("Checklist item ID from list_checklist_items."),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]),
+			},
+			guarded(login, async (i: { cardId: string; itemId: string; position: "top" | "bottom" | number }) =>
+				reorder_checklist_item(client, i),
+			),
+		);
+
+		this.server.tool(
+			"update_label",
+			"Rename and/or recolor a label. `label` accepts ID or name (resolved on the board); at least one of name/color must be passed. Color: palette token or null to clear.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				label: z.string().describe("Label ID or name."),
+				name: z.string().min(1).optional(),
+				color: z.union([z.string(), z.null()]).optional(),
+			},
+			guarded(login, async (i: { board?: string; label: string; name?: string; color?: string | null }) =>
+				update_label(client, i),
+			),
+		);
+
+		this.server.tool(
+			"subscribe_card",
+			"Watch (subscribe=true) or unwatch (false) a card. Controls whether activity on the card produces notifications for you.",
+			{
+				cardId: z.string(),
+				subscribed: z.boolean(),
+			},
+			guarded(login, async (i: { cardId: string; subscribed: boolean }) =>
+				subscribe_card(client, i),
+			),
+		);
+
+		this.server.tool(
+			"subscribe_list",
+			"Watch (subscribe=true) or unwatch (false) a list. Activity on any card in the list will produce notifications for you.",
+			{
+				list: z.string().describe("List alias or ID."),
+				subscribed: z.boolean(),
+			},
+			guarded(login, async (i: { list: string; subscribed: boolean }) =>
+				subscribe_list(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_notifications",
+			"The authenticated user's notification feed (the bell icon). Optional comma-separated `filter` of types (e.g. \"mentionedOnCard,cardDueSoon,addedToCard\", default \"all\"). `readFilter`: all/read/unread. `since`/`before` are notification IDs (cursor pagination), not dates.",
+			{
+				filter: z.string().optional(),
+				readFilter: z.enum(["all", "read", "unread"]).optional(),
+				limit: z.number().int().min(1).max(1000).optional(),
+				since: z.string().optional(),
+				before: z.string().optional(),
+			},
+			guarded(login, async (i: { filter?: string; readFilter?: "all" | "read" | "unread"; limit?: number; since?: string; before?: string }) =>
+				list_notifications(client, i),
+			),
+		);
+
+		this.server.tool(
+			"mark_notification_read",
+			"Flip a single notification's read flag. Default: marks it READ (unread=false).",
+			{
+				notificationId: z.string(),
+				unread: z.boolean().optional().describe("true = mark unread, false (default) = mark read."),
+			},
+			guarded(login, async (i: { notificationId: string; unread?: boolean }) =>
+				mark_notification_read(client, i),
+			),
+		);
+
+		this.server.tool(
+			"mark_all_notifications_read",
+			"Bulk mark every unread notification as read. Optional `filter` narrows scope (e.g. \"cardDueSoon\" to clear due-soon pings only).",
+			{
+				filter: z.string().optional(),
+				read: z.boolean().optional().describe("Default true (mark read). Pass false to bulk-unread, rarely useful."),
+			},
+			guarded(login, async (i: { filter?: string; read?: boolean }) =>
+				mark_all_notifications_read(client, i),
 			),
 		);
 	}

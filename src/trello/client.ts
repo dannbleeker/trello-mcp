@@ -10,6 +10,11 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.7.0 (2026-06-13) — TrelloReaction + TrelloMembership types. New methods:
+ *                        voteCard, unvoteCard, listCardVoters, addCommentReaction,
+ *                        removeCommentReaction, listCommentReactions, copyChecklist,
+ *                        markCardAssociatedNotificationsRead, listListActions,
+ *                        listMyActions, listBoardMemberships, getMember.
  *   1.6.0 (2026-06-13) — TrelloNotification + TrelloCardCover types. TrelloCard gains
  *                        subscribed + cover. TrelloList gains pos + subscribed.
  *                        New methods: createList, updateList, moveAllCardsOnList,
@@ -90,6 +95,39 @@ export interface TrelloMember {
 	fullName: string;
 	username: string;
 	initials: string;
+}
+
+/**
+ * Reaction shape from /actions/{id}/reactions. `emoji.shortName` is the
+ * portable identifier (e.g. "thumbsup", "white_check_mark", "heart").
+ */
+export interface TrelloReaction {
+	id: string;
+	idMember: string;
+	idModel: string;
+	idEmoji: string;
+	member: { id: string; fullName: string; username: string } | null;
+	emoji: {
+		shortName: string;
+		native?: string;
+		name?: string;
+		unified?: string;
+		skinVariation?: string;
+	};
+}
+
+/**
+ * Board membership shape — richer than the flat `TrelloMember` list. Each row
+ * carries a memberType (admin / normal / observer / virtual) and confirmation
+ * state. Use this when you need to distinguish board roles.
+ */
+export interface TrelloMembership {
+	id: string;
+	idMember: string;
+	memberType: "admin" | "normal" | "observer" | "virtual" | string;
+	unconfirmed: boolean;
+	deactivated: boolean;
+	member?: { id: string; fullName: string; username: string };
 }
 
 /**
@@ -622,6 +660,49 @@ export class TrelloClient {
 		return data as TrelloLabel;
 	}
 
+	// ---- Voting ----
+
+	/** Cast a vote on a card as the given member (or "me" for self). */
+	async voteCard(cardId: string, memberId: string = "me"): Promise<void> {
+		await this.request("POST", `/cards/${cardId}/membersVoted`, { value: memberId });
+	}
+
+	/** Remove a member's vote from a card. */
+	async unvoteCard(cardId: string, memberId: string): Promise<void> {
+		await this.request("DELETE", `/cards/${cardId}/membersVoted/${memberId}`);
+	}
+
+	/** Members who have voted on a card. */
+	async listCardVoters(cardId: string): Promise<TrelloMember[]> {
+		const data = await this.request("GET", `/cards/${cardId}/membersVoted`, {
+			fields: "fullName,username,initials",
+		});
+		return data as TrelloMember[];
+	}
+
+	// ---- Reactions on comments (actions) ----
+
+	/**
+	 * Add an emoji reaction to a comment (Trello stores comments as actions, so
+	 * reactions live on the action id). `shortName` is the portable identifier:
+	 * "thumbsup", "white_check_mark", "heart", "eyes", "raised_hands", etc.
+	 */
+	async addCommentReaction(actionId: string, shortName: string): Promise<TrelloReaction> {
+		const data = await this.request("POST", `/actions/${actionId}/reactions`, {
+			shortName,
+		});
+		return data as TrelloReaction;
+	}
+
+	async removeCommentReaction(actionId: string, reactionId: string): Promise<void> {
+		await this.request("DELETE", `/actions/${actionId}/reactions/${reactionId}`);
+	}
+
+	async listCommentReactions(actionId: string): Promise<TrelloReaction[]> {
+		const data = await this.request("GET", `/actions/${actionId}/reactions`);
+		return data as TrelloReaction[];
+	}
+
 	// ---- Comments ----
 
 	async addComment(cardId: string, text: string): Promise<void> {
@@ -652,6 +733,26 @@ export class TrelloClient {
 	/** Create a new checklist on a card with an explicit name. */
 	async createChecklist(cardId: string, name: string): Promise<Checklist> {
 		const data = await this.request("POST", `/cards/${cardId}/checklists`, { name });
+		return data as Checklist;
+	}
+
+	/**
+	 * Copy an existing checklist (with all its items) onto a target card.
+	 * Trello supports `idChecklistSource` on the create endpoint. Optional
+	 * `name` overrides the copy's title; `pos` sets initial position.
+	 */
+	async copyChecklist(input: {
+		targetCardId: string;
+		sourceChecklistId: string;
+		name?: string;
+		pos?: string | number;
+	}): Promise<Checklist> {
+		const params: Record<string, string | number | undefined> = {
+			idChecklistSource: input.sourceChecklistId,
+		};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.pos !== undefined) params.pos = input.pos;
+		const data = await this.request("POST", `/cards/${input.targetCardId}/checklists`, params);
 		return data as Checklist;
 	}
 
@@ -884,6 +985,50 @@ export class TrelloClient {
 		if (input.read !== undefined) params.read = input.read;
 		if (input.filter) params.ids = input.filter; // Trello accepts type list here
 		await this.request("POST", "/notifications/all/read", params);
+	}
+
+	/** Mark every notification associated with this card as read in one call. */
+	async markCardAssociatedNotificationsRead(cardId: string): Promise<void> {
+		await this.request("POST", `/cards/${cardId}/markAssociatedNotificationsRead`);
+	}
+
+	// ---- Activity (broader) ----
+
+	/** Actions on a single list. Filter is comma-separated action types. */
+	async listListActions(listId: string, filter = "all", limit = 50): Promise<TrelloAction[]> {
+		const data = await this.request("GET", `/lists/${listId}/actions`, {
+			filter,
+			limit: Math.min(Math.max(limit, 1), 1000),
+		});
+		return data as TrelloAction[];
+	}
+
+	/** The authenticated user's recent activity across every board they touch. */
+	async listMyActions(filter = "all", limit = 50): Promise<TrelloAction[]> {
+		const data = await this.request("GET", "/members/me/actions", {
+			filter,
+			limit: Math.min(Math.max(limit, 1), 1000),
+		});
+		return data as TrelloAction[];
+	}
+
+	// ---- Memberships + member lookup ----
+
+	/** Board memberships with role data (admin / normal / observer / virtual). */
+	async listBoardMemberships(boardId: string): Promise<TrelloMembership[]> {
+		const data = await this.request("GET", `/boards/${boardId}/memberships`, {
+			member: true,
+			member_fields: "fullName,username,initials",
+		});
+		return data as TrelloMembership[];
+	}
+
+	/** Look up any member by ID or username. */
+	async getMember(idOrUsername: string): Promise<TrelloMember> {
+		const data = await this.request("GET", `/members/${idOrUsername}`, {
+			fields: "fullName,username,initials",
+		});
+		return data as TrelloMember;
 	}
 
 	/** Convenience: comments only, chronological. */

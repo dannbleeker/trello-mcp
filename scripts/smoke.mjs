@@ -580,6 +580,94 @@ async function main() {
 		if (!Array.isArray(feed)) throw new Error("notifications endpoint did not return array");
 	});
 
+	// 9. v1.7.0 — votes, comment reactions, copy_checklist, bulk-clear card
+	//             notifications, broader activity reads, memberships, get_member
+
+	console.log("\nv1.7.0 — votes / reactions / copy_checklist / activity / memberships:");
+
+	await step("vote_card + list_card_voters + unvote_card", async () => {
+		const me = await trello("GET", "/members/me", { fields: "username" });
+		await trello("POST", `/cards/${cardId}/membersVoted`, { value: me.id });
+		const voters = await trello("GET", `/cards/${cardId}/membersVoted`, { fields: "username" });
+		if (!voters.find((v) => v.id === me.id)) {
+			throw new Error("self not in voters after vote");
+		}
+		await trello("DELETE", `/cards/${cardId}/membersVoted/${me.id}`);
+	});
+
+	let reactionCommentId = "";
+	let reactionId = "";
+	await step("add_comment_reaction + list + remove", async () => {
+		const c = await trello("POST", `/cards/${cardId}/actions/comments`, {
+			text: "Reaction target comment.",
+		});
+		reactionCommentId = c.id;
+		const r = await trello("POST", `/actions/${c.id}/reactions`, { shortName: "thumbsup" });
+		if (!r.id) throw new Error("no reaction id returned");
+		reactionId = r.id;
+		const list = await trello("GET", `/actions/${c.id}/reactions`);
+		if (!Array.isArray(list) || !list.find((x) => x.id === r.id)) {
+			throw new Error("reaction not in list");
+		}
+		await trello("DELETE", `/actions/${c.id}/reactions/${r.id}`);
+	});
+
+	let copiedChecklistId = "";
+	await step("copy_checklist: source checklist landed on second card", async () => {
+		// Make a source checklist on `cardId`, then copy it to `copiedCardId`.
+		const src = await trello("POST", `/cards/${cardId}/checklists`, { name: "CopySource" });
+		await trello("POST", `/checklists/${src.id}/checkItems`, { name: "A" });
+		await trello("POST", `/checklists/${src.id}/checkItems`, { name: "B" });
+		const copy = await trello("POST", `/cards/${copiedCardId}/checklists`, {
+			idChecklistSource: src.id,
+		});
+		copiedChecklistId = copy.id;
+		const onCopy = await trello("GET", `/cards/${copiedCardId}/checklists`, {
+			fields: "name",
+			checkItem_fields: "name",
+		});
+		const found = onCopy.find((cl) => cl.id === copy.id);
+		if (!found || !Array.isArray(found.checkItems) || found.checkItems.length < 2) {
+			throw new Error(`copy missing items: ${JSON.stringify(found)}`);
+		}
+		// cleanup the source checklist on cardId
+		await trello("DELETE", `/checklists/${src.id}`);
+	});
+
+	await step("mark_card_notifications_read: returns 200", async () => {
+		await trello("POST", `/cards/${cardId}/markAssociatedNotificationsRead`);
+	});
+
+	await step("list_list_actions @computer responds with array", async () => {
+		const actions = await trello("GET", `/lists/${LIST["@computer"]}/actions`, {
+			filter: "all",
+			limit: 5,
+		});
+		if (!Array.isArray(actions)) throw new Error("list actions did not return array");
+	});
+
+	await step("list_my_actions responds with array", async () => {
+		const actions = await trello("GET", "/members/me/actions", { filter: "all", limit: 5 });
+		if (!Array.isArray(actions)) throw new Error("my actions did not return array");
+	});
+
+	await step("list_board_memberships: includes self with a memberType", async () => {
+		const me = await trello("GET", "/members/me", { fields: "username" });
+		const m = await trello("GET", `/boards/${BOARD["dann-to-do"]}/memberships`, {
+			member: true,
+			member_fields: "username",
+		});
+		const mine = m.find((x) => x.idMember === me.id);
+		if (!mine) throw new Error("self not in memberships");
+		if (!mine.memberType) throw new Error("memberType missing");
+	});
+
+	await step("get_member by username returns self", async () => {
+		const me = await trello("GET", "/members/me", { fields: "username" });
+		const lookup = await trello("GET", `/members/${me.username}`, { fields: "username" });
+		if (lookup.id !== me.id) throw new Error("get_member did not match self");
+	});
+
 	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {

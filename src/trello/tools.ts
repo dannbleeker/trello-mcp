@@ -13,7 +13,7 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (65):
+ *              Tool surface (77):
  *                Reads (16):  list_boards, list_lists, list_cards,
  *                             list_cards_by_list, list_cards_due,
  *                             list_my_cards_assigned, get_card,
@@ -37,6 +37,13 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.7.0 (2026-06-13) — +12 tools across 4 themes:
+ *                        Voting (3):       vote_card, unvote_card, list_card_voters
+ *                        Reactions (3):    add_comment_reaction, remove_comment_reaction,
+ *                                          list_comment_reactions
+ *                        Bulk hygiene (2): copy_checklist, mark_card_notifications_read
+ *                        Inspection (4):   list_list_actions, list_my_actions,
+ *                                          list_board_memberships, get_member
  *   1.6.0 (2026-06-13) — +17 tools across 6 themes:
  *                        List mgmt (6):    create_list, rename_list, archive_list,
  *                                          move_list, move_all_cards, archive_all_cards
@@ -103,7 +110,9 @@ import type {
 	TrelloComment,
 	TrelloList,
 	TrelloMember,
+	TrelloMembership,
 	TrelloNotification,
+	TrelloReaction,
 } from "./client";
 import {
 	GuardError,
@@ -1696,6 +1705,242 @@ export async function mark_all_notifications_read(
 		filter: input.filter,
 	});
 	return { ok: true };
+}
+
+// ============================================================================
+// v1.7.0 — votes, comment reactions, copy_checklist, bulk-clear card
+// notifications, broader activity reads, memberships, member lookup
+// ============================================================================
+
+// ---- Voting ----
+
+/** vote_card — cast a vote on a card as the authenticated user. */
+export async function vote_card(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ ok: true; voterId: string }> {
+	await assertCardWritable(client, input.cardId);
+	const me = await client.getMe();
+	await client.voteCard(input.cardId, me.id);
+	return { ok: true, voterId: me.id };
+}
+
+/** unvote_card — withdraw your vote. */
+export async function unvote_card(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ ok: true }> {
+	await assertCardWritable(client, input.cardId);
+	const me = await client.getMe();
+	await client.unvoteCard(input.cardId, me.id);
+	return { ok: true };
+}
+
+/** list_card_voters — members who have voted on a card. */
+export async function list_card_voters(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ cardId: string; voters: TrelloMember[] }> {
+	const voters = await client.listCardVoters(input.cardId);
+	return { cardId: input.cardId, voters };
+}
+
+// ---- Reactions on comments ----
+
+/**
+ * add_comment_reaction — attach an emoji reaction to a comment. `emoji` is
+ * the Trello shortName (e.g. "thumbsup", "white_check_mark", "heart", "eyes",
+ * "raised_hands"). Use `list_comment_reactions` to see what's been used.
+ *
+ * NOTE: `commentId` is the action ID (from `read_comments`); reactions live on
+ * actions, not on the comment text directly.
+ */
+export async function add_comment_reaction(
+	client: TrelloClient,
+	input: { commentId: string; emoji: string },
+): Promise<{ reaction: { id: string; emoji: string; memberId: string } }> {
+	if (!input.emoji || input.emoji.trim().length === 0) {
+		throw new GuardError("emoji must be a non-empty shortName, e.g. \"thumbsup\".");
+	}
+	const r = await client.addCommentReaction(input.commentId, input.emoji);
+	return {
+		reaction: {
+			id: r.id,
+			emoji: r.emoji?.shortName ?? input.emoji,
+			memberId: r.idMember,
+		},
+	};
+}
+
+/** remove_comment_reaction — remove a reaction by its ID (from list_comment_reactions). */
+export async function remove_comment_reaction(
+	client: TrelloClient,
+	input: { commentId: string; reactionId: string },
+): Promise<{ ok: true }> {
+	await client.removeCommentReaction(input.commentId, input.reactionId);
+	return { ok: true };
+}
+
+/** list_comment_reactions — all reactions on a comment. */
+export async function list_comment_reactions(
+	client: TrelloClient,
+	input: { commentId: string },
+): Promise<{
+	commentId: string;
+	reactions: { id: string; emoji: string; memberId: string; memberUsername: string | null }[];
+}> {
+	const raw = await client.listCommentReactions(input.commentId);
+	return {
+		commentId: input.commentId,
+		reactions: raw.map((r) => ({
+			id: r.id,
+			emoji: r.emoji?.shortName ?? "",
+			memberId: r.idMember,
+			memberUsername: r.member?.username ?? null,
+		})),
+	};
+}
+
+// ---- Bulk / hygiene ----
+
+/**
+ * copy_checklist — duplicate an entire checklist (with its items) onto a
+ * target card. Use case: meeting-prep templates. Optional `newName` overrides
+ * the source checklist's name; `position` sets the new checklist's order.
+ */
+export async function copy_checklist(
+	client: TrelloClient,
+	input: {
+		sourceChecklistId: string;
+		targetCardId: string;
+		newName?: string;
+		position?: "top" | "bottom" | number;
+	},
+): Promise<{ checklist: { id: string; name: string } }> {
+	await assertCardWritable(client, input.targetCardId);
+	const cl = await client.copyChecklist({
+		targetCardId: input.targetCardId,
+		sourceChecklistId: input.sourceChecklistId,
+		name: input.newName,
+		pos: input.position,
+	});
+	return { checklist: { id: cl.id, name: cl.name } };
+}
+
+/**
+ * mark_card_notifications_read — clear every notification associated with one
+ * card in a single call. Faster than iterating mark_notification_read when
+ * you've already processed a card's events.
+ */
+export async function mark_card_notifications_read(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ ok: true }> {
+	await client.markCardAssociatedNotificationsRead(input.cardId);
+	return { ok: true };
+}
+
+// ---- Inspection reads ----
+
+/** list_list_actions — actions on a single list. Useful for "what happened on @waiting". */
+export async function list_list_actions(
+	client: TrelloClient,
+	input: { list: string; filter?: string; limit?: number },
+): Promise<{
+	listId: string;
+	actions: { id: string; type: string; date: string; author: string | null; data: Record<string, unknown> }[];
+}> {
+	const listId = resolveList(input.list);
+	const actions = await client.listListActions(
+		listId,
+		input.filter && input.filter.length > 0 ? input.filter : "all",
+		input.limit ?? 50,
+	);
+	return {
+		listId,
+		actions: actions
+			.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+			.map((a) => ({
+				id: a.id,
+				type: a.type,
+				date: a.date,
+				author: a.memberCreator?.fullName ?? null,
+				data: a.data,
+			})),
+	};
+}
+
+/**
+ * list_my_actions — the authenticated user's cross-board recent activity.
+ * Reflection use case: "what did I do across every board this week?"
+ */
+export async function list_my_actions(
+	client: TrelloClient,
+	input: { filter?: string; limit?: number },
+): Promise<{
+	actions: { id: string; type: string; date: string; data: Record<string, unknown> }[];
+}> {
+	const actions = await client.listMyActions(
+		input.filter && input.filter.length > 0 ? input.filter : "all",
+		input.limit ?? 50,
+	);
+	return {
+		actions: actions
+			.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+			.map((a) => ({
+				id: a.id,
+				type: a.type,
+				date: a.date,
+				data: a.data,
+			})),
+	};
+}
+
+/**
+ * list_board_memberships — richer than list_board_members: per-member role
+ * (admin / normal / observer / virtual) plus confirmation/deactivation state.
+ */
+export async function list_board_memberships(
+	client: TrelloClient,
+	input: { board?: string },
+): Promise<{
+	board: BoardSummary;
+	memberships: {
+		id: string;
+		memberId: string;
+		memberType: TrelloMembership["memberType"];
+		unconfirmed: boolean;
+		deactivated: boolean;
+		member: { id: string; fullName: string; username: string } | null;
+	}[];
+}> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const [board, memberships] = await Promise.all([
+		client.getBoard(boardId),
+		client.listBoardMemberships(boardId),
+	]);
+	return {
+		board: summariseBoard(board),
+		memberships: memberships.map((m) => ({
+			id: m.id,
+			memberId: m.idMember,
+			memberType: m.memberType,
+			unconfirmed: m.unconfirmed,
+			deactivated: m.deactivated,
+			member: m.member
+				? { id: m.member.id, fullName: m.member.fullName, username: m.member.username }
+				: null,
+		})),
+	};
+}
+
+/** get_member — look up any Trello member by ID or username. */
+export async function get_member(
+	client: TrelloClient,
+	input: { idOrUsername: string },
+): Promise<{ member: TrelloMember }> {
+	const member = await client.getMember(input.idOrUsername);
+	return { member };
 }
 
 // ---- Helpers ----

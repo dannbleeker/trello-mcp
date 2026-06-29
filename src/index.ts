@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 65 Trello tools.
+ *              GitHub-login allowlist, and registers the 77 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,10 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.7.0 (2026-06-13) — +12 tools: voting (vote/unvote/list_voters), comment reactions
+ *                        (add/remove/list), copy_checklist, mark_card_notifications_read,
+ *                        broader activity (list/my actions), memberships, get_member.
+ *                        Total: 77.
  *   1.6.0 (2026-06-13) — +17 tools across 6 themes: list mgmt (create/rename/archive/move
  *                        + bulk move-all/archive-all cards), card cover (set/clear),
  *                        checklist-item updates (due/member/reorder), update_label,
@@ -47,6 +51,7 @@ import {
 	add_attachment,
 	add_checklist_item,
 	add_comment,
+	add_comment_reaction,
 	add_file_attachment,
 	add_label,
 	add_member_to_card,
@@ -60,6 +65,7 @@ import {
 	clear_card_cover,
 	convert_checklist_item_to_card,
 	copy_card,
+	copy_checklist,
 	create_card,
 	create_checklist,
 	create_label,
@@ -68,19 +74,26 @@ import {
 	delete_comment,
 	delete_label,
 	get_card,
+	get_member,
 	list_attachments,
 	list_board_members,
+	list_board_memberships,
 	list_boards,
 	list_card_members,
+	list_card_voters,
 	list_cards,
 	list_cards_by_list,
 	list_cards_due,
 	list_checklist_items,
+	list_comment_reactions,
 	list_labels,
+	list_list_actions,
 	list_lists,
+	list_my_actions,
 	list_my_cards_assigned,
 	list_notifications,
 	mark_all_notifications_read,
+	mark_card_notifications_read,
 	mark_notification_read,
 	move_all_cards,
 	move_card,
@@ -88,6 +101,7 @@ import {
 	read_comments,
 	remove_attachment,
 	remove_checklist_item,
+	remove_comment_reaction,
 	remove_label,
 	remove_member_from_card,
 	rename_checklist,
@@ -105,9 +119,11 @@ import {
 	snooze_read,
 	subscribe_card,
 	subscribe_list,
+	unvote_card,
 	update_card,
 	update_comment,
 	update_label,
+	vote_card,
 	weekly_review_pack,
 } from "./trello/tools";
 
@@ -166,7 +182,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.6.0",
+		version: "1.7.0",
 	});
 
 	async init() {
@@ -926,6 +942,123 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			guarded(login, async (i: { filter?: string; read?: boolean }) =>
 				mark_all_notifications_read(client, i),
 			),
+		);
+
+		// ============================================================
+		// v1.7.0 — votes, comment reactions, copy_checklist, bulk-clear
+		// card notifications, broader activity reads, memberships, member lookup
+		// ============================================================
+
+		this.server.tool(
+			"vote_card",
+			"Cast a vote on a card as the authenticated user (the connector's GitHub-allowlisted identity).",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => vote_card(client, i)),
+		);
+
+		this.server.tool(
+			"unvote_card",
+			"Withdraw your vote from a card.",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => unvote_card(client, i)),
+		);
+
+		this.server.tool(
+			"list_card_voters",
+			"Members who have voted on a card (id, fullName, username, initials).",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => list_card_voters(client, i)),
+		);
+
+		this.server.tool(
+			"add_comment_reaction",
+			"Attach an emoji reaction to a comment. `commentId` is the action ID (from read_comments). `emoji` is a Trello shortName: \"thumbsup\", \"white_check_mark\", \"heart\", \"eyes\", \"raised_hands\", etc.",
+			{
+				commentId: z.string().describe("Action ID from read_comments."),
+				emoji: z.string().min(1).describe("Emoji shortName, e.g. \"thumbsup\"."),
+			},
+			guarded(login, async (i: { commentId: string; emoji: string }) =>
+				add_comment_reaction(client, i),
+			),
+		);
+
+		this.server.tool(
+			"remove_comment_reaction",
+			"Remove a reaction from a comment by its reaction ID (from list_comment_reactions).",
+			{
+				commentId: z.string().describe("Action ID."),
+				reactionId: z.string().describe("Reaction ID from list_comment_reactions."),
+			},
+			guarded(login, async (i: { commentId: string; reactionId: string }) =>
+				remove_comment_reaction(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_comment_reactions",
+			"All emoji reactions on a comment.",
+			{ commentId: z.string().describe("Action ID from read_comments.") },
+			guarded(login, async (i: { commentId: string }) => list_comment_reactions(client, i)),
+		);
+
+		this.server.tool(
+			"copy_checklist",
+			"Duplicate an entire checklist (with items) onto another card. Use for meeting-prep templates etc. `newName` overrides the source name; `position` is top/bottom/numeric.",
+			{
+				sourceChecklistId: z.string().describe("Checklist to copy FROM (from list_checklist_items)."),
+				targetCardId: z.string().describe("Card to copy the checklist TO."),
+				newName: z.string().min(1).optional(),
+				position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+			},
+			guarded(login, async (i: { sourceChecklistId: string; targetCardId: string; newName?: string; position?: "top" | "bottom" | number }) =>
+				copy_checklist(client, i),
+			),
+		);
+
+		this.server.tool(
+			"mark_card_notifications_read",
+			"Clear every notification associated with one card in a single call. Faster than iterating mark_notification_read after processing a card.",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => mark_card_notifications_read(client, i)),
+		);
+
+		this.server.tool(
+			"list_list_actions",
+			"Actions on a single list (e.g. \"what happened on @waiting this week\"). `filter` is a comma-separated Trello action-type filter; default \"all\". Newest-first.",
+			{
+				list: z.string().describe("List alias or ID."),
+				filter: z.string().optional(),
+				limit: z.number().int().min(1).max(1000).optional(),
+			},
+			guarded(login, async (i: { list: string; filter?: string; limit?: number }) =>
+				list_list_actions(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_my_actions",
+			"The authenticated user's cross-board recent activity. Useful for reflection (\"what did I do this week?\"). `filter` is a comma-separated action-type filter; default \"all\". Newest-first.",
+			{
+				filter: z.string().optional(),
+				limit: z.number().int().min(1).max(1000).optional(),
+			},
+			guarded(login, async (i: { filter?: string; limit?: number }) =>
+				list_my_actions(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_board_memberships",
+			"Board memberships with role data (admin / normal / observer / virtual) plus confirmation + deactivation state. Richer than list_board_members.",
+			{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_board_memberships(client, i)),
+		);
+
+		this.server.tool(
+			"get_member",
+			"Look up any Trello member's profile by ID or username (e.g. resolving a member id seen in raw data).",
+			{ idOrUsername: z.string() },
+			guarded(login, async (i: { idOrUsername: string }) => get_member(client, i)),
 		);
 	}
 }

@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (65)
+## Tools (77)
 
 **Reads**
 
@@ -29,6 +29,12 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
 | `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, snoozed, big-rocks |
 | `list_notifications` | Authenticated user's bell-icon feed; filter by type + read state |
+| `list_card_voters` | Members who have voted on a card |
+| `list_comment_reactions` | All emoji reactions on a comment |
+| `list_list_actions` | Recent actions on a single list |
+| `list_my_actions` | The authenticated user's cross-board recent activity |
+| `list_board_memberships` | Richer than `list_board_members` — adds memberType (admin/normal/observer/virtual) and state |
+| `get_member` | Look up any Trello member by ID or username |
 
 **Writes**
 
@@ -80,6 +86,12 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `subscribe_list` | Watch / unwatch a list |
 | `mark_notification_read` | Flip one notification's read flag |
 | `mark_all_notifications_read` | Bulk mark every (optionally filtered) notification read |
+| `vote_card` | Vote on a card as the authenticated user |
+| `unvote_card` | Withdraw your vote from a card |
+| `add_comment_reaction` | Add an emoji reaction to a comment |
+| `remove_comment_reaction` | Remove a reaction by its ID |
+| `copy_checklist` | Duplicate an entire checklist (with items) onto another card |
+| `mark_card_notifications_read` | Bulk-clear every notification associated with one card |
 
 ## Safety guards
 
@@ -166,7 +178,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 65 tool implementations (testable in plain Node)
+    tools.ts                — 77 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

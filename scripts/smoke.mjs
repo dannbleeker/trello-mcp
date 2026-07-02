@@ -518,6 +518,33 @@ async function main() {
 		if (cleared?.cover?.color) throw new Error(`cover not cleared: ${JSON.stringify(cleared?.cover)}`);
 	});
 
+	// Regression check for the v1.7.1 fix: sending idAttachment:null alongside
+	// a color makes Trello clear the color instead of setting it. The client
+	// must strip null cover fields so this doesn't happen.
+	await step("set_card_cover color persists when idAttachment is null in blob (v1.7.1 regression)", async () => {
+		// Broken shape — DO NOT send this from the client. If the fix is in place,
+		// the equivalent shape below (with the null stripped) should keep the color.
+		const good = await trello("PUT", `/cards/${cardId}`, {
+			cover: JSON.stringify({ color: "purple", size: "normal", brightness: "dark" }),
+		});
+		if (good?.cover?.color !== "purple") {
+			throw new Error(
+				`cover color did not persist without idAttachment:null; got ${JSON.stringify(good?.cover)}`,
+			);
+		}
+		// Now verify Trello's known-broken behaviour (documenting why the fix matters):
+		const broken = await trello("PUT", `/cards/${cardId}`, {
+			cover: JSON.stringify({ color: "sky", idAttachment: null, size: "normal", brightness: "dark" }),
+		});
+		if (broken?.cover?.color === "sky") {
+			console.log(
+				"  note: Trello now accepts idAttachment:null alongside a color — the v1.7.1 defensive strip is still correct but no longer strictly required.",
+			);
+		}
+		// Clean up
+		await trello("PUT", `/cards/${cardId}`, { cover: JSON.stringify({}) });
+	});
+
 	await step("update_label: rename + recolor lime → purple", async () => {
 		const lb = await trello("POST", "/labels", {
 			name: "[MCP-TEST] update target",

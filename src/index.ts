@@ -15,6 +15,7 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.7.1 (2026-07-02) — Fix set_card_cover color-not-persisting bug.
  *   1.7.0 (2026-06-13) — +12 tools: voting (vote/unvote/list_voters), comment reactions
  *                        (add/remove/list), copy_checklist, mark_card_notifications_read,
  *                        broader activity (list/my actions), memberships, get_member.
@@ -182,7 +183,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.7.0",
+		version: "1.7.1",
 	});
 
 	async init() {

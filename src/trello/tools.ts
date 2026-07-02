@@ -37,6 +37,10 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.7.1 (2026-07-02) — Fix set_card_cover: the tool was coercing undefined
+ *                        `attachmentId` to null and passing it down, which caused
+ *                        Trello to wipe the requested color. Now undefined stays
+ *                        undefined; only real values reach the cover blob.
  *   1.7.0 (2026-06-13) — +12 tools across 4 themes:
  *                        Voting (3):       vote_card, unvote_card, list_card_voters
  *                        Reactions (3):    add_comment_reaction, remove_comment_reaction,
@@ -1500,9 +1504,12 @@ export async function set_card_cover(
 			`Unknown cover color "${input.color}". Use one of: ${[...COVER_COLORS].join(", ")}.`,
 		);
 	}
+	// Pass undefined through (don't coerce to null): the client strips both.
+	// Explicit nulls here would land in the cover blob and cause Trello to
+	// clear the cover instead of setting it — see client.setCardCover.
 	const updated = await client.setCardCover(input.cardId, {
-		color: input.color ?? null,
-		idAttachment: input.attachmentId ?? null,
+		color: input.color,
+		idAttachment: input.attachmentId,
 		size: input.size,
 		brightness: input.brightness,
 	});

@@ -10,6 +10,10 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.7.1 (2026-07-02) — Fix setCardCover: was sending `idAttachment: null` in the
+ *                        cover blob whenever the caller only supplied a color, which
+ *                        Trello treats as "clear the cover" and wiped the color too.
+ *                        Now: only defined, non-null values reach the cover blob.
  *   1.7.0 (2026-06-13) — TrelloReaction + TrelloMembership types. New methods:
  *                        voteCard, unvoteCard, listCardVoters, addCommentReaction,
  *                        removeCommentReaction, listCommentReactions, copyChecklist,
@@ -567,6 +571,12 @@ export class TrelloClient {
 	 * Set a cover. Either a palette color or an attachment id (or both — Trello
 	 * uses the attachment if present). `size` ∈ "normal" | "full"; `brightness`
 	 * ∈ "light" | "dark" (only meaningful for color covers).
+	 *
+	 * IMPORTANT: fields that are undefined OR null are omitted from the cover
+	 * blob entirely. Trello treats an explicit `null` in the blob as "clear
+	 * this facet", and if you send `{"color":"purple","idAttachment":null}`
+	 * the null wins and the color never sticks. Only real values reach Trello.
+	 * Use clearCardCover() to strip an existing cover.
 	 */
 	async setCardCover(
 		cardId: string,
@@ -578,8 +588,10 @@ export class TrelloClient {
 		},
 	): Promise<TrelloCard> {
 		const cover: Record<string, unknown> = {};
-		if (input.color !== undefined) cover.color = input.color;
-		if (input.idAttachment !== undefined) cover.idAttachment = input.idAttachment;
+		if (input.color !== undefined && input.color !== null) cover.color = input.color;
+		if (input.idAttachment !== undefined && input.idAttachment !== null) {
+			cover.idAttachment = input.idAttachment;
+		}
 		if (input.size !== undefined) cover.size = input.size;
 		if (input.brightness !== undefined) cover.brightness = input.brightness;
 		return this.updateCard(cardId, { cover: JSON.stringify(cover) });

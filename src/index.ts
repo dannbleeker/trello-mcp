@@ -16,6 +16,8 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.10.0 (2026-07-02) — Audit-surfaced refactor pass. No behavior changes.
+ *                         See CHANGELOG.md for details.
  *   1.9.0 (2026-07-02) — 18 audit-surfaced bug fixes across guards, timezone, response
  *                        shapes, comment-family guards, and client-layer HTTP handling.
  *                        Tool signature changes: reaction tools gained optional cardId
@@ -212,7 +214,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.9.0",
+		version: "1.10.0",
 	});
 
 	async init() {

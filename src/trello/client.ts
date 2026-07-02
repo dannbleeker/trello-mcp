@@ -10,6 +10,17 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.10.0 (2026-07-02) — Refactor pass surfaced by the v1.8.0 audit. Extracted
+ *                         CARD_FIELDS and MEMBER_FIELDS constants (used to be
+ *                         duplicated 7 and 5 times respectively). Refactored
+ *                         request() + addFileAttachment to share retry logic
+ *                         via new retryableFetch helper (~30 lines removed).
+ *                         addComment now returns the created action so callers
+ *                         don't need to read_comments to find the ID. Added
+ *                         due + idMember to ChecklistItem interface (was cast-
+ *                         hacked in tools.ts as ChecklistItemWithExtras).
+ *                         clampLimit helper for the 4 duplicated inline clamps.
+ *                         No behavior changes.
  *   1.9.0 (2026-07-02) — 5 client-layer fixes surfaced by the v1.8.0 audit:
  *                        Add getList (needed for correct move_all_cards destination
  *                        board resolution). markAllNotificationsRead drops the
@@ -62,11 +73,22 @@
  *   1.0.0 (2026-06-12) — Initial.
  */
 
+import { CARD_FIELDS, MEMBER_FIELDS } from "./constants";
+
 const BASE = "https://api.trello.com/1";
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5000;
+
+/**
+ * Clamp a caller-supplied limit into [1, max]. Used by listActions,
+ * listNotifications, listListActions, listMyActions — was inlined 4× before
+ * v1.10.0.
+ */
+function clampLimit(limit: number, max: number = 1000): number {
+	return Math.min(Math.max(limit, 1), max);
+}
 
 /**
  * Parse a Retry-After header value into ms. Accepts:
@@ -307,13 +329,20 @@ export interface TrelloLabel {
 	idBoard: string;
 }
 
-/** Minimal checklist item shape. */
+/**
+ * Minimal checklist item shape. `due` and `idMember` are populated only when
+ * the item has them set (v1.6.0 checklist-item due dates + member assignment).
+ * Before v1.10.0 these were shoehorned via a private ChecklistItemWithExtras
+ * cast in tools.ts.
+ */
 export interface ChecklistItem {
 	id: string;
 	name: string;
 	state: "complete" | "incomplete";
 	pos: number;
 	idChecklist: string;
+	due?: string | null;
+	idMember?: string | null;
 }
 
 /** Minimal checklist shape. */
@@ -379,10 +408,37 @@ export class TrelloClient {
 	}
 
 	/**
-	 * Internal: execute with retry on 429 + transient 5xx. `body` is optional
-	 * — when supplied, it's JSON-encoded and sent as the request body (with
-	 * Content-Type: application/json). Auth still travels on the query string.
-	 * Used for endpoints Trello prefers body-JSON on (e.g. custom-field values).
+	 * Shared retry loop for every Trello HTTP call. `initFactory` is called
+	 * fresh on each attempt so single-shot bodies (multipart FormData with
+	 * Blobs) can be rebuilt without duplicating this whole loop. Throws
+	 * TrelloError on the last failure. v1.10.0 refactor.
+	 */
+	private async retryableFetch(
+		url: string,
+		initFactory: () => RequestInit | Promise<RequestInit>,
+	): Promise<Response> {
+		let attempt = 0;
+		while (true) {
+			attempt += 1;
+			const init = await initFactory();
+			const resp = await fetch(url, init);
+			if (resp.ok) return resp;
+			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
+				const delayMs = parseRetryAfterMs(resp.headers.get("Retry-After"), attempt);
+				await new Promise((r) => setTimeout(r, delayMs));
+				continue;
+			}
+			const respBody = await resp.text();
+			throw new TrelloError(resp.status, respBody);
+		}
+	}
+
+	/**
+	 * Internal: JSON-flavoured request with retry on 429 + transient 5xx.
+	 * `body` is optional — when supplied, it's JSON-encoded and sent as the
+	 * request body (with Content-Type: application/json). Auth still travels
+	 * on the query string. For multipart, use retryableFetch directly (see
+	 * addFileAttachment).
 	 */
 	private async request(
 		method: string,
@@ -390,9 +446,7 @@ export class TrelloClient {
 		params: Record<string, string | number | boolean | undefined> = {},
 		body?: unknown,
 	): Promise<unknown> {
-		let attempt = 0;
-		while (true) {
-			attempt += 1;
+		const resp = await this.retryableFetch(this.url(path, params), () => {
 			const init: RequestInit = {
 				method,
 				headers: { Accept: "application/json" },
@@ -401,23 +455,11 @@ export class TrelloClient {
 				(init.headers as Record<string, string>)["Content-Type"] = "application/json";
 				init.body = JSON.stringify(body);
 			}
-			const resp = await fetch(this.url(path, params), init);
-
-			if (resp.ok) {
-				// 204 No Content (rare for Trello) → return null
-				const ct = resp.headers.get("content-type") ?? "";
-				return ct.includes("application/json") ? await resp.json() : null;
-			}
-
-			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
-				const delayMs = parseRetryAfterMs(resp.headers.get("Retry-After"), attempt);
-				await new Promise((r) => setTimeout(r, delayMs));
-				continue;
-			}
-
-			const respBody = await resp.text();
-			throw new TrelloError(resp.status, respBody);
-		}
+			return init;
+		});
+		// 204 No Content (rare for Trello) → return null
+		const ct = resp.headers.get("content-type") ?? "";
+		return ct.includes("application/json") ? await resp.json() : null;
 	}
 
 	// ---- Members ----
@@ -425,21 +467,21 @@ export class TrelloClient {
 	/** The authenticated user. Useful for resolving "me" in list_my_cards_assigned. */
 	async getMe(): Promise<TrelloMember> {
 		const data = await this.request("GET", "/members/me", {
-			fields: "fullName,username,initials",
+			fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMember;
 	}
 
 	async listBoardMembers(boardId: string): Promise<TrelloMember[]> {
 		const data = await this.request("GET", `/boards/${boardId}/members`, {
-			fields: "fullName,username,initials",
+			fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMember[];
 	}
 
 	async listCardMembers(cardId: string): Promise<TrelloMember[]> {
 		const data = await this.request("GET", `/cards/${cardId}/members`, {
-			fields: "fullName,username,initials",
+			fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMember[];
 	}
@@ -459,7 +501,7 @@ export class TrelloClient {
 	async listMyAssignedCards(): Promise<TrelloCard[]> {
 		const data = await this.request("GET", "/members/me/cards", {
 			filter: "open",
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard[];
 	}
@@ -574,14 +616,14 @@ export class TrelloClient {
 
 	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/lists/${listId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard[];
 	}
 
 	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/boards/${boardId}/cards`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard[];
 	}
@@ -590,7 +632,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			card_fields: CARD_FIELDS,
 			cards_limit: 50,
 			partial: true,
 		};
@@ -614,7 +656,7 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query: input.query,
 			modelTypes: "cards",
-			card_fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			card_fields: CARD_FIELDS,
 			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
 			partial: true,
 		};
@@ -626,7 +668,7 @@ export class TrelloClient {
 
 	async getCard(cardId: string): Promise<TrelloCard> {
 		const data = await this.request("GET", `/cards/${cardId}`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard;
 	}
@@ -835,7 +877,7 @@ export class TrelloClient {
 	/** Members who have voted on a card. */
 	async listCardVoters(cardId: string): Promise<TrelloMember[]> {
 		const data = await this.request("GET", `/cards/${cardId}/membersVoted`, {
-			fields: "fullName,username,initials",
+			fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMember[];
 	}
@@ -865,8 +907,14 @@ export class TrelloClient {
 
 	// ---- Comments ----
 
-	async addComment(cardId: string, text: string): Promise<void> {
-		await this.request("POST", `/cards/${cardId}/actions/comments`, { text });
+	/**
+	 * Post a comment on a card. v1.10.0 change: returns the created action so
+	 * downstream tools (update_comment / delete_comment / add_comment_reaction)
+	 * can act on it without re-fetching via read_comments.
+	 */
+	async addComment(cardId: string, text: string): Promise<TrelloAction> {
+		const data = await this.request("POST", `/cards/${cardId}/actions/comments`, { text });
+		return data as TrelloAction;
 	}
 
 	/** Edit an existing comment (Trello stores comments as actions). */
@@ -1045,9 +1093,10 @@ export class TrelloClient {
 		u.searchParams.set("key", this.key);
 		u.searchParams.set("token", this.token);
 
-		let attempt = 0;
-		while (true) {
-			attempt += 1;
+		// v1.10.0: shares the retry loop with request() via retryableFetch.
+		// The FormData is rebuilt on each attempt because Blobs can't be
+		// re-read after a network-consumed body.
+		const resp = await this.retryableFetch(u.toString(), () => {
 			const form = new FormData();
 			form.append("name", input.filename);
 			form.append(
@@ -1055,25 +1104,10 @@ export class TrelloClient {
 				new Blob([input.bytes], { type: input.mimeType ?? "application/octet-stream" }),
 				input.filename,
 			);
-
-			const resp = await fetch(u.toString(), { method: "POST", body: form });
-			if (resp.ok) {
-				const ct = resp.headers.get("content-type") ?? "";
-				return (ct.includes("application/json") ? await resp.json() : null) as TrelloAttachment;
-			}
-
-			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
-				const retryAfter = resp.headers.get("Retry-After");
-				const delayMs = retryAfter && /^\d+$/.test(retryAfter)
-					? Math.min(Number(retryAfter) * 1000, RETRY_MAX_DELAY_MS)
-					: Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
-				await new Promise((r) => setTimeout(r, delayMs));
-				continue;
-			}
-
-			const body = await resp.text();
-			throw new TrelloError(resp.status, body);
-		}
+			return { method: "POST", body: form };
+		});
+		const ct = resp.headers.get("content-type") ?? "";
+		return (ct.includes("application/json") ? await resp.json() : null) as TrelloAttachment;
 	}
 
 	async removeAttachment(cardId: string, attachmentId: string): Promise<void> {
@@ -1093,7 +1127,7 @@ export class TrelloClient {
 	async listActions(cardId: string, filter = "all", limit = 50): Promise<TrelloAction[]> {
 		const data = await this.request("GET", `/cards/${cardId}/actions`, {
 			filter,
-			limit: Math.min(Math.max(limit, 1), 1000),
+			limit: clampLimit(limit),
 		});
 		return data as TrelloAction[];
 	}
@@ -1120,7 +1154,7 @@ export class TrelloClient {
 		const params: Record<string, string | number> = {
 			filter: input.filter ?? "all",
 			read_filter: input.readFilter ?? "all",
-			limit: Math.min(Math.max(input.limit ?? 50, 1), 1000),
+			limit: clampLimit(input.limit ?? 50),
 		};
 		if (input.since) params.since = input.since;
 		if (input.before) params.before = input.before;
@@ -1162,7 +1196,7 @@ export class TrelloClient {
 	async listListActions(listId: string, filter = "all", limit = 50): Promise<TrelloAction[]> {
 		const data = await this.request("GET", `/lists/${listId}/actions`, {
 			filter,
-			limit: Math.min(Math.max(limit, 1), 1000),
+			limit: clampLimit(limit),
 		});
 		return data as TrelloAction[];
 	}
@@ -1171,7 +1205,7 @@ export class TrelloClient {
 	async listMyActions(filter = "all", limit = 50): Promise<TrelloAction[]> {
 		const data = await this.request("GET", "/members/me/actions", {
 			filter,
-			limit: Math.min(Math.max(limit, 1), 1000),
+			limit: clampLimit(limit),
 		});
 		return data as TrelloAction[];
 	}
@@ -1182,7 +1216,7 @@ export class TrelloClient {
 	async listBoardMemberships(boardId: string): Promise<TrelloMembership[]> {
 		const data = await this.request("GET", `/boards/${boardId}/memberships`, {
 			member: true,
-			member_fields: "fullName,username,initials",
+			member_fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMembership[];
 	}
@@ -1190,7 +1224,7 @@ export class TrelloClient {
 	/** Look up any member by ID or username. */
 	async getMember(idOrUsername: string): Promise<TrelloMember> {
 		const data = await this.request("GET", `/members/${idOrUsername}`, {
-			fields: "fullName,username,initials",
+			fields: MEMBER_FIELDS,
 		});
 		return data as TrelloMember;
 	}
@@ -1417,7 +1451,7 @@ export class TrelloClient {
 
 	async listArchivedCards(boardId: string): Promise<TrelloCard[]> {
 		const data = await this.request("GET", `/boards/${boardId}/cards/closed`, {
-			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard[];
 	}

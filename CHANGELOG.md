@@ -4,6 +4,49 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-07-02
+
+### Changed
+Refactor pass surfaced by the v1.8.0 audit. No behavior changes except
+`add_comment` now returns the created action ID (additive, not breaking).
+Tool surface still 96.
+
+**Extractions:**
+- `CARD_FIELDS` + `MEMBER_FIELDS` constants in `constants.ts` — replaces
+  12 duplicated field-selector strings across `client.ts`.
+- `ROLLING_BIG_ROCKS_ID` constant now imported from `constants.ts` — was
+  hardcoded in `tools.ts` with a misleading "pulled from constants.ts"
+  comment.
+- `warnIfWipExceeded(client, listId, boardId)` helper — replaces the 5-line
+  post-write `[destCards, allLists] = Promise.all([...]); wipWarning(...)`
+  pattern that appeared 4× (`create_card`, `move_card`, `copy_card`,
+  `batch_move_cards`).
+- `clampLimit(limit, max=1000)` helper — replaces 4 inline
+  `Math.min(Math.max(limit, 1), 1000)` clamps.
+- `retryableFetch(url, initFactory)` internal method on the client — the
+  retry loop from `request()` and the entire duplicated retry loop from
+  `addFileAttachment` now share one implementation. `addFileAttachment`
+  shrunk from ~30 lines to ~15 while keeping FormData single-shot semantics
+  (initFactory rebuilds the form per attempt).
+
+**Type hygiene:**
+- `ChecklistItem` interface now models `due?: string | null` and
+  `idMember?: string | null` directly. The `ChecklistItemWithExtras`
+  cast that shoehorned these in `tools.ts` is gone.
+- `add_comment` returns `{ ok: true, commentId }`. Callers can immediately
+  update / delete / react to the comment without a follow-up
+  `read_comments` call. Previously the created action ID was thrown away.
+- `list_my_actions` now returns `author` in each action, matching the
+  siblings `card_activity_log` and `list_list_actions`. Was silently
+  dropped before.
+
+**Cosmetic:**
+- Section comments in `tools.ts` — the stale `// READS (6)` /
+  `// WRITES (9)` labels reflected v1.0.0 counts. Now explicitly labelled
+  as v1.0.0-originals so future additions don't rewrite the boundaries.
+- Trivial `aliasToId = alias => resolveList(alias)` local in
+  `weekly_review_pack` removed; `resolveList` is called directly.
+
 ## [1.9.0] — 2026-07-02
 
 ### Fixed
@@ -268,6 +311,7 @@ still 96.
 - Server-side guards: FORBIDDEN_LISTS (Butler, Repeater Cards),
   READ_ONLY_LISTS (Rolling Big Rocks), WIP-limit warnings.
 
+[1.10.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/dannbleeker/trello-mcp/compare/v1.7.0...v1.7.1

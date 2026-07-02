@@ -87,12 +87,30 @@ export const FORBIDDEN_LISTS = new Set<string>([
  *
  *   - Rolling Big Rocks (curated by Dann; the connector observes but does not touch)
  */
+/** Trello's Rolling Big Rocks list ID — the sole entry in READ_ONLY_LISTS. */
+export const ROLLING_BIG_ROCKS_ID = "5b6189409662065780670709";
+
 export const READ_ONLY_LISTS = new Set<string>([
-	"5b6189409662065780670709", // Rolling Big Rocks
+	ROLLING_BIG_ROCKS_ID, // Rolling Big Rocks
 ]);
 
 /** Maximum number of result rows any single tool returns. Prevents runaway responses. */
 export const MAX_RESULTS = 200;
+
+/**
+ * Card `fields` query-string used by every Trello card fetch. Extracted so
+ * adding/removing a field doesn't require touching 7 client methods. Order
+ * doesn't matter to Trello; kept alphabetical-ish by feature clusters for
+ * readability. If you add one, remember to widen the TrelloCard interface too.
+ */
+export const CARD_FIELDS =
+	"name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover";
+
+/**
+ * Member `fields` query-string used by every Trello member fetch. Same
+ * rationale as CARD_FIELDS.
+ */
+export const MEMBER_FIELDS = "fullName,username,initials";
 
 /**
  * IANA timezone used for day-boundary math (list_cards_due today scope,

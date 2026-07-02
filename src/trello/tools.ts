@@ -37,6 +37,16 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.10.0 (2026-07-02) — Refactor pass. Extracted CARD_FIELDS + MEMBER_FIELDS
+ *                         (client.ts) and ROLLING_BIG_ROCKS_ID (constants.ts) —
+ *                         removes 12+ dup sites. Extracted warnIfWipExceeded
+ *                         helper, used by create_card / move_card / copy_card /
+ *                         batch_move_cards. Dropped the ChecklistItemWithExtras
+ *                         cast (client.ts's ChecklistItem now models due +
+ *                         idMember directly). add_comment returns commentId.
+ *                         list_my_actions returns author (was inconsistent).
+ *                         Cleaned stale "READS (6)" / "WRITES (9)" comments.
+ *                         Dropped trivial aliasToId local. No behavior changes.
  *   1.9.0 (2026-07-02) — 18 bug fixes from the v1.8.0 audit:
  *                        4 READ_ONLY-guard additions (move_list, archive_list,
  *                        archive_all_cards, convert_checklist_item_to_card).
@@ -137,6 +147,7 @@ import {
 	LIST_ALIASES,
 	MAX_RESULTS,
 	READ_ONLY_LISTS,
+	ROLLING_BIG_ROCKS_ID,
 	boardAliasFor,
 	listAliasFor,
 	resolveBoard,
@@ -265,7 +276,7 @@ function applyCardFilters(
 }
 
 // ============================================================================
-// READS (6)
+// READS (v1.0.0 originals: list_boards, list_lists, list_cards, get_card, search_cards, list_checklist_items)
 // ============================================================================
 
 /** list_boards — every open board the authenticated Trello user belongs to. */
@@ -364,7 +375,7 @@ export async function list_checklist_items(
 }
 
 // ============================================================================
-// WRITES (9)
+// WRITES (v1.0.0 originals: create_card, move_card, update_card, archive_card, set_due_complete, add_label, remove_label, add_comment, add_checklist_item)
 // ============================================================================
 
 /** create_card — create a new card on the given list. Guards + WIP warning. */
@@ -383,13 +394,7 @@ export async function create_card(
 		idLabels: input.labels,
 	});
 
-	// WIP warning: count cards on dest AFTER create (so the count already includes this card).
-	const [destCards, allLists] = await Promise.all([
-		client.listCardsOnList(listId),
-		client.listListsOnBoard(card.idBoard),
-	]);
-	const warning = wipWarning(listId, destCards.length, allLists) ?? undefined;
-
+	const warning = await warnIfWipExceeded(client, listId, card.idBoard);
 	return { card: summariseCard(card), warning };
 }
 
@@ -406,14 +411,7 @@ export async function move_card(
 	assertNotReadOnly(sourceCard.idList, "source"); // refuse moves FROM Rolling Big Rocks
 
 	const moved = await client.moveCard(input.cardId, destListId);
-
-	// WIP warning: count AFTER move (count includes the newly arrived card).
-	const [destCards, allLists] = await Promise.all([
-		client.listCardsOnList(destListId),
-		client.listListsOnBoard(moved.idBoard),
-	]);
-	const warning = wipWarning(destListId, destCards.length, allLists) ?? undefined;
-
+	const warning = await warnIfWipExceeded(client, destListId, moved.idBoard);
 	return { card: summariseCard(moved), warning };
 }
 
@@ -473,14 +471,18 @@ export async function remove_label(
 	return { removed: labelId };
 }
 
-/** add_comment — append a comment to a card. */
+/**
+ * add_comment — append a comment to a card. v1.10.0: returns the created
+ * action's id so callers can immediately update / delete / react to it
+ * without a follow-up read_comments call.
+ */
 export async function add_comment(
 	client: TrelloClient,
 	input: { cardId: string; text: string },
-): Promise<{ ok: true }> {
+): Promise<{ ok: true; commentId: string }> {
 	await assertCardWritable(client, input.cardId);
-	await client.addComment(input.cardId, input.text);
-	return { ok: true };
+	const action = await client.addComment(input.cardId, input.text);
+	return { ok: true, commentId: action.id };
 }
 
 /** add_checklist_item — append an item to the card's checklist (creates one if absent). */
@@ -1090,14 +1092,9 @@ export async function batch_move_cards(
 		}
 	}
 
-	let warning: string | undefined;
-	if (destBoardId) {
-		const [destCards, allLists] = await Promise.all([
-			client.listCardsOnList(destListId),
-			client.listListsOnBoard(destBoardId),
-		]);
-		warning = wipWarning(destListId, destCards.length, allLists) ?? undefined;
-	}
+	const warning = destBoardId
+		? await warnIfWipExceeded(client, destListId, destBoardId)
+		: undefined;
 
 	return { moved, skipped, warning };
 }
@@ -1266,12 +1263,7 @@ export async function copy_card(
 		pos: input.position,
 	});
 
-	const [destCards, allLists] = await Promise.all([
-		client.listCardsOnList(destListId),
-		client.listListsOnBoard(copied.idBoard),
-	]);
-	const warning = wipWarning(destListId, destCards.length, allLists) ?? undefined;
-
+	const warning = await warnIfWipExceeded(client, destListId, copied.idBoard);
 	return { card: summariseCard(copied), warning };
 }
 
@@ -1344,8 +1336,8 @@ const WEEKLY_REVIEW_CONTEXT_LISTS = ["@computer", "@home", "@phone", "@errands",
 const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "someday"] as const;
 const WAITING_LIST_ALIAS = "waiting";
 const INBOX_LIST_ALIAS = "inbox";
-// Rolling Big Rocks list id (READ_ONLY). Pulled from constants.ts.
-const ROLLING_BIG_ROCKS_ID = "5b6189409662065780670709";
+// Rolling Big Rocks id imported from constants.ts (v1.10.0: was previously
+// hardcoded here with a misleading comment claiming it was imported).
 
 export async function weekly_review_pack(
 	client: TrelloClient,
@@ -1391,10 +1383,10 @@ export async function weekly_review_pack(
 	const weekEnd = now + 7 * 24 * 60 * 60 * 1000;
 	const staleCutoff = now - staleDays * 24 * 60 * 60 * 1000;
 
-	// Resolve known list aliases ONCE.
-	const aliasToId = (alias: string): string => resolveList(alias);
-	const inboxId = aliasToId(INBOX_LIST_ALIAS);
-	const waitingId = aliasToId(WAITING_LIST_ALIAS);
+	// Resolve known list aliases ONCE. (v1.10.0: dropped the trivial aliasToId
+	// local; resolveList is imported directly.)
+	const inboxId = resolveList(INBOX_LIST_ALIAS);
+	const waitingId = resolveList(WAITING_LIST_ALIAS);
 
 	const inboxCards = open.filter((c) => c.idList === inboxId);
 	const waitingCards = open.filter((c) => c.idList === waitingId);
@@ -1414,13 +1406,13 @@ export async function weekly_review_pack(
 
 	const contexts: Record<string, number> = {};
 	for (const alias of WEEKLY_REVIEW_CONTEXT_LISTS) {
-		const id = aliasToId(alias);
+		const id = resolveList(alias);
 		contexts[alias] = open.filter((c) => c.idList === id).length;
 	}
 
 	const couldDo: Record<string, number> = {};
 	for (const alias of WEEKLY_REVIEW_COULD_LISTS) {
-		const id = aliasToId(alias);
+		const id = resolveList(alias);
 		couldDo[alias] = open.filter((c) => c.idList === id).length;
 	}
 
@@ -1646,7 +1638,7 @@ export async function set_checklist_item_due(
 			id: item.id,
 			name: item.name,
 			state: item.state,
-			due: (item as ChecklistItemWithExtras).due ?? null,
+			due: item.due ?? null,
 		},
 	};
 }
@@ -1670,7 +1662,7 @@ export async function assign_checklist_item_member(
 			id: item.id,
 			name: item.name,
 			state: item.state,
-			memberId: (item as ChecklistItemWithExtras).idMember ?? null,
+			memberId: item.idMember ?? null,
 		},
 	};
 }
@@ -1984,19 +1976,22 @@ export async function list_my_actions(
 	client: TrelloClient,
 	input: { filter?: string; limit?: number },
 ): Promise<{
-	actions: { id: string; type: string; date: string; data: Record<string, unknown> }[];
+	actions: { id: string; type: string; date: string; author: string | null; data: Record<string, unknown> }[];
 }> {
 	const actions = await client.listMyActions(
 		input.filter && input.filter.length > 0 ? input.filter : "all",
 		input.limit ?? 50,
 	);
 	return {
+		// v1.10.0: `author` is now returned so this tool matches card_activity_log
+		// and list_list_actions. Previously dropped for no reason.
 		actions: actions
 			.sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
 			.map((a) => ({
 				id: a.id,
 				type: a.type,
 				date: a.date,
+				author: a.memberCreator?.fullName ?? null,
 				data: a.data,
 			})),
 	};
@@ -2486,21 +2481,6 @@ export async function list_archived_cards(
 
 // ---- Helpers ----
 
-/**
- * Trello returns due/idMember on checkItems when set, but our ChecklistItem
- * interface doesn't model them yet. Cast to this to read them safely without
- * widening the public interface in the client.
- */
-type ChecklistItemWithExtras = {
-	id: string;
-	name: string;
-	state: "complete" | "incomplete";
-	pos: number;
-	idChecklist: string;
-	due?: string | null;
-	idMember?: string | null;
-};
-
 /** Notification shape returned to the caller (terser than the raw Trello object). */
 interface SummarisedNotification {
 	id: string;
@@ -2597,6 +2577,24 @@ function decodeBase64(input: string): Uint8Array {
 	} catch {
 		throw new GuardError("contentBase64 is not valid base64.");
 	}
+}
+
+/**
+ * Post-write WIP-limit probe. After a create_card / move_card / copy_card /
+ * batch_move_cards operation puts a new card on `destListId`, count what's
+ * there and emit a warning if the list's "(WIP limit N)" suffix is now
+ * exceeded. Extracted in v1.10.0 — was inlined 4× with identical shape.
+ */
+async function warnIfWipExceeded(
+	client: TrelloClient,
+	destListId: string,
+	boardId: string,
+): Promise<string | undefined> {
+	const [destCards, allLists] = await Promise.all([
+		client.listCardsOnList(destListId),
+		client.listListsOnBoard(boardId),
+	]);
+	return wipWarning(destListId, destCards.length, allLists) ?? undefined;
 }
 
 /**

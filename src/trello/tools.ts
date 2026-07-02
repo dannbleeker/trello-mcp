@@ -2249,8 +2249,10 @@ export async function list_board_plugins(
 		client.getBoard(boardId),
 		client.listBoardPlugins(boardId),
 	]);
-	// Reverse-lookup alias if we know this plugin.
-	const idToAlias = new Map(
+	// Reverse-lookup alias if we know this plugin. Explicit Map<string, string>
+	// so `.get(p.idPlugin: string)` doesn't clash with the literal-narrowed
+	// keys TS infers from PLUGIN_ALIASES as-const on strict configs.
+	const idToAlias = new Map<string, string>(
 		Object.entries(PLUGIN_ALIASES).map(([alias, id]) => [id, alias]),
 	);
 	return {

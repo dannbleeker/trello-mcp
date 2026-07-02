@@ -1,0 +1,52 @@
+# Continuous integration for trello-mcp.
+#
+# Runs on every push to main and every pull request.
+# Cheap and boring: install deps, then run the TypeScript compiler in
+# no-emit mode. If the code doesn't type-check, the deploy Dann runs from
+# his laptop would silently ship a broken binding — this gate catches that
+# before it hits the Worker.
+#
+# We deliberately do NOT run the smoke test here: it requires real Trello +
+# GitHub OAuth secrets, and adding them to Actions widens the credential
+# surface for a solo project. Local `node scripts/smoke.mjs` covers that.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # Cancel superseded runs on the same branch to save minutes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Read-only. This workflow never mutates the repo or its secrets.
+  contents: read
+
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type-check
+        run: pnpm type-check

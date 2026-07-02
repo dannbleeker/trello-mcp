@@ -1,0 +1,65 @@
+# Weekly, grouped dependency PRs. One PR per ecosystem per week keeps
+# review overhead low; grouping means a single "bump everything patch/minor"
+# PR instead of a per-package firehose.
+
+version: 2
+updates:
+  # npm/pnpm dependencies (runtime + build tooling).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Copenhagen
+    open-pull-requests-limit: 5
+    groups:
+      # Patch + minor bumps get bundled into a single PR per group.
+      cloudflare:
+        patterns:
+          - "@cloudflare/*"
+          - wrangler
+        update-types:
+          - minor
+          - patch
+      mcp:
+        patterns:
+          - "@modelcontextprotocol/*"
+          - agents
+        update-types:
+          - minor
+          - patch
+      runtime-libs:
+        patterns:
+          - hono
+          - octokit
+          - zod
+          - just-pick
+        update-types:
+          - minor
+          - patch
+      dev-tooling:
+        patterns:
+          - typescript
+        update-types:
+          - minor
+          - patch
+    # Major bumps still land as individual PRs — Dann should review each.
+    ignore: []
+
+  # GitHub Actions used in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Copenhagen
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

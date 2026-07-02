@@ -130,3 +130,23 @@ export function boardAliasFor(id: string): BoardAlias | null {
 	}
 	return null;
 }
+
+/**
+ * Well-known Trello Power-Up (plugin) IDs. Useful for `enable_board_plugin`
+ * so callers can say "custom-fields" instead of pasting a raw ID. Extend as
+ * needed — every Power-Up has a stable Trello-side ID.
+ */
+export const PLUGIN_ALIASES = {
+	"custom-fields": "56d5e249a98895a9797bebb9",
+	"card-aging": "55a5d917446f517774210007",
+	"voting": "55a5d914446f517774210001",
+	"calendar": "55a5d915446f517774210004",
+} as const;
+
+export type PluginAlias = keyof typeof PLUGIN_ALIASES;
+
+/** Resolve a plugin key/ID to the canonical 24-char plugin ID. */
+export function resolvePlugin(key: string): string {
+	if (key in PLUGIN_ALIASES) return PLUGIN_ALIASES[key as PluginAlias];
+	return key;
+}

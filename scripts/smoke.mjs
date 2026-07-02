@@ -695,6 +695,212 @@ async function main() {
 		if (lookup.id !== me.id) throw new Error("get_member did not match self");
 	});
 
+	// 10. v1.8.0 — single-entity fetches, actions, custom fields, plugins,
+	//              batch, archived reads
+
+	console.log("\nv1.8.0 — single-entity fetches / actions / custom fields / plugins / batch / archived reads:");
+
+	await step("get_label: BESTSELLER label resolves with name/color/idBoard", async () => {
+		const labels = await trello("GET", `/boards/${BOARD["dann-to-do"]}/labels`, {
+			fields: "id,name",
+		});
+		const bs = labels.find((l) => l.name === "BESTSELLER");
+		if (!bs) throw new Error("BESTSELLER label not found on dann-to-do");
+		const lb = await trello("GET", `/labels/${bs.id}`, {
+			fields: "name,color,idBoard",
+		});
+		if (!lb.name) throw new Error(`label name missing: ${JSON.stringify(lb)}`);
+		if (!("color" in lb)) throw new Error(`label color field missing: ${JSON.stringify(lb)}`);
+		if (!lb.idBoard) throw new Error(`label idBoard missing: ${JSON.stringify(lb)}`);
+	});
+
+	await step("get_attachment: single attachment fetch round-trip", async () => {
+		const a = await trello("POST", `/cards/${cardId}/attachments`, {
+			url: "https://example.com/get-attachment-smoke",
+			name: "Get attachment smoke",
+		});
+		if (!a.id) throw new Error("no attachment id");
+		const one = await trello("GET", `/cards/${cardId}/attachments/${a.id}`);
+		if (!one?.id) throw new Error(`no id in single-attachment fetch: ${JSON.stringify(one)}`);
+		// previews may or may not be present for URL attachments; require id/name/url at minimum
+		if (!one.name) throw new Error(`attachment name missing: ${JSON.stringify(one)}`);
+		if (!one.url) throw new Error(`attachment url missing: ${JSON.stringify(one)}`);
+		await trello("DELETE", `/cards/${cardId}/attachments/${a.id}`);
+	});
+
+	await step("list_comment_reactions_summary: array response", async () => {
+		const c = await trello("POST", `/cards/${cardId}/actions/comments`, {
+			text: "Reaction summary smoke.",
+		});
+		const r = await trello("POST", `/actions/${c.id}/reactions`, { shortName: "thumbsup" });
+		const summary = await trello("GET", `/actions/${c.id}/reactionsSummary`);
+		if (!Array.isArray(summary)) {
+			throw new Error(`expected array, got ${JSON.stringify(summary).slice(0, 120)}`);
+		}
+		// cleanup: remove reaction + delete comment
+		await trello("DELETE", `/actions/${c.id}/reactions/${r.id}`);
+		await trello("DELETE", `/actions/${c.id}`);
+	});
+
+	await step("get_action + get_action_display: createCard action resolves", async () => {
+		const creates = await trello("GET", `/cards/${cardId}/actions`, {
+			filter: "createCard",
+			limit: 1,
+		});
+		if (!Array.isArray(creates) || creates.length < 1) {
+			throw new Error(`no createCard action for card: ${JSON.stringify(creates).slice(0, 120)}`);
+		}
+		const actionId = creates[0].id;
+		const action = await trello("GET", `/actions/${actionId}`);
+		if (!action) throw new Error("get_action returned null");
+		if (action.id !== actionId) throw new Error(`get_action id mismatch: ${action.id}`);
+		const display = await trello("GET", `/actions/${actionId}/display`);
+		if (!display) throw new Error("get_action_display returned null");
+	});
+
+	// Custom Fields end-to-end (biggest section). Enables the Custom Fields
+	// Power-Up only if it's not already on, so we don't disable it if it was.
+	const CUSTOM_FIELDS_PLUGIN_ID = "56d5e249a98895a9797bebb9";
+	let customFieldId = "";
+	let enabledCustomFieldsPlugin = false;
+	let customFieldsBoardPluginId = "";
+
+	await step("custom_fields: enable Power-Up if not already on", async () => {
+		const plugins = await trello(
+			"GET",
+			`/boards/${BOARD["dann-to-do"]}/boardPlugins`,
+		);
+		const existing = Array.isArray(plugins)
+			? plugins.find((p) => p.idPlugin === CUSTOM_FIELDS_PLUGIN_ID)
+			: null;
+		if (existing) {
+			customFieldsBoardPluginId = existing.id;
+			enabledCustomFieldsPlugin = false;
+		} else {
+			const enabled = await trello("POST", `/boards/${BOARD["dann-to-do"]}/boardPlugins`, {
+				idPlugin: CUSTOM_FIELDS_PLUGIN_ID,
+			});
+			if (!enabled?.id) throw new Error(`failed to enable Custom Fields Power-Up: ${JSON.stringify(enabled)}`);
+			customFieldsBoardPluginId = enabled.id;
+			enabledCustomFieldsPlugin = true;
+		}
+	});
+
+	await step("custom_fields: create text field on board", async () => {
+		const f = await trello("POST", "/customFields", {
+			idModel: BOARD["dann-to-do"],
+			modelType: "board",
+			name: "[MCP-TEST] smoke text",
+			type: "text",
+		});
+		if (!f?.id) throw new Error(`no custom field id: ${JSON.stringify(f)}`);
+		customFieldId = f.id;
+	});
+
+	await step("custom_fields: set text value on card via JSON body", async () => {
+		const url = new URL(`${BASE}/cards/${cardId}/customField/${customFieldId}/item`);
+		url.searchParams.set("key", KEY);
+		url.searchParams.set("token", TOKEN);
+		const r = await fetch(url, {
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({ value: { text: "hello from smoke" } }),
+		});
+		if (!r.ok) {
+			const body = await r.text();
+			throw new Error(`HTTP ${r.status}: ${body.slice(0, 200)}`);
+		}
+		const j = await r.json();
+		if (!j) throw new Error("empty response setting custom field value");
+	});
+
+	await step("custom_fields: list card items includes the text value", async () => {
+		const items = await trello("GET", `/cards/${cardId}/customFieldItems`);
+		if (!Array.isArray(items)) throw new Error(`expected array, got ${JSON.stringify(items).slice(0, 120)}`);
+		const mine = items.find((i) => i.idCustomField === customFieldId);
+		if (!mine) throw new Error("test custom field item not found on card");
+		if (mine.value?.text !== "hello from smoke") {
+			throw new Error(`expected text="hello from smoke", got ${JSON.stringify(mine.value)}`);
+		}
+	});
+
+	await step("custom_fields: clear value with empty JSON body", async () => {
+		const url = new URL(`${BASE}/cards/${cardId}/customField/${customFieldId}/item`);
+		url.searchParams.set("key", KEY);
+		url.searchParams.set("token", TOKEN);
+		const r = await fetch(url, {
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({}),
+		});
+		if (!r.ok) {
+			const body = await r.text();
+			throw new Error(`HTTP ${r.status}: ${body.slice(0, 200)}`);
+		}
+	});
+
+	await step("custom_fields: delete field", async () => {
+		await trello("DELETE", `/customFields/${customFieldId}`);
+		customFieldId = "";
+	});
+
+	await step("custom_fields: disable Power-Up if we enabled it", async () => {
+		if (!enabledCustomFieldsPlugin) {
+			return; // was already on before this run — leave it as we found it
+		}
+		const plugins = await trello(
+			"GET",
+			`/boards/${BOARD["dann-to-do"]}/boardPlugins`,
+		);
+		const existing = Array.isArray(plugins)
+			? plugins.find((p) => p.idPlugin === CUSTOM_FIELDS_PLUGIN_ID)
+			: null;
+		if (!existing) throw new Error("expected boardPlugin entry to disable but none found");
+		await trello("DELETE", `/boards/${BOARD["dann-to-do"]}/boardPlugins/${existing.id}`);
+	});
+
+	await step("list_board_plugins: returns array", async () => {
+		const plugins = await trello("GET", `/boards/${BOARD["dann-to-do"]}/boardPlugins`);
+		if (!Array.isArray(plugins)) {
+			throw new Error(`expected array, got ${JSON.stringify(plugins).slice(0, 120)}`);
+		}
+	});
+
+	await step("get_plugin: Custom Fields plugin has a name", async () => {
+		const p = await trello("GET", `/plugins/${CUSTOM_FIELDS_PLUGIN_ID}`);
+		if (!p || typeof p !== "object") throw new Error(`expected object, got ${JSON.stringify(p)}`);
+		if (!p.name) throw new Error(`plugin name missing: ${JSON.stringify(p).slice(0, 200)}`);
+	});
+
+	await step("batch_get: two boards in one call", async () => {
+		const urls = `/boards/${BOARD["dann-to-do"]},/boards/${BOARD["zoo"]}`;
+		const r = await trello("GET", "/batch", { urls });
+		if (!Array.isArray(r)) throw new Error(`expected array, got ${JSON.stringify(r).slice(0, 120)}`);
+		if (r.length !== 2) throw new Error(`expected length 2, got ${r.length}`);
+		for (const entry of r) {
+			if (!entry || typeof entry !== "object") {
+				throw new Error(`batch entry not an object: ${JSON.stringify(entry)}`);
+			}
+			const numericKey = Object.keys(entry).find((k) => /^\d+$/.test(k));
+			if (!numericKey) {
+				throw new Error(`batch entry missing numeric key: ${JSON.stringify(entry).slice(0, 120)}`);
+			}
+		}
+	});
+
+	await step("list_archived_cards: returns array", async () => {
+		const cards = await trello("GET", `/boards/${BOARD["dann-to-do"]}/cards/closed`);
+		if (!Array.isArray(cards)) {
+			throw new Error(`expected array, got ${JSON.stringify(cards).slice(0, 120)}`);
+		}
+	});
+
 	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {

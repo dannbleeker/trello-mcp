@@ -10,6 +10,16 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.8.0 (2026-07-02) — New types: TrelloCustomField, TrelloCustomFieldOption,
+ *                        TrelloCustomFieldItem, TrelloReactionSummary, TrelloPlugin,
+ *                        TrelloBoardPlugin. request() extended with an optional JSON
+ *                        body (required for /cards/{id}/customField/{id}/item). New
+ *                        methods: getLabel, getAttachment, listCommentReactionsSummary,
+ *                        getAction, getActionDisplay, listCustomFields, createCustomField,
+ *                        updateCustomField, deleteCustomField, addCustomFieldOption,
+ *                        deleteCustomFieldOption, listCardCustomFieldItems,
+ *                        setCardCustomFieldItem, listBoardPlugins, enableBoardPlugin,
+ *                        disableBoardPlugin, getPlugin, batchGet, listArchivedCards.
  *   1.7.1 (2026-07-02) — Fix setCardCover: was sending `idAttachment: null` in the
  *                        cover blob whenever the caller only supplied a color, which
  *                        Trello treats as "clear the cover" and wiped the color too.
@@ -99,6 +109,88 @@ export interface TrelloMember {
 	fullName: string;
 	username: string;
 	initials: string;
+}
+
+/**
+ * Custom Fields — Power-Up primitive. Types: "checkbox", "date", "list",
+ * "number", "text". `options` is present only for "list" type. `modelType`
+ * is always "board" in practice (that's where custom-field defs live).
+ */
+export interface TrelloCustomField {
+	id: string;
+	idModel: string;
+	modelType: string;
+	fieldGroup?: string;
+	name: string;
+	pos: number;
+	type: "checkbox" | "date" | "list" | "number" | "text";
+	options?: TrelloCustomFieldOption[];
+	display?: { cardFront?: boolean };
+}
+
+export interface TrelloCustomFieldOption {
+	id: string;
+	idCustomField: string;
+	value: { text?: string };
+	color?: string;
+	pos: number;
+}
+
+/**
+ * Per-card custom-field value. Exactly one of `idValue` (list-type field
+ * references its selected option) or `value` (all other types carry their
+ * data inside `value`) will be populated.
+ */
+export interface TrelloCustomFieldItem {
+	id: string;
+	idCustomField: string;
+	idModel: string;
+	modelType: string;
+	idValue?: string;
+	value?: {
+		checked?: string; // Trello returns "true" / "false" as strings
+		date?: string;
+		number?: string;
+		text?: string;
+	};
+}
+
+/** Reactions-summary row (grouped by emoji, with member reactions). */
+export interface TrelloReactionSummary {
+	count: number;
+	firstReacted: string;
+	id: string;
+	idEmoji: string;
+	idModel: string;
+	idReaction: string;
+	emoji: {
+		shortName: string;
+		native?: string;
+		name?: string;
+		unified?: string;
+	};
+}
+
+/** Metadata about a Power-Up. */
+export interface TrelloPlugin {
+	id: string;
+	name: string;
+	url?: string;
+	iconUrl?: string;
+	author?: string;
+	tags?: string[];
+	claimedDomains?: string[];
+	public?: boolean;
+	listing?: { name?: string; description?: string; overview?: string; locale?: string };
+	privacyUrl?: string;
+	supportEmail?: string;
+}
+
+/** A Power-Up enabled on a particular board. `id` is what disable takes. */
+export interface TrelloBoardPlugin {
+	id: string;
+	idBoard: string;
+	idPlugin: string;
 }
 
 /**
@@ -254,15 +346,30 @@ export class TrelloClient {
 		return u.toString();
 	}
 
-	/** Internal: execute with retry on 429 + transient 5xx. */
-	private async request(method: string, path: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<unknown> {
+	/**
+	 * Internal: execute with retry on 429 + transient 5xx. `body` is optional
+	 * — when supplied, it's JSON-encoded and sent as the request body (with
+	 * Content-Type: application/json). Auth still travels on the query string.
+	 * Used for endpoints Trello prefers body-JSON on (e.g. custom-field values).
+	 */
+	private async request(
+		method: string,
+		path: string,
+		params: Record<string, string | number | boolean | undefined> = {},
+		body?: unknown,
+	): Promise<unknown> {
 		let attempt = 0;
 		while (true) {
 			attempt += 1;
-			const resp = await fetch(this.url(path, params), {
+			const init: RequestInit = {
 				method,
 				headers: { Accept: "application/json" },
-			});
+			};
+			if (body !== undefined) {
+				(init.headers as Record<string, string>)["Content-Type"] = "application/json";
+				init.body = JSON.stringify(body);
+			}
+			const resp = await fetch(this.url(path, params), init);
 
 			if (resp.ok) {
 				// 204 No Content (rare for Trello) → return null
@@ -279,8 +386,8 @@ export class TrelloClient {
 				continue;
 			}
 
-			const body = await resp.text();
-			throw new TrelloError(resp.status, body);
+			const respBody = await resp.text();
+			throw new TrelloError(resp.status, respBody);
 		}
 	}
 
@@ -1057,5 +1164,192 @@ export class TrelloClient {
 			}))
 			.sort((x, y) => Date.parse(x.date) - Date.parse(y.date));
 		return comments;
+	}
+
+	// ============================================================
+	// v1.8.0 — single-entity fetches, action details, custom fields,
+	// plugins/power-ups, batch GET, archived cards
+	// ============================================================
+
+	// ---- Single-entity fetches ----
+
+	async getLabel(labelId: string): Promise<TrelloLabel> {
+		const data = await this.request("GET", `/labels/${labelId}`, {
+			fields: "name,color,idBoard,uses",
+		});
+		return data as TrelloLabel;
+	}
+
+	async getAttachment(cardId: string, attachmentId: string): Promise<TrelloAttachment> {
+		const data = await this.request("GET", `/cards/${cardId}/attachments/${attachmentId}`, {
+			fields: "id,name,url,date,bytes,mimeType,edgeColor,previews,pos",
+		});
+		return data as TrelloAttachment;
+	}
+
+	// ---- Actions (deep) ----
+
+	async getAction(actionId: string): Promise<TrelloAction> {
+		const data = await this.request("GET", `/actions/${actionId}`);
+		return data as TrelloAction;
+	}
+
+	async getActionDisplay(actionId: string): Promise<unknown> {
+		return this.request("GET", `/actions/${actionId}/display`);
+	}
+
+	async listCommentReactionsSummary(actionId: string): Promise<TrelloReactionSummary[]> {
+		const data = await this.request("GET", `/actions/${actionId}/reactionsSummary`);
+		return data as TrelloReactionSummary[];
+	}
+
+	// ---- Custom Fields (Power-Up) ----
+
+	async listCustomFields(boardId: string): Promise<TrelloCustomField[]> {
+		const data = await this.request("GET", `/boards/${boardId}/customFields`);
+		return data as TrelloCustomField[];
+	}
+
+	async createCustomField(input: {
+		boardId: string;
+		name: string;
+		type: "checkbox" | "date" | "list" | "number" | "text";
+		pos?: string | number;
+		displayCardFront?: boolean;
+	}): Promise<TrelloCustomField> {
+		const params: Record<string, string | number | boolean | undefined> = {
+			idModel: input.boardId,
+			modelType: "board",
+			name: input.name,
+			type: input.type,
+		};
+		if (input.pos !== undefined) params.pos = input.pos;
+		if (input.displayCardFront !== undefined) {
+			params["display_cardFront"] = input.displayCardFront;
+		}
+		const data = await this.request("POST", "/customFields", params);
+		return data as TrelloCustomField;
+	}
+
+	async updateCustomField(
+		customFieldId: string,
+		input: { name?: string; pos?: string | number; displayCardFront?: boolean },
+	): Promise<TrelloCustomField> {
+		const params: Record<string, string | number | boolean | undefined> = {};
+		if (input.name !== undefined) params.name = input.name;
+		if (input.pos !== undefined) params.pos = input.pos;
+		if (input.displayCardFront !== undefined) {
+			params["display/cardFront"] = input.displayCardFront;
+		}
+		const data = await this.request("PUT", `/customFields/${customFieldId}`, params);
+		return data as TrelloCustomField;
+	}
+
+	async deleteCustomField(customFieldId: string): Promise<void> {
+		await this.request("DELETE", `/customFields/${customFieldId}`);
+	}
+
+	async addCustomFieldOption(
+		customFieldId: string,
+		input: { value: string; color?: string; pos?: string | number },
+	): Promise<TrelloCustomFieldOption> {
+		// Trello expects the option value as { text: "..." } wrapped in a `value` object.
+		const body: Record<string, unknown> = { value: { text: input.value } };
+		if (input.color !== undefined) body.color = input.color;
+		if (input.pos !== undefined) body.pos = input.pos;
+		const data = await this.request(
+			"POST",
+			`/customFields/${customFieldId}/options`,
+			{},
+			body,
+		);
+		return data as TrelloCustomFieldOption;
+	}
+
+	async deleteCustomFieldOption(customFieldId: string, optionId: string): Promise<void> {
+		await this.request("DELETE", `/customFields/${customFieldId}/options/${optionId}`);
+	}
+
+	async listCardCustomFieldItems(cardId: string): Promise<TrelloCustomFieldItem[]> {
+		const data = await this.request("GET", `/cards/${cardId}/customFieldItems`);
+		return data as TrelloCustomFieldItem[];
+	}
+
+	/**
+	 * Set a custom-field value on a card. Uses JSON body — Trello prefers this
+	 * for the /cards/{id}/customField/{id}/item endpoint. `body` shape depends
+	 * on the field type:
+	 *   checkbox: { value: { checked: "true" | "false" } }
+	 *   date:     { value: { date: "ISO 8601" } }
+	 *   number:   { value: { number: "42" } }   (Trello wants a string here)
+	 *   text:     { value: { text: "..." } }
+	 *   list:     { idValue: "optionId" }
+	 * Pass {} (empty body) to clear.
+	 */
+	async setCardCustomFieldItem(
+		cardId: string,
+		customFieldId: string,
+		body: Record<string, unknown>,
+	): Promise<TrelloCustomFieldItem | null> {
+		const data = await this.request(
+			"PUT",
+			`/cards/${cardId}/customField/${customFieldId}/item`,
+			{},
+			body,
+		);
+		return data as TrelloCustomFieldItem | null;
+	}
+
+	// ---- Plugins / Power-Ups ----
+
+	async listBoardPlugins(boardId: string): Promise<TrelloBoardPlugin[]> {
+		const data = await this.request("GET", `/boards/${boardId}/boardPlugins`);
+		return data as TrelloBoardPlugin[];
+	}
+
+	async enableBoardPlugin(boardId: string, idPlugin: string): Promise<TrelloBoardPlugin> {
+		const data = await this.request("POST", `/boards/${boardId}/boardPlugins`, {
+			idPlugin,
+		});
+		return data as TrelloBoardPlugin;
+	}
+
+	async disableBoardPlugin(boardId: string, boardPluginId: string): Promise<void> {
+		await this.request("DELETE", `/boards/${boardId}/boardPlugins/${boardPluginId}`);
+	}
+
+	async getPlugin(pluginId: string): Promise<TrelloPlugin> {
+		const data = await this.request("GET", `/plugins/${pluginId}`);
+		return data as TrelloPlugin;
+	}
+
+	// ---- Batch GET ----
+
+	/**
+	 * Bundle up to 10 relative Trello URLs (each a full path starting with `/`)
+	 * into one request. Returns an array of `{ statusCode, body }` in the same
+	 * order as the input. A single URL's error doesn't fail the whole batch.
+	 */
+	async batchGet(paths: string[]): Promise<{ statusCode: number; body: unknown }[]> {
+		const data = await this.request("GET", "/batch", { urls: paths.join(",") });
+		// Trello returns array of single-key objects: [{ "200": {...body...} }, ...]
+		// Normalise to { statusCode, body }.
+		const raw = (data as unknown[]) ?? [];
+		return raw.map((entry) => {
+			if (entry && typeof entry === "object") {
+				const [k, v] = Object.entries(entry as Record<string, unknown>)[0] ?? ["500", null];
+				return { statusCode: Number(k), body: v };
+			}
+			return { statusCode: 500, body: null };
+		});
+	}
+
+	// ---- Archived-cards reads ----
+
+	async listArchivedCards(boardId: string): Promise<TrelloCard[]> {
+		const data = await this.request("GET", `/boards/${boardId}/cards/closed`, {
+			fields: "name,desc,idList,idBoard,labels,due,dueComplete,start,dueReminder,idMembers,url,dateLastActivity,closed,pos,subscribed,cover",
+		});
+		return data as TrelloCard[];
 	}
 }

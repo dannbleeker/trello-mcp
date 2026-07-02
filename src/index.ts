@@ -6,7 +6,7 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 77 Trello tools.
+ *              GitHub-login allowlist, and registers the 96 Trello tools.
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +15,10 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.8.0 (2026-07-02) — +19 tools: single-entity fetches (get_label, get_attachment),
+ *                        actions & reactions (list_comment_reactions_summary, get_action,
+ *                        get_action_display), custom fields (8 tools), plugins/power-ups
+ *                        (4 tools), batch_get, list_archived_cards. Total: 96.
  *   1.7.1 (2026-07-02) — Fix set_card_cover color-not-persisting bug.
  *   1.7.0 (2026-06-13) — +12 tools: voting (vote/unvote/list_voters), comment reactions
  *                        (add/remove/list), copy_checklist, mark_card_notifications_read,
@@ -53,6 +57,7 @@ import {
 	add_checklist_item,
 	add_comment,
 	add_comment_reaction,
+	add_custom_field_option,
 	add_file_attachment,
 	add_label,
 	add_member_to_card,
@@ -61,6 +66,7 @@ import {
 	archive_list,
 	assign_checklist_item_member,
 	batch_add_label,
+	batch_get,
 	batch_move_cards,
 	card_activity_log,
 	clear_card_cover,
@@ -69,17 +75,30 @@ import {
 	copy_checklist,
 	create_card,
 	create_checklist,
+	create_custom_field,
 	create_label,
 	create_list,
 	delete_checklist,
 	delete_comment,
+	delete_custom_field,
+	delete_custom_field_option,
 	delete_label,
+	disable_board_plugin,
+	enable_board_plugin,
+	get_action,
+	get_action_display,
+	get_attachment,
 	get_card,
+	get_label,
 	get_member,
+	get_plugin,
+	list_archived_cards,
 	list_attachments,
 	list_board_members,
 	list_board_memberships,
+	list_board_plugins,
 	list_boards,
+	list_card_custom_fields,
 	list_card_members,
 	list_card_voters,
 	list_cards,
@@ -87,6 +106,8 @@ import {
 	list_cards_due,
 	list_checklist_items,
 	list_comment_reactions,
+	list_comment_reactions_summary,
+	list_custom_fields,
 	list_labels,
 	list_list_actions,
 	list_lists,
@@ -111,6 +132,7 @@ import {
 	search_cards,
 	search_cards_advanced,
 	set_card_cover,
+	set_card_custom_field,
 	set_card_position,
 	set_checklist_item_due,
 	set_checklist_item_state,
@@ -123,6 +145,7 @@ import {
 	unvote_card,
 	update_card,
 	update_comment,
+	update_custom_field,
 	update_label,
 	vote_card,
 	weekly_review_pack,
@@ -183,7 +206,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.7.1",
+		version: "1.8.0",
 	});
 
 	async init() {
@@ -1060,6 +1083,231 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			"Look up any Trello member's profile by ID or username (e.g. resolving a member id seen in raw data).",
 			{ idOrUsername: z.string() },
 			guarded(login, async (i: { idOrUsername: string }) => get_member(client, i)),
+		);
+
+		// ============================================================
+		// v1.8.0 — single-entity fetches, action details, custom fields,
+		// plugins/power-ups, batch GET, archived-card reads
+		// ============================================================
+
+		this.server.tool(
+			"get_label",
+			"Fetch one label directly. `label` accepts a raw label ID or a name (resolved on `board`, default dann-to-do).",
+			{
+				label: z.string().describe("Label ID or name."),
+				board: z.string().optional().describe("Board alias or ID. Used only when `label` is a name. Default: dann-to-do."),
+			},
+			guarded(login, async (i: { label: string; board?: string }) => get_label(client, i)),
+		);
+
+		this.server.tool(
+			"get_attachment",
+			"Fetch a single attachment with richer fields than list_attachments returns (previews[], edgeColor, pos).",
+			{
+				cardId: z.string(),
+				attachmentId: z.string(),
+			},
+			guarded(login, async (i: { cardId: string; attachmentId: string }) =>
+				get_attachment(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_comment_reactions_summary",
+			"Grouped emoji-reaction counts on a comment. Lighter than list_comment_reactions when you just need per-emoji totals.",
+			{ commentId: z.string().describe("Action ID from read_comments.") },
+			guarded(login, async (i: { commentId: string }) =>
+				list_comment_reactions_summary(client, i),
+			),
+		);
+
+		this.server.tool(
+			"get_action",
+			"Full detail for a single action (move, comment, update, etc.). Complements card_activity_log / list_list_actions / list_my_actions for drilling into one event.",
+			{ actionId: z.string() },
+			guarded(login, async (i: { actionId: string }) => get_action(client, i)),
+		);
+
+		this.server.tool(
+			"get_action_display",
+			"Trello's pre-rendered human-readable version of an action (e.g. \"Dann moved X from @computer to @home\"). Useful for building activity feeds without reimplementing the rendering.",
+			{ actionId: z.string() },
+			guarded(login, async (i: { actionId: string }) => get_action_display(client, i)),
+		);
+
+		this.server.tool(
+			"list_custom_fields",
+			"Custom-field DEFINITIONS on a board (Power-Up). Requires the Custom Fields Power-Up enabled — see list_board_plugins / enable_board_plugin(\"custom-fields\").",
+			{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_custom_fields(client, i)),
+		);
+
+		this.server.tool(
+			"create_custom_field",
+			"Create a new custom-field definition on a board. `type` is one of checkbox / date / list / number / text. `pos` accepts \"top\" / \"bottom\" / a number.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				name: z.string().min(1),
+				type: z.enum(["checkbox", "date", "list", "number", "text"]),
+				pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+				displayCardFront: z.boolean().optional().describe("Show this field on the card front? Default false."),
+			},
+			guarded(
+				login,
+				async (i: { board?: string; name: string; type: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
+					create_custom_field(client, i),
+			),
+		);
+
+		this.server.tool(
+			"update_custom_field",
+			"Rename / reposition / toggle display-on-card-front for a custom-field definition.",
+			{
+				customFieldId: z.string(),
+				name: z.string().min(1).optional(),
+				pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+				displayCardFront: z.boolean().optional(),
+			},
+			guarded(
+				login,
+				async (i: { customFieldId: string; name?: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
+					update_custom_field(client, i),
+			),
+		);
+
+		this.server.tool(
+			"delete_custom_field",
+			"Delete a custom-field definition (destructive: removes every card's value for it).",
+			{ customFieldId: z.string() },
+			guarded(login, async (i: { customFieldId: string }) => delete_custom_field(client, i)),
+		);
+
+		this.server.tool(
+			"add_custom_field_option",
+			"Add an option to a LIST-type custom field. `color` is a Trello palette token (red / orange / yellow / green / blue / purple / pink / sky / lime / black / null).",
+			{
+				customFieldId: z.string(),
+				value: z.string().min(1).describe("Option label text."),
+				color: z.string().optional(),
+				pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
+			},
+			guarded(
+				login,
+				async (i: { customFieldId: string; value: string; color?: string; pos?: "top" | "bottom" | number }) =>
+					add_custom_field_option(client, i),
+			),
+		);
+
+		this.server.tool(
+			"delete_custom_field_option",
+			"Remove an option from a LIST-type custom field. `optionId` comes from list_custom_fields.",
+			{
+				customFieldId: z.string(),
+				optionId: z.string(),
+			},
+			guarded(login, async (i: { customFieldId: string; optionId: string }) =>
+				delete_custom_field_option(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_card_custom_fields",
+			"A card's current custom-field values (typed by the field definition).",
+			{ cardId: z.string() },
+			guarded(login, async (i: { cardId: string }) => list_card_custom_fields(client, i)),
+		);
+
+		this.server.tool(
+			"set_card_custom_field",
+			"Set a custom-field value on a card. `value` is one of: { checked: bool } | { date: ISO } | { number } | { text } | { listOptionId } | null (to clear). Only one field key must be present.",
+			{
+				cardId: z.string(),
+				customFieldId: z.string(),
+				value: z
+					.union([
+						z.object({ checked: z.boolean() }),
+						z.object({ date: z.string() }),
+						z.object({ number: z.number() }),
+						z.object({ text: z.string() }),
+						z.object({ listOptionId: z.string() }),
+						z.null(),
+					])
+					.describe("Typed value; null clears the field."),
+			},
+			guarded(
+				login,
+				async (i: {
+					cardId: string;
+					customFieldId: string;
+					value:
+						| { checked: boolean }
+						| { date: string }
+						| { number: number }
+						| { text: string }
+						| { listOptionId: string }
+						| null;
+				}) => set_card_custom_field(client, i),
+			),
+		);
+
+		this.server.tool(
+			"list_board_plugins",
+			"Power-Ups currently enabled on a board. Each row includes `id` (needed for disable) and `idPlugin`, plus an `alias` when known.",
+			{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_board_plugins(client, i)),
+		);
+
+		this.server.tool(
+			"enable_board_plugin",
+			"Enable a Power-Up on a board. `plugin` accepts an alias (custom-fields / card-aging / voting / calendar) or a raw plugin ID.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				plugin: z.string().describe("Plugin alias (custom-fields, card-aging, voting, calendar) or ID."),
+			},
+			guarded(login, async (i: { board?: string; plugin: string }) =>
+				enable_board_plugin(client, i),
+			),
+		);
+
+		this.server.tool(
+			"disable_board_plugin",
+			"Disable a Power-Up on a board. `boardPluginId` is the `id` from list_board_plugins — NOT the plugin ID (Trello REST quirk).",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				boardPluginId: z.string().describe("The `id` from list_board_plugins (not the idPlugin)."),
+			},
+			guarded(login, async (i: { board?: string; boardPluginId: string }) =>
+				disable_board_plugin(client, i),
+			),
+		);
+
+		this.server.tool(
+			"get_plugin",
+			"Plugin metadata (name, description, url) by alias or plugin ID.",
+			{ plugin: z.string().describe("Plugin alias or ID.") },
+			guarded(login, async (i: { plugin: string }) => get_plugin(client, i)),
+		);
+
+		this.server.tool(
+			"batch_get",
+			"Trello /batch endpoint. Bundle up to 10 relative Trello paths (each starting with `/`, e.g. `/boards/58cbce31043f1a89cfc6b42c`) into one request. Returns per-URL `{statusCode, body}` in input order. Individual URL errors don't fail the batch.",
+			{
+				paths: z.array(z.string()).min(1).max(10).describe("Relative Trello paths, e.g. [\"/boards/xxx\", \"/cards/yyy\"]."),
+			},
+			guarded(login, async (i: { paths: string[] }) => batch_get(client, i)),
+		);
+
+		this.server.tool(
+			"list_archived_cards",
+			"Closed (archived) cards on a board. Same CardSummary shape as list_cards, with optional label + staleDays filters.",
+			{
+				board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+				label: z.string().optional(),
+				staleDays: z.number().int().positive().optional(),
+			},
+			guarded(login, async (i: { board?: string; label?: string; staleDays?: number }) =>
+				list_archived_cards(client, i),
+			),
 		);
 	}
 }

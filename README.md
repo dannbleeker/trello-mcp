@@ -4,7 +4,7 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
-## Tools (77)
+## Tools (96)
 
 **Reads**
 
@@ -15,12 +15,15 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `list_cards` | Cards on a list or board; includes `desc`; optional `label` / `staleDays` filters |
 | `list_cards_by_list` | Read one list with `excludeDueDates` / `includeSnoozedOnly` / `staleDays` filters |
 | `list_cards_due` | Filter by scope: `today` / `overdue` / `next_seven_days`; emits `snoozed` + `wakeUp` |
+| `list_archived_cards` | Closed (archived) cards on a board — same CardSummary shape as list_cards |
 | `get_card` | Full details for one card |
 | `search_cards` | Fuzzy name search, scoped or unscoped; includes `desc` |
 | `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, multi-board scope |
 | `list_checklist_items` | Checklists + items on a card |
 | `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
+| `get_attachment` | Fetch a single attachment with richer fields (previews[], edgeColor, pos) than list_attachments returns |
 | `list_labels` | All labels on a board (id, name, color) |
+| `get_label` | Fetch one label directly by ID or by name (with board scope) |
 | `list_board_members` | Everyone with access to a board (id, fullName, username, initials) |
 | `list_card_members` | Members assigned to one card |
 | `list_my_cards_assigned` | Cross-board "everything assigned to me"; optional board filter |
@@ -31,10 +34,18 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `list_notifications` | Authenticated user's bell-icon feed; filter by type + read state |
 | `list_card_voters` | Members who have voted on a card |
 | `list_comment_reactions` | All emoji reactions on a comment |
+| `list_comment_reactions_summary` | Grouped emoji-reaction counts on a comment (lighter than list_comment_reactions) |
 | `list_list_actions` | Recent actions on a single list |
 | `list_my_actions` | The authenticated user's cross-board recent activity |
+| `get_action` | Full detail for a single action (move, comment, update, etc.) |
+| `get_action_display` | Trello's pre-rendered human-readable version of an action |
 | `list_board_memberships` | Richer than `list_board_members` — adds memberType (admin/normal/observer/virtual) and state |
 | `get_member` | Look up any Trello member by ID or username |
+| `list_custom_fields` | Custom-field DEFINITIONS on a board (Power-Up-dependent) |
+| `list_card_custom_fields` | A card's current custom-field values |
+| `list_board_plugins` | Power-Ups currently enabled on a board (id + idPlugin + alias) |
+| `get_plugin` | Plugin metadata (name, description, url) by alias or ID |
+| `batch_get` | Bundle up to 10 relative Trello paths into one request via `/batch` |
 
 **Writes**
 
@@ -92,6 +103,14 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 | `remove_comment_reaction` | Remove a reaction by its ID |
 | `copy_checklist` | Duplicate an entire checklist (with items) onto another card |
 | `mark_card_notifications_read` | Bulk-clear every notification associated with one card |
+| `create_custom_field` | Create a new custom-field definition on a board (Power-Up-dependent) |
+| `update_custom_field` | Rename / reposition / toggle display-on-card-front for a custom field |
+| `delete_custom_field` | Delete a custom-field definition (removes every card's value for it) |
+| `add_custom_field_option` | Add an option to a list-type custom field |
+| `delete_custom_field_option` | Remove an option from a list-type custom field |
+| `set_card_custom_field` | Set a custom-field value on a card (polymorphic: checkbox / date / number / text / list, or null to clear) |
+| `enable_board_plugin` | Enable a Power-Up on a board by alias (custom-fields, card-aging, voting, calendar) or ID |
+| `disable_board_plugin` | Disable a Power-Up (takes the boardPlugin id from list_board_plugins, NOT the idPlugin — Trello REST quirk) |
 
 ## Safety guards
 
@@ -178,7 +197,7 @@ src/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
-    tools.ts                — 77 tool implementations (testable in plain Node)
+    tools.ts                — 96 tool implementations (testable in plain Node)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

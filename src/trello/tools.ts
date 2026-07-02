@@ -13,7 +13,7 @@
  *              Keeping these as plain functions (not McpServer.tool callbacks)
  *              means they can be unit-tested without a Worker runtime.
  *
- *              Tool surface (77):
+ *              Tool surface (96):
  *                Reads (16):  list_boards, list_lists, list_cards,
  *                             list_cards_by_list, list_cards_due,
  *                             list_my_cards_assigned, get_card,
@@ -37,6 +37,20 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.8.0 (2026-07-02) — +19 tools across 6 themes:
+ *                        Single-entity fetches (2): get_label, get_attachment
+ *                        Actions & reactions (3):   list_comment_reactions_summary,
+ *                                                   get_action, get_action_display
+ *                        Custom Fields (8):         list_custom_fields, create_custom_field,
+ *                                                   update_custom_field, delete_custom_field,
+ *                                                   add_custom_field_option,
+ *                                                   delete_custom_field_option,
+ *                                                   list_card_custom_fields,
+ *                                                   set_card_custom_field (polymorphic)
+ *                        Power-Ups (4):             list_board_plugins, enable_board_plugin,
+ *                                                   disable_board_plugin, get_plugin
+ *                        Batch/meta (1):            batch_get
+ *                        Archived reads (1):        list_archived_cards
  *   1.7.1 (2026-07-02) — Fix set_card_cover: the tool was coercing undefined
  *                        `attachmentId` to null and passing it down, which caused
  *                        Trello to wipe the requested color. Now undefined stays
@@ -109,15 +123,21 @@ import {
 } from "./constants";
 import type {
 	TrelloAction,
+	TrelloAttachment,
 	TrelloCard,
 	TrelloClient,
 	TrelloComment,
+	TrelloCustomField,
+	TrelloCustomFieldItem,
+	TrelloLabel,
 	TrelloList,
 	TrelloMember,
 	TrelloMembership,
 	TrelloNotification,
 	TrelloReaction,
+	TrelloReactionSummary,
 } from "./client";
+import { PLUGIN_ALIASES, resolvePlugin } from "./constants";
 import {
 	GuardError,
 	assertCanWriteTo,
@@ -1948,6 +1968,391 @@ export async function get_member(
 ): Promise<{ member: TrelloMember }> {
 	const member = await client.getMember(input.idOrUsername);
 	return { member };
+}
+
+// ============================================================================
+// v1.8.0 — single-entity fetches, action details, custom fields, plugins,
+// batch GET, archived-card reads
+// ============================================================================
+
+// ---- Single-entity fetches ----
+
+/**
+ * get_label — fetch one label directly. Accepts a label ID OR a name plus
+ * board (defaults to dann-to-do), matching the ergonomics of `add_label`.
+ */
+export async function get_label(
+	client: TrelloClient,
+	input: { label: string; board?: string },
+): Promise<{ label: TrelloLabel }> {
+	const looksLikeId = /^[a-f0-9]{24}$/i.test(input.label);
+	if (looksLikeId) {
+		return { label: await client.getLabel(input.label) };
+	}
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const resolved = await resolveLabel(client, boardId, input.label);
+	const full = await client.getLabel(resolved.id);
+	return { label: full };
+}
+
+/**
+ * get_attachment — single attachment with richer fields than list_attachments
+ * (previews[], edgeColor, pos).
+ */
+export async function get_attachment(
+	client: TrelloClient,
+	input: { cardId: string; attachmentId: string },
+): Promise<{ attachment: TrelloAttachment }> {
+	const attachment = await client.getAttachment(input.cardId, input.attachmentId);
+	return { attachment };
+}
+
+// ---- Actions & reactions ----
+
+/**
+ * list_comment_reactions_summary — grouped reaction counts on a comment.
+ * Lighter than list_comment_reactions when you just want "did anyone 👍?"
+ */
+export async function list_comment_reactions_summary(
+	client: TrelloClient,
+	input: { commentId: string },
+): Promise<{
+	commentId: string;
+	summaries: { emoji: string; count: number; reactionId: string }[];
+}> {
+	const raw = await client.listCommentReactionsSummary(input.commentId);
+	return {
+		commentId: input.commentId,
+		summaries: raw.map((r: TrelloReactionSummary) => ({
+			emoji: r.emoji?.shortName ?? "",
+			count: r.count,
+			reactionId: r.idReaction,
+		})),
+	};
+}
+
+/** get_action — full detail for a single action. */
+export async function get_action(
+	client: TrelloClient,
+	input: { actionId: string },
+): Promise<{ action: TrelloAction }> {
+	const action = await client.getAction(input.actionId);
+	return { action };
+}
+
+/**
+ * get_action_display — Trello's pre-rendered human-readable version of an
+ * action, e.g. "Dann moved *X* from @computer to @home". Useful for building
+ * activity feeds without reimplementing the rendering yourself.
+ */
+export async function get_action_display(
+	client: TrelloClient,
+	input: { actionId: string },
+): Promise<{ actionId: string; display: unknown }> {
+	const display = await client.getActionDisplay(input.actionId);
+	return { actionId: input.actionId, display };
+}
+
+// ---- Custom Fields (Power-Up) ----
+
+const CUSTOM_FIELD_TYPES = new Set(["checkbox", "date", "list", "number", "text"] as const);
+
+/** list_custom_fields — field definitions on a board. */
+export async function list_custom_fields(
+	client: TrelloClient,
+	input: { board?: string },
+): Promise<{
+	board: BoardSummary;
+	customFields: TrelloCustomField[];
+}> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const [board, fields] = await Promise.all([
+		client.getBoard(boardId),
+		client.listCustomFields(boardId),
+	]);
+	return { board: summariseBoard(board), customFields: fields };
+}
+
+/**
+ * create_custom_field — new custom-field definition on a board. `type` must
+ * be one of checkbox / date / list / number / text. Requires the Custom
+ * Fields Power-Up enabled on the board (use list_board_plugins to check;
+ * enable_board_plugin("custom-fields") to enable).
+ */
+export async function create_custom_field(
+	client: TrelloClient,
+	input: {
+		board?: string;
+		name: string;
+		type: string;
+		pos?: "top" | "bottom" | number;
+		displayCardFront?: boolean;
+	},
+): Promise<{ customField: TrelloCustomField }> {
+	if (!CUSTOM_FIELD_TYPES.has(input.type as never)) {
+		throw new GuardError(
+			`Unknown custom-field type "${input.type}". Use one of: ${[...CUSTOM_FIELD_TYPES].join(", ")}.`,
+		);
+	}
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const created = await client.createCustomField({
+		boardId,
+		name: input.name,
+		type: input.type as "checkbox" | "date" | "list" | "number" | "text",
+		pos: input.pos,
+		displayCardFront: input.displayCardFront,
+	});
+	return { customField: created };
+}
+
+/** update_custom_field — rename / reposition / toggle display on card front. */
+export async function update_custom_field(
+	client: TrelloClient,
+	input: {
+		customFieldId: string;
+		name?: string;
+		pos?: "top" | "bottom" | number;
+		displayCardFront?: boolean;
+	},
+): Promise<{ customField: TrelloCustomField }> {
+	if (
+		input.name === undefined &&
+		input.pos === undefined &&
+		input.displayCardFront === undefined
+	) {
+		throw new GuardError("Pass at least one of `name`, `pos`, or `displayCardFront`.");
+	}
+	const updated = await client.updateCustomField(input.customFieldId, {
+		name: input.name,
+		pos: input.pos,
+		displayCardFront: input.displayCardFront,
+	});
+	return { customField: updated };
+}
+
+/** delete_custom_field — remove the field definition (and every card's value for it). */
+export async function delete_custom_field(
+	client: TrelloClient,
+	input: { customFieldId: string },
+): Promise<{ ok: true }> {
+	await client.deleteCustomField(input.customFieldId);
+	return { ok: true };
+}
+
+/** add_custom_field_option — for list-type fields. `color` is a Trello palette token. */
+export async function add_custom_field_option(
+	client: TrelloClient,
+	input: { customFieldId: string; value: string; color?: string; pos?: "top" | "bottom" | number },
+): Promise<{ option: { id: string; value: string; color?: string; pos: number } }> {
+	const opt = await client.addCustomFieldOption(input.customFieldId, {
+		value: input.value,
+		color: input.color,
+		pos: input.pos,
+	});
+	return {
+		option: {
+			id: opt.id,
+			value: opt.value?.text ?? input.value,
+			color: opt.color,
+			pos: opt.pos,
+		},
+	};
+}
+
+/** delete_custom_field_option — remove one option from a list-type field. */
+export async function delete_custom_field_option(
+	client: TrelloClient,
+	input: { customFieldId: string; optionId: string },
+): Promise<{ ok: true }> {
+	await client.deleteCustomFieldOption(input.customFieldId, input.optionId);
+	return { ok: true };
+}
+
+/** list_card_custom_fields — a card's current custom-field values. */
+export async function list_card_custom_fields(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ cardId: string; items: TrelloCustomFieldItem[] }> {
+	const items = await client.listCardCustomFieldItems(input.cardId);
+	return { cardId: input.cardId, items };
+}
+
+/**
+ * set_card_custom_field — polymorphic setter. Pass exactly one of:
+ *   { checked: boolean }        — checkbox-type field
+ *   { date: "ISO 8601" }        — date-type field
+ *   { number: number }          — number-type field
+ *   { text: "..." }             — text-type field
+ *   { listOptionId: "..." }     — list-type field (option ID from list_custom_fields)
+ *   null                        — clear the value
+ *
+ * The value shape is validated at the tool boundary; the client wraps it in
+ * Trello's expected `{value: {...}}` or `{idValue: ...}` envelope.
+ */
+export async function set_card_custom_field(
+	client: TrelloClient,
+	input: {
+		cardId: string;
+		customFieldId: string;
+		value:
+			| { checked: boolean }
+			| { date: string }
+			| { number: number }
+			| { text: string }
+			| { listOptionId: string }
+			| null;
+	},
+): Promise<{ item: TrelloCustomFieldItem | null }> {
+	await assertCardWritable(client, input.cardId);
+
+	let body: Record<string, unknown> = {};
+	if (input.value === null) {
+		body = {};
+	} else if ("checked" in input.value) {
+		body = { value: { checked: input.value.checked ? "true" : "false" } };
+	} else if ("date" in input.value) {
+		if (Number.isNaN(Date.parse(input.value.date))) {
+			throw new GuardError(`Invalid ISO 8601 date: "${input.value.date}".`);
+		}
+		body = { value: { date: input.value.date } };
+	} else if ("number" in input.value) {
+		if (!Number.isFinite(input.value.number)) {
+			throw new GuardError(`Invalid number: ${input.value.number}.`);
+		}
+		body = { value: { number: String(input.value.number) } };
+	} else if ("text" in input.value) {
+		body = { value: { text: input.value.text } };
+	} else if ("listOptionId" in input.value) {
+		body = { idValue: input.value.listOptionId };
+	} else {
+		throw new GuardError(
+			"`value` must have exactly one of: checked, date, number, text, listOptionId — or be null.",
+		);
+	}
+
+	const item = await client.setCardCustomFieldItem(input.cardId, input.customFieldId, body);
+	return { item };
+}
+
+// ---- Plugins / Power-Ups ----
+
+/** list_board_plugins — Power-Ups currently enabled on a board. */
+export async function list_board_plugins(
+	client: TrelloClient,
+	input: { board?: string },
+): Promise<{
+	board: BoardSummary;
+	plugins: { id: string; idPlugin: string; alias: string | null }[];
+}> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const [board, plugins] = await Promise.all([
+		client.getBoard(boardId),
+		client.listBoardPlugins(boardId),
+	]);
+	// Reverse-lookup alias if we know this plugin.
+	const idToAlias = new Map(
+		Object.entries(PLUGIN_ALIASES).map(([alias, id]) => [id, alias]),
+	);
+	return {
+		board: summariseBoard(board),
+		plugins: plugins.map((p) => ({
+			id: p.id,
+			idPlugin: p.idPlugin,
+			alias: idToAlias.get(p.idPlugin) ?? null,
+		})),
+	};
+}
+
+/**
+ * enable_board_plugin — enable a Power-Up on a board. `plugin` accepts a
+ * known alias ("custom-fields" / "card-aging" / "voting" / "calendar") or a
+ * raw 24-char Trello plugin ID.
+ */
+export async function enable_board_plugin(
+	client: TrelloClient,
+	input: { board?: string; plugin: string },
+): Promise<{ boardPlugin: { id: string; idBoard: string; idPlugin: string } }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const idPlugin = resolvePlugin(input.plugin);
+	const bp = await client.enableBoardPlugin(boardId, idPlugin);
+	return { boardPlugin: { id: bp.id, idBoard: bp.idBoard, idPlugin: bp.idPlugin } };
+}
+
+/**
+ * disable_board_plugin — disable a Power-Up. Takes the boardPlugin id
+ * (from list_board_plugins), NOT the raw plugin id — Trello REST quirk.
+ */
+export async function disable_board_plugin(
+	client: TrelloClient,
+	input: { board?: string; boardPluginId: string },
+): Promise<{ ok: true }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	await client.disableBoardPlugin(boardId, input.boardPluginId);
+	return { ok: true };
+}
+
+/** get_plugin — plugin metadata (name, description). Accepts alias or ID. */
+export async function get_plugin(
+	client: TrelloClient,
+	input: { plugin: string },
+): Promise<{ plugin: unknown }> {
+	const pluginId = resolvePlugin(input.plugin);
+	const plugin = await client.getPlugin(pluginId);
+	return { plugin };
+}
+
+// ---- Batch GET ----
+
+/**
+ * batch_get — Trello's /batch endpoint. Bundle up to 10 relative Trello paths
+ * (each starting with `/`, e.g. `/1/boards/{id}` or `/boards/{id}`) into one
+ * request. Returns per-URL `{ statusCode, body }` in the same order. Failure
+ * of one URL doesn't fail the batch.
+ */
+export async function batch_get(
+	client: TrelloClient,
+	input: { paths: string[] },
+): Promise<{ results: { statusCode: number; body: unknown }[] }> {
+	if (!Array.isArray(input.paths) || input.paths.length === 0) {
+		throw new GuardError("`paths` must be a non-empty array of relative Trello paths.");
+	}
+	if (input.paths.length > 10) {
+		throw new GuardError(`Trello caps /batch at 10 paths; got ${input.paths.length}.`);
+	}
+	// Normalise: /boards/{id} is fine; /1/boards/{id} is also fine.
+	// Trello accepts either.
+	const results = await client.batchGet(input.paths);
+	return { results };
+}
+
+// ---- Archived-cards reads ----
+
+/**
+ * list_archived_cards — closed cards on a board. Returned in the same
+ * CardSummary shape as list_cards for symmetry. Optional label + staleDays
+ * filters mirror list_cards's ergonomics.
+ */
+export async function list_archived_cards(
+	client: TrelloClient,
+	input: { board?: string; label?: string; staleDays?: number },
+): Promise<{ boardId: string; cards: CardSummary[]; truncated: boolean }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const raw = await client.listArchivedCards(boardId);
+	let out = raw;
+	if (input.label) {
+		const target = input.label.toLowerCase();
+		out = out.filter((c) => c.labels.some((lb) => lb.name.toLowerCase() === target));
+	}
+	if (input.staleDays !== undefined && input.staleDays > 0) {
+		const cutoff = Date.now() - input.staleDays * 24 * 60 * 60 * 1000;
+		out = out.filter((c) => Date.parse(c.dateLastActivity) <= cutoff);
+	}
+	const sliced = out.slice(0, MAX_RESULTS);
+	return {
+		boardId,
+		cards: sliced.map(summariseCard),
+		truncated: sliced.length === MAX_RESULTS,
+	};
 }
 
 // ---- Helpers ----

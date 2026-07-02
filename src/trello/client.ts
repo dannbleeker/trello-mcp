@@ -84,9 +84,10 @@ const RETRY_MAX_DELAY_MS = 5000;
 /**
  * Clamp a caller-supplied limit into [1, max]. Used by listActions,
  * listNotifications, listListActions, listMyActions — was inlined 4× before
- * v1.10.0.
+ * v1.10.0. Exported so unit tests can pin the contract without going through
+ * a full client method.
  */
-function clampLimit(limit: number, max: number = 1000): number {
+export function clampLimit(limit: number, max: number = 1000): number {
 	return Math.min(Math.max(limit, 1), max);
 }
 
@@ -95,9 +96,9 @@ function clampLimit(limit: number, max: number = 1000): number {
  *   - integer seconds ("120")
  *   - HTTP-date per RFC 7231 ("Wed, 21 Oct 2026 07:28:00 GMT")
  * Falls back to exponential backoff based on `attempt` (1-indexed).
- * Result is clamped to RETRY_MAX_DELAY_MS.
+ * Result is clamped to RETRY_MAX_DELAY_MS. Exported for testing.
  */
-function parseRetryAfterMs(header: string | null, attempt: number): number {
+export function parseRetryAfterMs(header: string | null, attempt: number): number {
 	const fallback = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
 	if (!header) return fallback;
 	const trimmed = header.trim();

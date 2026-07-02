@@ -16,6 +16,8 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.11.0 (2026-07-02) — Added vitest test suite (82 unit tests across 7 files);
+ *                         no runtime code changes. See test/ + CHANGELOG.md.
  *   1.10.0 (2026-07-02) — Audit-surfaced refactor pass. No behavior changes.
  *                         See CHANGELOG.md for details.
  *   1.9.0 (2026-07-02) — 18 audit-surfaced bug fixes across guards, timezone, response
@@ -214,7 +216,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.10.0",
+		version: "1.11.0",
 	});
 
 	async init() {

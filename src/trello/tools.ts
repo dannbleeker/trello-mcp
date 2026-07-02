@@ -194,7 +194,7 @@ interface ListSummary {
 	name: string;
 }
 
-interface CardSummary {
+export interface CardSummary {
 	id: string;
 	name: string;
 	listId: string;
@@ -215,7 +215,7 @@ interface CardDetail extends CardSummary {
 	boardId: string;
 }
 
-function summariseCard(card: TrelloCard): CardSummary {
+export function summariseCard(card: TrelloCard): CardSummary {
 	return {
 		id: card.id,
 		name: card.name,
@@ -2514,7 +2514,7 @@ function summariseNotification(n: TrelloNotification): SummarisedNotification {
  * Uses Intl.DateTimeFormat with the tz, which handles DST correctly.
  * v1.9.0 fix for list_cards_due and weekly_review_pack.
  */
-function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): number {
+export function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): number {
 	const fmt = new Intl.DateTimeFormat("en-US", {
 		timeZone: tz,
 		year: "numeric",
@@ -2552,7 +2552,7 @@ function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): number 
  * of minutes BEFORE the due date when the reminder should fire (so
  * `wakeUp = due - dueReminder min`). -1 means no reminder; we treat it as null.
  */
-function computeWakeUp(due: string | null, dueReminder: number | null): string | null {
+export function computeWakeUp(due: string | null, dueReminder: number | null): string | null {
 	if (!due || dueReminder === null || dueReminder === -1) return null;
 	const t = Date.parse(due);
 	if (Number.isNaN(t)) return null;
@@ -2564,7 +2564,7 @@ function computeWakeUp(due: string | null, dueReminder: number | null): string |
  * and Node 18+ (atob is also global). Tolerates whitespace/newlines and the
  * `data:...;base64,` URL prefix so callers can paste either form.
  */
-function decodeBase64(input: string): Uint8Array {
+export function decodeBase64(input: string): Uint8Array {
 	let s = input.trim();
 	const commaIdx = s.indexOf(",");
 	if (s.startsWith("data:") && commaIdx > 0) s = s.slice(commaIdx + 1);

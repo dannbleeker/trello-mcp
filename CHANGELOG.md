@@ -4,6 +4,55 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-07-02
+
+### Added
+- **vitest test suite** — 82 unit tests across 7 files under `test/`:
+  - `guards.test.ts` (14 tests) — every safety guard: FORBIDDEN refusal
+    (Butler, Repeater Cards), READ_ONLY refusal (Rolling Big Rocks),
+    composition via `assertCanWriteTo`, WIP-warning threshold logic.
+  - `constants.test.ts` (16 tests) — `resolveBoard` / `resolveList` /
+    `resolvePlugin` alias & raw-ID handling; reverse lookups; WIP-limit
+    suffix parser.
+  - `tools-helpers.test.ts` (17 tests) — `computeWakeUp` (null due,
+    null reminder, `-1` reminder, valid case), `decodeBase64` (plain,
+    data-URI prefix, whitespace, invalid, empty), `summariseCard` (missing
+    `idMembers`, list alias resolution), `startOfDayMsInTz` (UTC baseline,
+    CEST summer, CET winter).
+  - `client-helpers.test.ts` (10 tests) — `clampLimit` (in-range,
+    max ceiling, custom max, below-1 floor), `parseRetryAfterMs` (null,
+    integer seconds, HTTP-date, past-date floor, unparseable fallback).
+  - `client-request.test.ts` (5 tests) — mocks `globalThis.fetch` and
+    verifies: 200 first try, 429→200 retry with `Retry-After` timing,
+    persistent 5xx throws `TrelloError` after 3 attempts, non-retriable
+    4xx does not retry, `key` + `token` land on the query string.
+  - `client-methods.test.ts` (11 tests) — URL + param assertions for a
+    representative sample of client methods. Includes explicit regression
+    pins for:
+    - v1.7.1: `setCardCover(color=purple)` does NOT put
+      `idAttachment:null` in the cover blob.
+    - v1.9.0: `updateCustomField(displayCardFront=true)` preserves the
+      literal `/` in the URL (not `%2F`).
+    - v1.9.0: `batchGet` normalises non-numeric response keys to
+      `statusCode: 502` (not NaN).
+    - v1.9.0: `markAllNotificationsRead` does not send the broken
+      `ids=` param.
+  - `set_card_custom_field.test.ts` (9 tests) — the polymorphic
+    discriminated-union tool: `checkbox` / `date` / `number` / `text` /
+    `listOptionId` / `null` payload dispatch, plus GuardError on invalid
+    ISO date and non-finite number.
+- **`test` job in CI** — `pnpm test` runs alongside `pnpm type-check` in
+  `.github/workflows/ci.yml`.
+- **Exports**: `computeWakeUp`, `decodeBase64`, `summariseCard`,
+  `startOfDayMsInTz`, `clampLimit`, `parseRetryAfterMs` are now exported
+  from their respective modules so tests can pin them directly. Also
+  exported the `CardSummary` interface for test consumption.
+
+### Fixed
+- No runtime fixes in this release. The test suite validates existing
+  behavior; if any assertion had failed, the corresponding fix would
+  ship in v1.11.x.
+
 ## [1.10.0] — 2026-07-02
 
 ### Changed
@@ -311,6 +360,7 @@ still 96.
 - Server-side guards: FORBIDDEN_LISTS (Butler, Repeater Cards),
   READ_ONLY_LISTS (Rolling Big Rocks), WIP-limit warnings.
 
+[1.11.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.7.1...v1.8.0

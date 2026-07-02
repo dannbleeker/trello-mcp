@@ -1,0 +1,88 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TrelloClient, TrelloError } from "../src/trello/client";
+
+// Small helper to build a Response the client's request() expects. The client
+// only reads status, ok, headers["content-type"], and json()/text() — so we
+// stub those.
+function jsonResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { "Content-Type": "application/json" },
+	});
+}
+
+function textResponse(body: string, status: number, extraHeaders: Record<string, string> = {}): Response {
+	return new Response(body, {
+		status,
+		headers: { "Content-Type": "text/plain", ...extraHeaders },
+	});
+}
+
+describe("TrelloClient.request (via a public method that exercises the code path)", () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+	const client = new TrelloClient("test-key", "test-token");
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+		vi.useRealTimers();
+	});
+
+	it("returns parsed JSON on 200 first try", async () => {
+		fetchSpy.mockResolvedValueOnce(jsonResponse([{ id: "b1", name: "Board" }]));
+		const boards = await client.listMyBoards();
+		expect(boards).toEqual([{ id: "b1", name: "Board" }]);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries once on 429 then returns success", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("rate limited", 429, { "Retry-After": "1" }))
+			.mockResolvedValueOnce(jsonResponse([]));
+
+		const promise = client.listMyBoards();
+		// Advance past the 1-second Retry-After
+		await vi.advanceTimersByTimeAsync(1500);
+		const result = await promise;
+
+		expect(result).toEqual([]);
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("throws TrelloError after 3 total attempts on persistent 500s", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 500))
+			.mockResolvedValueOnce(textResponse("boom", 500))
+			.mockResolvedValueOnce(textResponse("boom", 500));
+
+		const promise = client.listMyBoards();
+		const settle = promise.catch((e) => e);
+		// Advance well past both backoffs (500ms then 1000ms).
+		await vi.advanceTimersByTimeAsync(10_000);
+		const err = await settle;
+
+		expect(err).toBeInstanceOf(TrelloError);
+		expect((err as TrelloError).status).toBe(500);
+		expect(fetchSpy).toHaveBeenCalledTimes(3);
+	});
+
+	it("does NOT retry a 4xx that isn't 429 (e.g. 404)", async () => {
+		fetchSpy.mockResolvedValueOnce(textResponse("not found", 404));
+		await expect(client.listMyBoards()).rejects.toBeInstanceOf(TrelloError);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("puts key + token on the query string of every request", async () => {
+		fetchSpy.mockResolvedValueOnce(jsonResponse([]));
+		await client.listMyBoards();
+		const [url] = fetchSpy.mock.calls[0];
+		const urlObj = new URL(url as string);
+		expect(urlObj.searchParams.get("key")).toBe("test-key");
+		expect(urlObj.searchParams.get("token")).toBe("test-token");
+	});
+});

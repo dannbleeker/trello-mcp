@@ -10,6 +10,17 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.9.0 (2026-07-02) — 5 client-layer fixes surfaced by the v1.8.0 audit:
+ *                        Add getList (needed for correct move_all_cards destination
+ *                        board resolution). markAllNotificationsRead drops the
+ *                        broken filter=ids param (Trello's `ids` param takes
+ *                        notification IDs, not type strings). updateCustomField
+ *                        stops URL-encoding "display/cardFront" — the `/` in the
+ *                        param key must survive verbatim or Trello ignores it.
+ *                        request() Retry-After parsing accepts HTTP-date (RFC 7231)
+ *                        in addition to integer seconds. batchGet handles Trello's
+ *                        error-envelope shape (non-numeric keys) as 502 instead
+ *                        of the previous NaN statusCode.
  *   1.8.0 (2026-07-02) — New types: TrelloCustomField, TrelloCustomFieldOption,
  *                        TrelloCustomFieldItem, TrelloReactionSummary, TrelloPlugin,
  *                        TrelloBoardPlugin. request() extended with an optional JSON
@@ -56,6 +67,27 @@ const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5000;
+
+/**
+ * Parse a Retry-After header value into ms. Accepts:
+ *   - integer seconds ("120")
+ *   - HTTP-date per RFC 7231 ("Wed, 21 Oct 2026 07:28:00 GMT")
+ * Falls back to exponential backoff based on `attempt` (1-indexed).
+ * Result is clamped to RETRY_MAX_DELAY_MS.
+ */
+function parseRetryAfterMs(header: string | null, attempt: number): number {
+	const fallback = Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+	if (!header) return fallback;
+	const trimmed = header.trim();
+	if (/^\d+$/.test(trimmed)) {
+		return Math.min(Number(trimmed) * 1000, RETRY_MAX_DELAY_MS);
+	}
+	const t = Date.parse(trimmed);
+	if (!Number.isNaN(t)) {
+		return Math.max(0, Math.min(t - Date.now(), RETRY_MAX_DELAY_MS));
+	}
+	return fallback;
+}
 
 /** Thrown when Trello returns a non-2xx response after retries. */
 export class TrelloError extends Error {
@@ -378,10 +410,7 @@ export class TrelloClient {
 			}
 
 			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
-				const retryAfter = resp.headers.get("Retry-After");
-				const delayMs = retryAfter && /^\d+$/.test(retryAfter)
-					? Math.min(Number(retryAfter) * 1000, RETRY_MAX_DELAY_MS)
-					: Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+				const delayMs = parseRetryAfterMs(resp.headers.get("Retry-After"), attempt);
 				await new Promise((r) => setTimeout(r, delayMs));
 				continue;
 			}
@@ -459,6 +488,18 @@ export class TrelloClient {
 			fields: "name,idBoard,closed,pos,subscribed",
 		});
 		return data as TrelloList[];
+	}
+
+	/**
+	 * Fetch a single list directly by ID. Used by move_all_cards to derive the
+	 * destination list's board without probing cards (which is wrong when the
+	 * destination is empty or on a different board).
+	 */
+	async getList(listId: string): Promise<TrelloList> {
+		const data = await this.request("GET", `/lists/${listId}`, {
+			fields: "name,idBoard,closed,pos,subscribed",
+		});
+		return data as TrelloList;
 	}
 
 	/** Create a new list on a board. `pos` is "top", "bottom", or numeric. */
@@ -1096,13 +1137,17 @@ export class TrelloClient {
 	}
 
 	/**
-	 * Mark every unread notification read. Optional filter narrows scope —
-	 * e.g. "cardDueSoon" to clear due-soon pings only.
+	 * Mark all unread notifications read (or unread, if read=false). Trello's
+	 * /notifications/all/read endpoint has no server-side type filter — the
+	 * `ids` param it takes is a comma-separated list of notification IDs, NOT
+	 * a type name. Type-filtered clearing must be composed at the caller side:
+	 * list_notifications({filter, readFilter:"unread"}) → mark_notification_read
+	 * for each returned id. (v1.9.0 fix: earlier releases pretended `filter`
+	 * worked here and silently marked nothing.)
 	 */
-	async markAllNotificationsRead(input: { read?: boolean; filter?: string } = {}): Promise<void> {
+	async markAllNotificationsRead(input: { read?: boolean } = {}): Promise<void> {
 		const params: Record<string, string | boolean> = {};
 		if (input.read !== undefined) params.read = input.read;
-		if (input.filter) params.ids = input.filter; // Trello accepts type list here
 		await this.request("POST", "/notifications/all/read", params);
 	}
 
@@ -1238,10 +1283,25 @@ export class TrelloClient {
 		const params: Record<string, string | number | boolean | undefined> = {};
 		if (input.name !== undefined) params.name = input.name;
 		if (input.pos !== undefined) params.pos = input.pos;
-		if (input.displayCardFront !== undefined) {
-			params["display/cardFront"] = input.displayCardFront;
+		// display/cardFront is Trello's actual param key — literal slash in the
+		// URL query string, NOT %2F. URLSearchParams would percent-encode it and
+		// Trello would silently ignore the unknown key. Send the base request
+		// without this param, then append the slash-key manually.
+		const displaySuffix =
+			input.displayCardFront !== undefined
+				? `&display/cardFront=${input.displayCardFront ? "true" : "false"}`
+				: "";
+		const url = this.url(`/customFields/${customFieldId}`, params) + displaySuffix;
+		const resp = await fetch(url, {
+			method: "PUT",
+			headers: { Accept: "application/json" },
+		});
+		if (!resp.ok) {
+			const body = await resp.text();
+			throw new TrelloError(resp.status, body);
 		}
-		const data = await this.request("PUT", `/customFields/${customFieldId}`, params);
+		const ct = resp.headers.get("content-type") ?? "";
+		const data = ct.includes("application/json") ? await resp.json() : null;
 		return data as TrelloCustomField;
 	}
 
@@ -1333,14 +1393,23 @@ export class TrelloClient {
 	async batchGet(paths: string[]): Promise<{ statusCode: number; body: unknown }[]> {
 		const data = await this.request("GET", "/batch", { urls: paths.join(",") });
 		// Trello returns array of single-key objects: [{ "200": {...body...} }, ...]
-		// Normalise to { statusCode, body }.
+		// Normalise to { statusCode, body }. Non-numeric keys ({ "error": ... },
+		// {} etc.) become 502 with the full entry preserved as body, so callers
+		// aren't handed a NaN statusCode they'll silently mishandle.
 		const raw = (data as unknown[]) ?? [];
 		return raw.map((entry) => {
 			if (entry && typeof entry === "object") {
-				const [k, v] = Object.entries(entry as Record<string, unknown>)[0] ?? ["500", null];
-				return { statusCode: Number(k), body: v };
+				const entries = Object.entries(entry as Record<string, unknown>);
+				if (entries.length === 0) {
+					return { statusCode: 502, body: entry };
+				}
+				const [k, v] = entries[0];
+				if (/^\d{3}$/.test(k)) {
+					return { statusCode: Number(k), body: v };
+				}
+				return { statusCode: 502, body: entry };
 			}
-			return { statusCode: 500, body: null };
+			return { statusCode: 502, body: entry };
 		});
 	}
 

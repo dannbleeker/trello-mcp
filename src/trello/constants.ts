@@ -95,6 +95,13 @@ export const READ_ONLY_LISTS = new Set<string>([
 export const MAX_RESULTS = 200;
 
 /**
+ * IANA timezone used for day-boundary math (list_cards_due today scope,
+ * weekly_review_pack due_today bucket, etc.). Cloudflare Workers run in UTC,
+ * so without this the day-buckets misclassify Dann's cards by up to two hours.
+ */
+export const DEFAULT_TIMEZONE = "Europe/Copenhagen";
+
+/**
  * Parse a "(WIP limit N)" suffix from a list name. Returns N or null.
  * Used by guards to emit a warning when move/create would push the list over its limit.
  */

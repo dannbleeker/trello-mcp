@@ -4,6 +4,82 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-07-02
+
+### Fixed
+All 18 bugs surfaced by the v1.8.0 audit workflow. No new tools; tool surface
+still 96.
+
+**READ_ONLY guard bypasses (4 tools):**
+- `move_list`, `archive_list`, `archive_all_cards` — now refuse Rolling Big
+  Rocks via `assertNotReadOnly` alongside the existing `assertWritable`.
+- `convert_checklist_item_to_card` — refuses when the source card is on a
+  READ_ONLY list and no `targetList` is provided (Trello births the new card
+  on the source list otherwise).
+
+**Silent-wrong-behavior:**
+- `list_card_custom_fields` — parses Trello's `"true"`/`"false"` strings to
+  booleans and stringified numbers to Numbers. Previously `"false"` was
+  truthy and `"10"` sorted before `"9"`.
+- `move_all_cards` — fetches the destination list directly via new
+  `getList` client method instead of probing cards. Cross-board moves now
+  work when the destination is empty.
+- `batch_add_label` — real `TrelloError`s during label resolution are
+  reported as "label lookup failed: {message}" instead of being collapsed
+  to a spurious "label not found on board".
+- `update_custom_field({displayCardFront})` — the `display/cardFront`
+  param key is now sent with its literal slash instead of being
+  `%2F`-encoded, which Trello was silently ignoring.
+
+**Timezone (Cloudflare Workers run in UTC):**
+- `list_cards_due({scope:"today"})` and `weekly_review_pack.due_today`
+  now compute day boundaries in `Europe/Copenhagen` (new
+  `DEFAULT_TIMEZONE` constant + `startOfDayMsInTz` helper).
+
+**Response semantics:**
+- `weekly_review_pack({board})` — throws `GuardError` for boards other
+  than `dann-to-do`. The composite's list aliases resolve to that board
+  only; calling it against `zoo` used to return all-zero buckets silently.
+- `truncated` — false positive at exactly `MAX_RESULTS==200` items fixed
+  in `list_cards`, `list_cards_by_list`, `list_archived_cards`,
+  `list_my_cards_assigned`. Now compares pre-slice length.
+- `list_notifications` — dropped the `.slice(0, MAX_RESULTS)` cap; the
+  client already clamps to Trello's max of 1000, and the extra slice
+  silently truncated `limit>200` requests.
+
+**Comment / reaction guards:**
+- `update_comment` / `delete_comment` — verify the `commentId`'s action
+  belongs to the passed `cardId`. Previously a caller lying about
+  `cardId` could touch a comment on a card whose list is FORBIDDEN.
+- `add_comment_reaction` / `remove_comment_reaction` — gained optional
+  `cardId`; either uses it as the verify check or derives the card from
+  the action. Both now run `assertCardWritable`.
+- `mark_all_notifications_read` — dropped the `filter` param. Trello's
+  endpoint doesn't accept per-type filtering; the old code passed the
+  type string as `ids=` (a Trello notification-ID list) and silently
+  marked nothing. Type-filtered clearing must now be composed at the
+  caller side via `list_notifications` + `mark_notification_read`.
+
+**Client-layer HTTP:**
+- `request()` retry — `Retry-After` header parsing now accepts RFC 7231
+  HTTP-date format in addition to integer seconds. Previously HTTP-date
+  values fell through to the 500 ms base delay.
+- `batchGet` — non-numeric keys in Trello's response envelope (e.g.
+  `{"error": "..."}`) now surface as `statusCode: 502` with the entry
+  preserved, instead of `statusCode: NaN` that silently broke `>= 400`
+  comparisons.
+
+### Added
+- `getList(listId)` client method — needed by `move_all_cards` fix; also
+  exported for use by any future single-list read.
+- `DEFAULT_TIMEZONE = "Europe/Copenhagen"` in `constants.ts`.
+
+### Changed
+- Tool signatures (breaking for anything hard-coding them):
+  - `add_comment_reaction` and `remove_comment_reaction` now accept an
+    optional `cardId` for verification.
+  - `mark_all_notifications_read` no longer accepts `filter`.
+
 ## [1.8.0] — 2026-07-02
 
 ### Added
@@ -192,6 +268,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Server-side guards: FORBIDDEN_LISTS (Butler, Repeater Cards),
   READ_ONLY_LISTS (Rolling Big Rocks), WIP-limit warnings.
 
+[1.9.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/dannbleeker/trello-mcp/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/dannbleeker/trello-mcp/compare/v1.6.0...v1.7.0

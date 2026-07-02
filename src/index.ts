@@ -6,7 +6,8 @@
  * Version: 1.0.0
  * Description: Worker entry. Wraps a TrelloMCP Durable Object behind the
  *              OAuthProvider (GitHub upstream), enforces a hard-coded
- *              GitHub-login allowlist, and registers the 96 Trello tools.
+ *              GitHub-login allowlist, and registers the 96 Trello tools (v1.9.0 is a
+ *              fix-only release; the surface is unchanged from v1.8.0).
  *
  *              On a non-allowlisted login the server still registers tools but
  *              every handler refuses with a clear message — easier to debug
@@ -15,6 +16,11 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.9.0 (2026-07-02) — 18 audit-surfaced bug fixes across guards, timezone, response
+ *                        shapes, comment-family guards, and client-layer HTTP handling.
+ *                        Tool signature changes: reaction tools gained optional cardId
+ *                        (auto-derived if omitted); mark_all_notifications_read dropped
+ *                        its broken `filter` param.
  *   1.8.0 (2026-07-02) — +19 tools: single-entity fetches (get_label, get_attachment),
  *                        actions & reactions (list_comment_reactions_summary, get_action,
  *                        get_action_display), custom fields (8 tools), plugins/power-ups
@@ -206,7 +212,7 @@ function guarded<TIn>(
 export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Trello (Dann)",
-		version: "1.8.0",
+		version: "1.9.0",
 	});
 
 	async init() {
@@ -958,12 +964,11 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 
 		this.server.tool(
 			"mark_all_notifications_read",
-			"Bulk mark every unread notification as read. Optional `filter` narrows scope (e.g. \"cardDueSoon\" to clear due-soon pings only).",
+			"Bulk mark every unread notification as read. No per-type filter here — Trello's endpoint doesn't accept one. For type-filtered clearing, compose list_notifications({filter, readFilter:\"unread\"}) with per-item mark_notification_read.",
 			{
-				filter: z.string().optional(),
 				read: z.boolean().optional().describe("Default true (mark read). Pass false to bulk-unread, rarely useful."),
 			},
-			guarded(login, async (i: { filter?: string; read?: boolean }) =>
+			guarded(login, async (i: { read?: boolean }) =>
 				mark_all_notifications_read(client, i),
 			),
 		);
@@ -996,24 +1001,26 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 
 		this.server.tool(
 			"add_comment_reaction",
-			"Attach an emoji reaction to a comment. `commentId` is the action ID (from read_comments). `emoji` is a Trello shortName: \"thumbsup\", \"white_check_mark\", \"heart\", \"eyes\", \"raised_hands\", etc.",
+			"Attach an emoji reaction to a comment. `commentId` is the action ID (from read_comments). `emoji` is a Trello shortName: \"thumbsup\", \"white_check_mark\", \"heart\", \"eyes\", \"raised_hands\", etc. Optional `cardId` verifies the comment belongs to that card; omitted, the tool derives it from the action.",
 			{
 				commentId: z.string().describe("Action ID from read_comments."),
 				emoji: z.string().min(1).describe("Emoji shortName, e.g. \"thumbsup\"."),
+				cardId: z.string().optional().describe("Card ID for a verification check; auto-derived from action if omitted."),
 			},
-			guarded(login, async (i: { commentId: string; emoji: string }) =>
+			guarded(login, async (i: { commentId: string; emoji: string; cardId?: string }) =>
 				add_comment_reaction(client, i),
 			),
 		);
 
 		this.server.tool(
 			"remove_comment_reaction",
-			"Remove a reaction from a comment by its reaction ID (from list_comment_reactions).",
+			"Remove a reaction from a comment by its reaction ID (from list_comment_reactions). Optional `cardId` verifies the comment belongs to that card.",
 			{
 				commentId: z.string().describe("Action ID."),
 				reactionId: z.string().describe("Reaction ID from list_comment_reactions."),
+				cardId: z.string().optional().describe("Card ID for a verification check; auto-derived from action if omitted."),
 			},
-			guarded(login, async (i: { commentId: string; reactionId: string }) =>
+			guarded(login, async (i: { commentId: string; reactionId: string; cardId?: string }) =>
 				remove_comment_reaction(client, i),
 			),
 		);

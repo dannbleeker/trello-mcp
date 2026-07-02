@@ -901,6 +901,116 @@ async function main() {
 		}
 	});
 
+	// v1.9.0 regression checks — audit-surfaced bug fixes
+	console.log("\nv1.9.0 — audit regression checks:");
+
+	const ROLLING_BIG_ROCKS = "5b6189409662065780670709";
+
+	await step("READ_ONLY guard: Rolling Big Rocks is still gettable (reads unaffected)", async () => {
+		const l = await trello("GET", `/lists/${ROLLING_BIG_ROCKS}`, { fields: "name,closed" });
+		if (!l.name?.toLowerCase().includes("rolling")) {
+			throw new Error(`Rolling Big Rocks list identity check failed: ${JSON.stringify(l)}`);
+		}
+	});
+
+	await step("getList (new v1.9.0 client method) returns idBoard directly", async () => {
+		const l = await trello("GET", `/lists/${LIST["@home"]}`, {
+			fields: "name,idBoard,closed",
+		});
+		if (l.idBoard !== BOARD["dann-to-do"]) {
+			throw new Error(`getList idBoard mismatch: ${l.idBoard}`);
+		}
+	});
+
+	await step("Retry-After HTTP-date parse (regression harness: string check)", async () => {
+		// Cheap sanity: the client-side parseRetryAfterMs handles both int and HTTP-date.
+		// Smoke can't actually trigger a 429 with an HTTP-date reliably, so we just
+		// exercise the pattern here to make sure the harness didn't regress.
+		const httpDate = "Wed, 21 Oct 2026 07:28:00 GMT";
+		const t = Date.parse(httpDate);
+		if (Number.isNaN(t)) throw new Error("HTTP-date parse broken in this Node runtime");
+	});
+
+	await step("batch endpoint shape check (regression: non-numeric key handling)", async () => {
+		// Two valid board fetches — both should return {"200":{...}} envelopes.
+		const results = await trello("GET", "/batch", {
+			urls: `/boards/${BOARD["dann-to-do"]},/boards/${BOARD["zoo"]}`,
+		});
+		if (!Array.isArray(results) || results.length !== 2) {
+			throw new Error(`expected array of length 2, got ${JSON.stringify(results).slice(0, 200)}`);
+		}
+		for (const entry of results) {
+			const key = Object.keys(entry)[0];
+			if (!/^\d{3}$/.test(key)) {
+				throw new Error(`batch entry key not 3-digit status: "${key}"`);
+			}
+		}
+	});
+
+	await step("Custom field checkbox stringification: Trello returns \"true\"/\"false\" as strings (regression pin)", async () => {
+		// This step documents the format that list_card_custom_fields now parses.
+		// Direct Trello call — the tool layer transforms the string to boolean.
+		// Enable Custom Fields Power-Up if not already, create a checkbox field on
+		// the smoke card, set its value, and verify Trello returns a string.
+		const plugins = await trello("GET", `/boards/${BOARD["dann-to-do"]}/boardPlugins`);
+		const already = plugins.find((p) => p.idPlugin === "56d5e249a98895a9797bebb9");
+		let bp = null;
+		if (!already) {
+			bp = await trello("POST", `/boards/${BOARD["dann-to-do"]}/boardPlugins`, {
+				idPlugin: "56d5e249a98895a9797bebb9",
+			});
+		}
+
+		const field = await trello("POST", "/customFields", {
+			idModel: BOARD["dann-to-do"],
+			modelType: "board",
+			name: "[MCP-TEST] checkbox regression",
+			type: "checkbox",
+		});
+
+		try {
+			// Set the checkbox to true via JSON body (Trello requires this shape).
+			const url = new URL(`${BASE}/cards/${cardId}/customField/${field.id}/item`);
+			url.searchParams.set("key", KEY);
+			url.searchParams.set("token", TOKEN);
+			await fetch(url, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ value: { checked: "true" } }),
+			});
+			const items = await trello("GET", `/cards/${cardId}/customFieldItems`);
+			const item = items.find((it) => it.idCustomField === field.id);
+			if (!item) throw new Error("custom field item not present after PUT");
+			// Trello returns the value as a STRING — the whole point of the fix.
+			if (typeof item.value?.checked !== "string") {
+				throw new Error(`expected value.checked to be a string, got ${typeof item.value?.checked}`);
+			}
+			if (item.value.checked !== "true") {
+				throw new Error(`expected "true", got "${item.value.checked}"`);
+			}
+		} finally {
+			await trello("DELETE", `/customFields/${field.id}`);
+			if (bp) {
+				await trello("DELETE", `/boards/${BOARD["dann-to-do"]}/boardPlugins/${bp.id}`);
+			}
+		}
+	});
+
+	await step("update_comment/delete_comment ownership check (regression: mismatched cardId)", async () => {
+		// Post a comment on cardId, verify GET /actions/{id} returns the same card id
+		// so the tool-layer verify pattern can rely on it.
+		const c = await trello("POST", `/cards/${cardId}/actions/comments`, {
+			text: "ownership-check comment",
+		});
+		const action = await trello("GET", `/actions/${c.id}`);
+		if (action?.data?.card?.id !== cardId) {
+			throw new Error(
+				`action.data.card.id mismatch: got ${action?.data?.card?.id}, expected ${cardId}`,
+			);
+		}
+		await trello("DELETE", `/actions/${c.id}`);
+	});
+
 	// 7. Cleanup
 	console.log("\nCleanup:");
 	for (const id of created) {

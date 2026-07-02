@@ -37,6 +37,25 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.9.0 (2026-07-02) — 18 bug fixes from the v1.8.0 audit:
+ *                        4 READ_ONLY-guard additions (move_list, archive_list,
+ *                        archive_all_cards, convert_checklist_item_to_card).
+ *                        list_card_custom_fields now parses "true"/"false" as
+ *                        booleans and stringified numbers as Numbers.
+ *                        move_all_cards fetches the destination list directly
+ *                        instead of probing cards for the board id.
+ *                        batch_add_label surfaces underlying TrelloError instead
+ *                        of collapsing to "label not found".
+ *                        list_cards_due and weekly_review_pack day-buckets are
+ *                        now timezone-aware (Europe/Copenhagen).
+ *                        weekly_review_pack refuses non-dann-to-do boards.
+ *                        truncated flag no longer false-positive at exact-boundary
+ *                        result counts. list_notifications drops the MAX_RESULTS
+ *                        silent cap (client already clamps to 1000).
+ *                        update_comment / delete_comment verify commentId
+ *                        belongs to cardId; add_comment_reaction /
+ *                        remove_comment_reaction now derive+guard the card.
+ *                        mark_all_notifications_read drops the broken filter param.
  *   1.8.0 (2026-07-02) — +19 tools across 6 themes:
  *                        Single-entity fetches (2): get_label, get_attachment
  *                        Actions & reactions (3):   list_comment_reactions_summary,
@@ -114,8 +133,10 @@
 import {
 	BOARD_ALIASES,
 	DEFAULT_BOARD,
+	DEFAULT_TIMEZONE,
 	LIST_ALIASES,
 	MAX_RESULTS,
+	READ_ONLY_LISTS,
 	boardAliasFor,
 	listAliasFor,
 	resolveBoard,
@@ -218,8 +239,18 @@ function summariseList(list: TrelloList): ListSummary {
 	};
 }
 
-/** Trim a card list to MAX_RESULTS, optionally filter to staleness. */
-function applyCardFilters(cards: TrelloCard[], staleDays?: number, label?: string): TrelloCard[] {
+/**
+ * Filter a card list (drop closed, optionally by staleness/label) and trim to
+ * MAX_RESULTS. Returns both the trimmed slice AND the pre-slice count so
+ * callers can compute `truncated` correctly (v1.9.0 fix: the earlier version
+ * flagged truncated=true when the result set was EXACTLY MAX_RESULTS with no
+ * remainder, causing false-positive re-fetches).
+ */
+function applyCardFilters(
+	cards: TrelloCard[],
+	staleDays?: number,
+	label?: string,
+): { cards: TrelloCard[]; total: number } {
 	let out = cards.filter((c) => !c.closed);
 	if (staleDays !== undefined && staleDays > 0) {
 		const cutoff = Date.now() - staleDays * 24 * 60 * 60 * 1000;
@@ -229,7 +260,8 @@ function applyCardFilters(cards: TrelloCard[], staleDays?: number, label?: strin
 		const target = label.toLowerCase();
 		out = out.filter((c) => c.labels.some((lb) => lb.name.toLowerCase() === target));
 	}
-	return out.slice(0, MAX_RESULTS);
+	const total = out.length;
+	return { cards: out.slice(0, MAX_RESULTS), total };
 }
 
 // ============================================================================
@@ -279,11 +311,11 @@ export async function list_cards(
 		scope.boardId = boardId;
 		raw = await client.listCardsOnBoard(boardId);
 	}
-	const filtered = applyCardFilters(raw, input.staleDays, input.label);
+	const { cards: filtered, total } = applyCardFilters(raw, input.staleDays, input.label);
 	return {
 		scope,
 		cards: filtered.map(summariseCard),
-		truncated: filtered.length === MAX_RESULTS,
+		truncated: total > MAX_RESULTS,
 	};
 }
 
@@ -588,9 +620,10 @@ export async function list_cards_due(
 	}
 
 	const now = Date.now();
-	const startOfToday = new Date(now);
-	startOfToday.setUTCHours(0, 0, 0, 0);
-	const endOfToday = startOfToday.getTime() + 24 * 60 * 60 * 1000;
+	// v1.9.0 fix: day boundaries in Dann's local timezone, not the Worker's
+	// UTC runtime. Otherwise cards due at 00:30 CEST show up as "yesterday".
+	const startOfToday = startOfDayMsInTz(now);
+	const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
 	const endOfWeek = now + 7 * 24 * 60 * 60 * 1000;
 
 	const passesScope = (c: TrelloCard): boolean => {
@@ -601,13 +634,13 @@ export async function list_cards_due(
 			case "overdue":
 				return t < now && !c.dueComplete;
 			case "today":
-				return t >= startOfToday.getTime() && t < endOfToday;
+				return t >= startOfToday && t < endOfToday;
 			case "next_seven_days":
 				return t >= now && t <= endOfWeek;
 		}
 	};
 
-	const filtered = applyCardFilters(raw.filter(passesScope), undefined, input.label);
+	const { cards: filtered, total } = applyCardFilters(raw.filter(passesScope), undefined, input.label);
 	return {
 		scope: input.scope,
 		cards: filtered.map((c) => ({
@@ -615,7 +648,7 @@ export async function list_cards_due(
 			snoozed: c.dueReminder !== null && c.dueReminder !== -1,
 			wakeUp: computeWakeUp(c.due, c.dueReminder),
 		})),
-		truncated: filtered.length === MAX_RESULTS,
+		truncated: total > MAX_RESULTS,
 	};
 }
 
@@ -645,15 +678,18 @@ export async function list_cards_by_list(
 		filtered = filtered.filter((c) => Date.parse(c.dateLastActivity) <= cutoff);
 	}
 
-	filtered = filtered.slice(0, MAX_RESULTS);
+	// v1.9.0 fix: capture the pre-slice length so `truncated` reflects whether
+	// results were actually cut off (not whether they landed on the boundary).
+	const totalMatching = filtered.length;
+	const sliced = filtered.slice(0, MAX_RESULTS);
 	return {
 		listId,
-		cards: filtered.map((c) => ({
+		cards: sliced.map((c) => ({
 			...summariseCard(c),
 			snoozed: c.dueReminder !== null && c.dueReminder !== -1,
 			wakeUp: computeWakeUp(c.due, c.dueReminder),
 		})),
-		truncated: filtered.length === MAX_RESULTS,
+		truncated: totalMatching > MAX_RESULTS,
 	};
 }
 
@@ -918,7 +954,15 @@ export async function convert_checklist_item_to_card(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string; itemId: string; targetList?: string },
 ): Promise<{ card: CardSummary }> {
-	await assertCardWritable(client, input.cardId);
+	const sourceCard = await assertCardWritable(client, input.cardId);
+
+	// Trello births the new card on the SOURCE card's list. If the source is
+	// on a READ_ONLY list (Rolling Big Rocks) we'd create a card on a curated
+	// list — exactly what create_card refuses. Require a writable targetList
+	// in that case, or refuse the whole call.
+	if (READ_ONLY_LISTS.has(sourceCard.idList) && !input.targetList) {
+		assertNotReadOnly(sourceCard.idList, "destination");
+	}
 
 	let newCard = await client.convertChecklistItemToCard(
 		input.cardId,
@@ -958,7 +1002,12 @@ export async function batch_add_label(
 		throw new GuardError(`Batch size capped at ${BATCH_MAX}; got ${input.cardIds.length}.`);
 	}
 
-	const labelByBoard = new Map<string, { id: string; name: string; color: string } | null>();
+	// Per-board resolution cache. `null` means "GuardError said the label
+	// name isn't on this board"; an Error means the resolveLabel call itself
+	// threw (Trello 5xx, network glitch) and we want to surface THAT reason
+	// rather than collapse it to a bogus "label not found". v1.9.0 fix.
+	type ResolvedLabel = { id: string; name: string; color: string };
+	const labelByBoard = new Map<string, ResolvedLabel | { error: string } | null>();
 	const skipped: { cardId: string; reason: string }[] = [];
 	let updated = 0;
 
@@ -969,16 +1018,29 @@ export async function batch_add_label(
 				try {
 					const resolved = await resolveLabel(client, card.idBoard, input.label);
 					labelByBoard.set(card.idBoard, resolved);
-				} catch {
-					labelByBoard.set(card.idBoard, null);
+				} catch (e) {
+					if (e instanceof GuardError) {
+						// resolveLabel throws GuardError specifically for "not found".
+						labelByBoard.set(card.idBoard, null);
+					} else {
+						// Real API error — cache the message so downstream cards on
+						// the same board don't retry-and-swallow the same failure.
+						labelByBoard.set(card.idBoard, {
+							error: e instanceof Error ? e.message : String(e),
+						});
+					}
 				}
 			}
 			const lb = labelByBoard.get(card.idBoard);
-			if (!lb) {
+			if (lb === null) {
 				skipped.push({ cardId, reason: `label "${input.label}" not found on board ${card.idBoard}` });
 				continue;
 			}
-			await client.addLabelToCard(cardId, lb.id);
+			if (lb && "error" in lb) {
+				skipped.push({ cardId, reason: `label lookup failed on board ${card.idBoard}: ${lb.error}` });
+				continue;
+			}
+			await client.addLabelToCard(cardId, (lb as ResolvedLabel).id);
 			updated += 1;
 		} catch (e) {
 			skipped.push({ cardId, reason: e instanceof Error ? e.message : String(e) });
@@ -1109,11 +1171,12 @@ export async function list_my_cards_assigned(
 		const boardId = resolveBoard(input.board);
 		cards = cards.filter((c) => c.idBoard === boardId);
 	}
+	const totalMatching = cards.length;
 	const slice = cards.slice(0, MAX_RESULTS);
 	return {
 		me: { id: me.id, username: me.username },
 		cards: slice.map(summariseCard),
-		truncated: slice.length === MAX_RESULTS,
+		truncated: totalMatching > MAX_RESULTS,
 	};
 }
 
@@ -1240,22 +1303,27 @@ export async function set_due_reminder(
 
 // ---- Comment edits ----
 
-/** update_comment — edit the text of an existing comment by its action ID. */
+/**
+ * update_comment — edit the text of an existing comment by its action ID.
+ * v1.9.0: also verifies the commentId actually belongs to the claimed cardId
+ * before hitting Trello. Otherwise a caller lying about cardId could edit a
+ * comment on a card whose list is FORBIDDEN.
+ */
 export async function update_comment(
 	client: TrelloClient,
 	input: { cardId: string; commentId: string; text: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertCommentOnCard(client, input.commentId, input.cardId);
 	await client.updateComment(input.commentId, input.text);
 	return { ok: true };
 }
 
-/** delete_comment — remove a comment by its action ID. */
+/** delete_comment — remove a comment by its action ID. Verifies ownership too. */
 export async function delete_comment(
 	client: TrelloClient,
 	input: { cardId: string; commentId: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertCommentOnCard(client, input.commentId, input.cardId);
 	await client.deleteComment(input.commentId);
 	return { ok: true };
 }
@@ -1296,6 +1364,16 @@ export async function weekly_review_pack(
 	snoozed: { count: number };
 }> {
 	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	// v1.9.0 fix: the whole composite is dann-to-do-shaped — its list aliases
+	// (inbox, waiting, @computer, could-personal, rolling-big-rocks, etc.)
+	// point at IDs on that specific board. Running it against `zoo` would
+	// silently return all-zero buckets because those aliases don't map to
+	// zoo's lists. Refuse other boards explicitly.
+	if (boardId !== resolveBoard(DEFAULT_BOARD)) {
+		throw new GuardError(
+			`weekly_review_pack is dann-to-do-shaped (its list aliases resolve to that board only). Refusing board=${input.board}. Use list_cards_due / list_cards_by_list for other boards.`,
+		);
+	}
 	const staleDays = input.staleDays ?? 7;
 	const cap = Math.min(input.maxPerBucket ?? 25, MAX_RESULTS);
 
@@ -1306,9 +1384,10 @@ export async function weekly_review_pack(
 	const open = allCards.filter((c) => !c.closed);
 
 	const now = Date.now();
-	const todayStart = new Date(now);
-	todayStart.setUTCHours(0, 0, 0, 0);
-	const todayEnd = todayStart.getTime() + 24 * 60 * 60 * 1000;
+	// v1.9.0 fix: local-time day boundaries, so a Friday morning review
+	// doesn't classify Saturday 01:30 CEST as "due_today".
+	const todayStart = startOfDayMsInTz(now);
+	const todayEnd = todayStart + 24 * 60 * 60 * 1000;
 	const weekEnd = now + 7 * 24 * 60 * 60 * 1000;
 	const staleCutoff = now - staleDays * 24 * 60 * 60 * 1000;
 
@@ -1325,7 +1404,7 @@ export async function weekly_review_pack(
 	const dueTodayCards = open.filter((c) => {
 		if (!c.due) return false;
 		const t = Date.parse(c.due);
-		return t >= todayStart.getTime() && t < todayEnd;
+		return t >= todayStart && t < todayEnd;
 	});
 	const dueThisWeekCards = open.filter((c) => {
 		if (!c.due) return false;
@@ -1405,7 +1484,8 @@ export async function rename_list(
 
 /**
  * archive_list — close (default) or reopen a list. Guards refuse it on Butler
- * / Repeater Cards so automation infrastructure can't be hidden.
+ * / Repeater Cards so automation infrastructure can't be hidden, and on
+ * Rolling Big Rocks so Dann's curated list can't be closed in one call.
  */
 export async function archive_list(
 	client: TrelloClient,
@@ -1413,6 +1493,7 @@ export async function archive_list(
 ): Promise<{ list: ListSummary }> {
 	const listId = resolveList(input.list);
 	assertWritable(listId);
+	assertNotReadOnly(listId, "source");
 	const updated = await client.updateList(listId, { closed: input.closed ?? true });
 	return { list: summariseList(updated) };
 }
@@ -1431,6 +1512,9 @@ export async function move_list(
 	}
 	const listId = resolveList(input.list);
 	assertWritable(listId);
+	// Rolling Big Rocks is curated — reordering it or moving it off the board
+	// would destroy Dann's ranking. Reject.
+	assertNotReadOnly(listId, "source");
 	const updated = await client.updateList(listId, {
 		pos: input.position,
 		idBoard: input.targetBoard ? resolveBoard(input.targetBoard) : undefined,
@@ -1453,24 +1537,12 @@ export async function move_all_cards(
 	assertNotReadOnly(sourceListId, "source");
 	assertCanWriteTo(targetListId);
 
-	// Trello needs the destination board id explicitly (cards can cross boards
-	// during the bulk move). Derive it by probing one card on the destination
-	// or, failing that, on the source.
-	let targetBoardId = "";
-	const destProbe = await client.listCardsOnList(targetListId);
-	if (destProbe.length > 0) {
-		targetBoardId = destProbe[0].idBoard;
-	} else {
-		const srcProbe = await client.listCardsOnList(sourceListId);
-		targetBoardId = srcProbe[0]?.idBoard ?? "";
-	}
-	if (!targetBoardId) {
-		throw new GuardError(
-			"Could not derive the destination board id for move_all_cards (both lists are empty — nothing to move anyway).",
-		);
-	}
-
-	await client.moveAllCardsOnList(sourceListId, targetListId, targetBoardId);
+	// v1.9.0 fix: previous versions probed cards to derive the destination
+	// board id. That silently failed when destination was empty on a
+	// different board — the source's idBoard would win and Trello would 400.
+	// Fetch the list directly instead; that always returns its idBoard.
+	const targetList = await client.getList(targetListId);
+	await client.moveAllCardsOnList(sourceListId, targetListId, targetList.idBoard);
 	return { ok: true, sourceListId, targetListId };
 }
 
@@ -1481,6 +1553,8 @@ export async function archive_all_cards(
 ): Promise<{ ok: true; listId: string }> {
 	const listId = resolveList(input.list);
 	assertWritable(listId);
+	// One call empties the whole list — refuse for Rolling Big Rocks.
+	assertNotReadOnly(listId, "source");
 	await client.archiveAllCardsOnList(listId);
 	return { ok: true, listId };
 }
@@ -1701,10 +1775,11 @@ export async function list_notifications(
 		since: input.since,
 		before: input.before,
 	});
+	// v1.9.0 fix: the client already clamps `limit` at 1000 (Trello's max).
+	// The earlier .slice(0, MAX_RESULTS=200) silently truncated on top of
+	// that, so a caller passing limit:500 got 200 without knowing.
 	return {
-		notifications: raw
-			.slice(0, MAX_RESULTS)
-			.map(summariseNotification),
+		notifications: raw.map(summariseNotification),
 	};
 }
 
@@ -1719,18 +1794,17 @@ export async function mark_notification_read(
 
 /**
  * mark_all_notifications_read — bulk mark every unread notification as read.
- * Optional `filter` narrows scope (e.g. "cardDueSoon" to clear due-soon pings
- * only). NOTE: read=false is also supported by Trello to bulk-unread but is
- * rarely useful — default is read=true.
+ * v1.9.0: the earlier `filter` param was a lie — Trello's endpoint takes
+ * notification IDs in `ids`, not a type name. Filtering must be composed at
+ * the caller (list_notifications with filter+unread → mark_notification_read).
+ * NOTE: read=false is also supported by Trello to bulk-unread but is rarely
+ * useful — default is read=true.
  */
 export async function mark_all_notifications_read(
 	client: TrelloClient,
-	input: { filter?: string; read?: boolean },
+	input: { read?: boolean },
 ): Promise<{ ok: true }> {
-	await client.markAllNotificationsRead({
-		read: input.read ?? true,
-		filter: input.filter,
-	});
+	await client.markAllNotificationsRead({ read: input.read ?? true });
 	return { ok: true };
 }
 
@@ -1784,11 +1858,15 @@ export async function list_card_voters(
  */
 export async function add_comment_reaction(
 	client: TrelloClient,
-	input: { commentId: string; emoji: string },
+	input: { commentId: string; emoji: string; cardId?: string },
 ): Promise<{ reaction: { id: string; emoji: string; memberId: string } }> {
 	if (!input.emoji || input.emoji.trim().length === 0) {
 		throw new GuardError("emoji must be a non-empty shortName, e.g. \"thumbsup\".");
 	}
+	// v1.9.0: derive-or-verify the underlying card and guard writability so
+	// reactions can't be added on FORBIDDEN-list cards (comments on those
+	// cards are refused, so reactions shouldn't sneak past either).
+	await assertCommentOnCard(client, input.commentId, input.cardId);
 	const r = await client.addCommentReaction(input.commentId, input.emoji);
 	return {
 		reaction: {
@@ -1802,8 +1880,9 @@ export async function add_comment_reaction(
 /** remove_comment_reaction — remove a reaction by its ID (from list_comment_reactions). */
 export async function remove_comment_reaction(
 	client: TrelloClient,
-	input: { commentId: string; reactionId: string },
+	input: { commentId: string; reactionId: string; cardId?: string },
 ): Promise<{ ok: true }> {
+	await assertCommentOnCard(client, input.commentId, input.cardId);
 	await client.removeCommentReaction(input.commentId, input.reactionId);
 	return { ok: true };
 }
@@ -2168,12 +2247,59 @@ export async function delete_custom_field_option(
 	return { ok: true };
 }
 
-/** list_card_custom_fields — a card's current custom-field values. */
+/**
+ * list_card_custom_fields — a card's current custom-field values. Trello
+ * returns `value.checked` as the string "true"/"false" and `value.number` as
+ * a string. The tool layer parses both to their proper JS types so callers
+ * don't accidentally treat "false" as truthy or sort numbers alphabetically.
+ * v1.9.0 fix.
+ */
+interface ParsedCustomFieldItem {
+	id: string;
+	idCustomField: string;
+	idModel: string;
+	modelType: string;
+	idValue?: string;
+	value: {
+		checked?: boolean;
+		date?: string;
+		number?: number;
+		text?: string;
+	} | null;
+}
+
 export async function list_card_custom_fields(
 	client: TrelloClient,
 	input: { cardId: string },
-): Promise<{ cardId: string; items: TrelloCustomFieldItem[] }> {
-	const items = await client.listCardCustomFieldItems(input.cardId);
+): Promise<{ cardId: string; items: ParsedCustomFieldItem[] }> {
+	const raw = await client.listCardCustomFieldItems(input.cardId);
+	const items: ParsedCustomFieldItem[] = raw.map((it: TrelloCustomFieldItem) => {
+		const parsed: ParsedCustomFieldItem = {
+			id: it.id,
+			idCustomField: it.idCustomField,
+			idModel: it.idModel,
+			modelType: it.modelType,
+			idValue: it.idValue,
+			value: null,
+		};
+		if (it.value) {
+			parsed.value = {};
+			if (typeof it.value.checked === "string") {
+				parsed.value.checked = it.value.checked === "true";
+			}
+			if (typeof it.value.date === "string") {
+				parsed.value.date = it.value.date;
+			}
+			if (typeof it.value.number === "string") {
+				const n = Number(it.value.number);
+				if (Number.isFinite(n)) parsed.value.number = n;
+			}
+			if (typeof it.value.text === "string") {
+				parsed.value.text = it.value.text;
+			}
+		}
+		return parsed;
+	});
 	return { cardId: input.cardId, items };
 }
 
@@ -2349,11 +2475,12 @@ export async function list_archived_cards(
 		const cutoff = Date.now() - input.staleDays * 24 * 60 * 60 * 1000;
 		out = out.filter((c) => Date.parse(c.dateLastActivity) <= cutoff);
 	}
+	const totalMatching = out.length;
 	const sliced = out.slice(0, MAX_RESULTS);
 	return {
 		boardId,
 		cards: sliced.map(summariseCard),
-		truncated: sliced.length === MAX_RESULTS,
+		truncated: totalMatching > MAX_RESULTS,
 	};
 }
 
@@ -2401,6 +2528,45 @@ function summariseNotification(n: TrelloNotification): SummarisedNotification {
 }
 
 /**
+ * Return the epoch-ms boundary for the start of the local "today" in the
+ * given IANA timezone. Cloudflare Workers run in UTC, so plain
+ * `setUTCHours(0,0,0,0)` misclassifies cards for users east/west of UTC.
+ * Uses Intl.DateTimeFormat with the tz, which handles DST correctly.
+ * v1.9.0 fix for list_cards_due and weekly_review_pack.
+ */
+function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): number {
+	const fmt = new Intl.DateTimeFormat("en-US", {
+		timeZone: tz,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+	const parts = fmt.formatToParts(new Date(nowMs));
+	const grab = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
+	// Get today's Y-M-D in the target tz, then find the epoch-ms for
+	// 00:00:00 of that Y-M-D in the same tz. Round-trip trick: subtract the
+	// tz's UTC offset at nowMs from an assumed-UTC midnight of that Y-M-D.
+	const y = Number(grab("year"));
+	const m = Number(grab("month"));
+	const d = Number(grab("day"));
+	const hh = Number(grab("hour")) % 24; // Intl "24" ↔ "00" quirk
+	const mm = Number(grab("minute"));
+	const ss = Number(grab("second"));
+	// "Wall-clock" nowMs in tz, minus wall-clock time-of-day, equals midnight in tz.
+	const utcMidnight = Date.UTC(y, m - 1, d, 0, 0, 0);
+	const wallOffsetMs = (hh * 3600 + mm * 60 + ss) * 1000;
+	// The tz's offset is (nowMs - utcOfWallClock). But we can instead observe:
+	// midnight_in_tz(epoch) = nowMs - wallOffsetMs. That's what we return.
+	// (utcMidnight is computed only to keep the derivation transparent above.)
+	void utcMidnight;
+	return nowMs - wallOffsetMs;
+}
+
+/**
  * Compute the wake-up time for a card with a `dueReminder` set.
  * Returns null if either input is null. Trello's `dueReminder` is the number
  * of minutes BEFORE the due date when the reminder should fire (so
@@ -2431,6 +2597,34 @@ function decodeBase64(input: string): Uint8Array {
 	} catch {
 		throw new GuardError("contentBase64 is not valid base64.");
 	}
+}
+
+/**
+ * Verify a comment's action ID actually belongs to the given card (or, if
+ * `expectedCardId` is undefined, derive the card from the action). Then runs
+ * assertCardWritable on that card. Used by update_comment / delete_comment /
+ * add_comment_reaction / remove_comment_reaction — Trello's action endpoints
+ * only take the action id, so without this a caller can lie about cardId and
+ * touch a comment on a card whose list is FORBIDDEN. v1.9.0 fix.
+ */
+async function assertCommentOnCard(
+	client: TrelloClient,
+	commentId: string,
+	expectedCardId: string | undefined,
+): Promise<void> {
+	const action = await client.getAction(commentId);
+	const actionCardId = (action?.data as { card?: { id?: string } } | undefined)?.card?.id;
+	if (!actionCardId) {
+		throw new GuardError(
+			`Action ${commentId} has no associated card — cannot verify write permission.`,
+		);
+	}
+	if (expectedCardId !== undefined && expectedCardId !== actionCardId) {
+		throw new GuardError(
+			`commentId ${commentId} belongs to card ${actionCardId}, not the cardId ${expectedCardId} you passed.`,
+		);
+	}
+	await assertCardWritable(client, actionCardId);
 }
 
 /**

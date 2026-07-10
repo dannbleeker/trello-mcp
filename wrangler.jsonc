@@ -39,6 +39,14 @@
       "id": "6ddeb7f29d9b4cd898cb89a8ff6d3aca"
     }
   ],
+  // Import *.html as plain strings (src/dashboard/page.html). Additive; no effect on /mcp.
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.html"],
+      "fallthrough": true
+    }
+  ],
   "observability": {
     "enabled": true
   },

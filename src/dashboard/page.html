@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dann — To-Do Dashboard</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f6f7f9;
+  color: #1c2024;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+/* ---- Health bar ---- */
+.health {
+  background: #fff;
+  border: 1px solid #e4e7eb;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.health-top { display: flex; flex-wrap: wrap; gap: 22px; align-items: baseline; margin-bottom: 12px; }
+.stat { display: flex; flex-direction: column; }
+.stat .num { font-size: 26px; font-weight: 700; line-height: 1; }
+.stat .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin-top: 4px; }
+.stat .num.alert { color: #c0392b; }
+.wip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.wip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 5px 10px; border-radius: 999px;
+  background: #eef1f4; border: 1px solid #e0e4e8;
+}
+.wip b { font-weight: 600; }
+.wip.ok { background: #ecf7ee; border-color: #cfe9d4; }
+.wip.over { background: #fdecea; border-color: #f5c6c0; color: #a5281c; }
+.wip .dot { width: 7px; height: 7px; border-radius: 50%; background: #16a34a; }
+.wip.over .dot { background: #c0392b; }
+.wip.none .dot { background: #9aa3ad; }
+
+/* ---- Zones ---- */
+.zone-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #4b5563; margin: 22px 0 10px; }
+.zone-title small { font-weight: 500; text-transform: none; letter-spacing: 0; color: #9aa3ad; }
+
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.chip {
+  font-size: 12px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+  background: #fff; border: 1px solid #d7dbe0; color: #374151; user-select: none;
+}
+.chip.active { background: #1c2024; color: #fff; border-color: #1c2024; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.col {
+  background: #fff; border: 1px solid #e4e7eb; border-radius: 12px;
+  padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); min-width: 0;
+}
+.col-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.col-head .name { font-weight: 600; font-size: 13px; }
+.col-head .count { font-size: 11px; color: #6b7280; background:#eef1f4; border-radius:999px; padding:2px 8px; }
+.col-head .count.over { background:#fdecea; color:#a5281c; }
+
+.card {
+  border: 1px solid #eceef1; border-radius: 9px; padding: 9px 10px; margin-bottom: 8px;
+  background: #fcfcfd;
+}
+.card:last-child { margin-bottom: 0; }
+.card .ttl { font-size: 13px; font-weight: 500; }
+.card .ttl a { color: inherit; text-decoration: none; }
+.card .ttl a:hover { text-decoration: underline; }
+.card .desc { font-size: 11.5px; color: #6b7280; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.badge { font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600; }
+.badge.bestseller { background:#1c2024; color:#fff; }
+.badge.invest { background:#2563eb; color:#fff; }
+.badge.clarify { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
+.card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.btn {
+  font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
+  border: 1px solid #d7dbe0; background: #fff; color: #374151;
+}
+.btn:hover { background: #f3f4f6; }
+.btn.done { border-color: #cfe9d4; color: #1a7f37; }
+.btn.done:hover { background: #ecf7ee; }
+.btn:disabled { opacity: .5; cursor: default; }
+select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px solid #d7dbe0; background:#fff; color:#374151; max-width: 120px; }
+
+.empty { font-size: 12px; color: #9aa3ad; font-style: italic; padding: 4px 2px; }
+
+/* list overview panel */
+.ov-panel {
+  background: #fff; border: 1px solid #e4e7eb; border-radius: 12px;
+  padding: 12px 14px 14px; margin: 18px 0 6px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.ov-panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin-bottom: 10px; }
+.overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.ov {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: #f6f7f9; border: 1px solid #eceef1; border-radius: 10px; padding: 10px 6px;
+  text-align: center;
+}
+.ov .ov-num { font-size: 22px; font-weight: 700; line-height: 1; color: #1c2024; }
+.ov .ov-name { font-size: 10.5px; color: #6b7280; margin-top: 5px; line-height: 1.2; }
+.ov.zero { opacity: .5; }
+.ov.alert { background: #fdecea; border-color: #f5c6c0; }
+.ov.alert .ov-num { color: #c0392b; }
+.chip-n { opacity: .55; font-weight: 700; margin-left: 3px; }
+.chip.active .chip-n { opacity: .85; }
+
+/* capture */
+.capture { display: flex; gap: 8px; margin: 4px 0 4px; }
+.capture input {
+  flex: 1; font-size: 13px; padding: 8px 11px; border-radius: 8px; border: 1px solid #d7dbe0; background:#fff;
+}
+.capture button {
+  font-size: 13px; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+  background: #1c2024; color: #fff; font-weight: 600;
+}
+.capture button:disabled { opacity: .5; cursor: default; }
+
+#toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  background: #1c2024; color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 13px;
+  opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 50;
+}
+#toast.show { opacity: 1; }
+.loading { padding: 40px; text-align: center; color: #6b7280; }
+.errbox { background:#fdecea; border:1px solid #f5c6c0; color:#a5281c; padding:12px 14px; border-radius:10px; margin-bottom:14px; font-size:13px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="content"><div class="loading">Loading your board…</div></div>
+</div>
+<div id="toast"></div>
+
+<script>
+// Data layer talks to the same-origin Worker API (see src/dashboard/handler.ts).
+// Auth is a GitHub-OAuth session cookie; a 401 bounces the browser to /app/login.
+const BOARD_ID = "58cbce31043f1a89cfc6b42c";
+const CTX = [
+  { id:"59be51ab95ff1052eac74429", name:"@Computer", wip:7 },
+  { id:"59be516a18d71ddd80868e9d", name:"@Home",     wip:5 },
+  { id:"5ab55bba5941a0a65bbd2256", name:"@Phone",    wip:5 },
+  { id:"59be519ca665c8b77ff07ffb", name:"@Errands",  wip:null },
+  { id:"5db58e03ec3c6561ad9b2875", name:"@Lene",     wip:null },
+];
+const WAITING  = { id:"59b4453266a62986fd16872e", name:"Waiting for…" };
+const INBOX    = { id:"59bd69c743b67aa0d621b3a9", name:"Inbox" };
+const BIGROCKS = { id:"5b6189409662065780670709", name:"Rolling Big Rocks" };
+const DONE     = { id:"63d7fdc0b310c11585d34c3e", name:"Done-do" };
+// lists offered in the per-card "Move" dropdown (Done is the ✓ button; big rocks excluded)
+const MOVE_TARGETS = [...CTX, WAITING];
+// lists shown in the count overview panel
+const OVERVIEW = [
+  ...CTX,
+  WAITING,
+  INBOX,
+];
+
+let CARDS = [];
+let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
+
+function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Thin same-origin fetch helper. 401 -> the session expired/absent, so send the
+// browser to the GitHub login. Other non-2xx -> surface the server's {error}.
+async function api(path, opts){
+  const r = await fetch(path, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts || {}));
+  if (r.status === 401){ location.href = "/app/login"; throw new Error("Not signed in"); }
+  if (!r.ok){ let m = "Request failed"; try { m = (await r.json()).error || m; } catch(e){} throw new Error(m); }
+  return r.status === 204 ? null : r.json();
+}
+
+// Fetch + normalise the board. The API returns {cards:[...]} with Trello-native
+// idList; normalise defensively so the rest of the dashboard is unchanged.
+async function loadCards(){
+  const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID));
+  let arr = Array.isArray(res) ? res : (res && Array.isArray(res.cards)) ? res.cards : [];
+  return arr.map(c => ({ ...c, idList: (c.listId != null ? c.listId : c.idList) }));
+}
+
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove("show"), 2200);
+}
+
+function cardsIn(listId){ return CARDS.filter(c => c.idList === listId && !isDivider(c)); }
+function isDivider(c){ return /^-+$/.test((c.name||"").trim()); }
+function hasLabel(c, n){ return (c.labels||[]).some(l => (typeof l === "string" ? l : l.name) === n); }
+function labelNames(c){ return (c.labels||[]).map(l => typeof l === "string" ? l : l.name); }
+
+function badgesHtml(c){
+  let h = "";
+  if (hasLabel(c,"BESTSELLER")) h += '<span class="badge bestseller">BESTSELLER</span>';
+  if (hasLabel(c,"DBP Invest")) h += '<span class="badge invest">DBP Invest</span>';
+  if (hasLabel(c,"Please Clarify and Organize")) h += '<span class="badge clarify">clarify</span>';
+  return h ? '<div class="badges">'+h+'</div>' : "";
+}
+
+function descSnippet(c){
+  let d = (c.desc||"");
+  // Trello descriptions come back as Markdown — strip it down to readable text:
+  d = d.replace(/!\[[^\]]*\]\([^)]*\)/g, "")                 // images
+       .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")              // links -> link text
+       .replace(/[*_`#>~]/g, "")                             // md emphasis/heading/quote marks
+       .replace(/‌|​/g, "")                        // zero-width chars
+       .replace(/\s+/g, " ")
+       .trim();
+  if (!d) return "";
+  if (d.length > 90) d = d.slice(0,90) + "…";
+  return '<div class="desc" title="'+esc((c.desc||"").replace(/\s+/g," ").trim())+'">'+esc(d)+'</div>';
+}
+
+function moveSelect(c){
+  let opts = '<option value="">Move…</option>';
+  MOVE_TARGETS.forEach(t => { if (t.id !== c.idList) opts += '<option value="'+t.id+'">'+esc(t.name)+'</option>'; });
+  return '<select class="mv" data-card="'+c.id+'" onchange="onMove(this)">'+opts+'</select>';
+}
+
+function cardHtml(c, opts){
+  opts = opts || {};
+  const link = c.url ? '<a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.name)+'</a>' : esc(c.name);
+  let actions = "";
+  if (!opts.noActions){
+    actions = '<div class="card-actions">'
+      + '<button class="btn done" data-card="'+c.id+'" onclick="onDone(this)">✓ Done</button>'
+      + moveSelect(c)
+      + '</div>';
+  }
+  return '<div class="card" data-card="'+c.id+'">'
+    + '<div class="ttl">'+link+'</div>'
+    + descSnippet(c)
+    + badgesHtml(c)
+    + actions
+    + '</div>';
+}
+
+function passesFilter(c){
+  if (FILTER === "all") return true;
+  if (FILTER === "bestseller") return hasLabel(c,"BESTSELLER");
+  if (FILTER === "invest") return hasLabel(c,"DBP Invest");
+  if (FILTER === "personal") return !hasLabel(c,"BESTSELLER") && !hasLabel(c,"DBP Invest");
+  return true;
+}
+
+function render(){
+  const inboxCards = cardsIn(INBOX.id);
+  const waitingCards = cardsIn(WAITING.id);
+  const rockCards = cardsIn(BIGROCKS.id);
+  const ctxCounts = CTX.map(l => ({ l, n: cardsIn(l.id).length }));
+  const totalNext = ctxCounts.reduce((s,x)=>s+x.n, 0);
+
+  // ---- Health bar ----
+  let wipHtml = ctxCounts.map(({l,n}) => {
+    if (l.wip == null) return '<span class="wip none"><span class="dot"></span><b>'+l.name+'</b> '+n+'</span>';
+    const over = n > l.wip;
+    return '<span class="wip '+(over?'over':'ok')+'"><span class="dot"></span><b>'+l.name+'</b> '+n+'/'+l.wip+(over?' ⚠':'')+'</span>';
+  }).join("");
+
+  let health = '<div class="health"><div class="health-top">'
+    + '<div class="stat"><span class="num'+(inboxCards.length?' alert':'')+'">'+inboxCards.length+'</span><span class="lbl">Inbox to clarify</span></div>'
+    + '<div class="stat"><span class="num">'+totalNext+'</span><span class="lbl">Next actions</span></div>'
+    + '<div class="stat"><span class="num">'+waitingCards.length+'</span><span class="lbl">Waiting for</span></div>'
+    + '<div class="stat"><span class="num">'+rockCards.length+'</span><span class="lbl">Big rocks</span></div>'
+    + '</div><div class="wip-row">'+wipHtml+'</div></div>';
+
+  // ---- Quick capture ----
+  let capture = '<div class="capture">'
+    + '<input id="capInput" type="text" placeholder="Quick capture → Inbox…" onkeydown="if(event.key===\'Enter\')onCapture()">'
+    + '<button id="capBtn" onclick="onCapture()">Add</button></div>';
+
+  // ---- List overview panel (count per list) ----
+  let overview = '<div class="ov-panel"><div class="ov-panel-title">Cards per list</div><div class="overview">'
+    + OVERVIEW.map(l => {
+        const n = cardsIn(l.id).length;
+        const over = (l.wip != null && n > l.wip) || (l.id === INBOX.id && n > 0);
+        let cls = "ov"; if (n === 0) cls += " zero"; if (over) cls += " alert";
+        return '<div class="'+cls+'"><span class="ov-num">'+n+'</span><span class="ov-name">'+esc(l.name)+'</span></div>';
+      }).join("")
+    + '</div></div>';
+
+  // ---- Zone 2: next actions (with per-tag counts across context lists) ----
+  const nextCards = CTX.reduce((a,l)=>a.concat(cardsIn(l.id)), []);
+  const tagCount = {
+    all: nextCards.length,
+    bestseller: nextCards.filter(c=>hasLabel(c,"BESTSELLER")).length,
+    invest: nextCards.filter(c=>hasLabel(c,"DBP Invest")).length,
+    personal: nextCards.filter(c=>!hasLabel(c,"BESTSELLER") && !hasLabel(c,"DBP Invest")).length,
+  };
+  const chips = [["all","All"],["bestseller","BESTSELLER"],["invest","DBP Invest"],["personal","Personal"]]
+    .map(([k,lbl]) => '<span class="chip'+(FILTER===k?' active':'')+'" onclick="setFilter(\''+k+'\')">'+lbl+'<span class="chip-n">'+tagCount[k]+'</span></span>').join("");
+
+  let ctxCols = CTX.map(l => {
+    const all = cardsIn(l.id);
+    const shown = all.filter(passesFilter);
+    const over = l.wip != null && all.length > l.wip;
+    let body = shown.length
+      ? shown.map(c => cardHtml(c)).join("")
+      : '<div class="empty">'+(all.length ? "nothing matches filter" : "clear")+'</div>';
+    return '<div class="col"><div class="col-head"><span class="name">'+esc(l.name)+'</span>'
+      + '<span class="count'+(over?' over':'')+'">'+all.length+(l.wip!=null?'/'+l.wip:'')+'</span></div>'
+      + body + '</div>';
+  }).join("");
+
+  // ---- Zone 3: needs attention ----
+  let waitingCol = '<div class="col"><div class="col-head"><span class="name">Waiting for…</span><span class="count">'+waitingCards.length+'</span></div>'
+    + (waitingCards.length ? waitingCards.map(c=>cardHtml(c)).join("") : '<div class="empty">nothing pending on others</div>') + '</div>';
+  let inboxCol = '<div class="col"><div class="col-head"><span class="name">Inbox — clarify</span><span class="count'+(inboxCards.length?' over':'')+'">'+inboxCards.length+'</span></div>'
+    + (inboxCards.length ? inboxCards.map(c=>cardHtml(c)).join("") : '<div class="empty">inbox zero 🎉</div>') + '</div>';
+
+  // ---- Zone 4: big rocks ----
+  let rocksCol = rockCards.length
+    ? '<div class="cols">' + rockCards.map(c=>cardHtml(c,{noActions:true})).join("") + '</div>'
+    : '<div class="empty">no big rocks listed</div>';
+
+  document.getElementById("content").innerHTML =
+      health
+    + capture
+    + overview
+    + '<div class="zone-title">Next actions <small>by context · filter to focus</small></div>'
+    + '<div class="filters">'+chips+'</div>'
+    + '<div class="cols">'+ctxCols+'</div>'
+    + '<div class="zone-title">Needs attention</div>'
+    + '<div class="two">'+waitingCol+inboxCol+'</div>'
+    + '<div class="zone-title">Rolling big rocks <small>your active projects — don’t let firefighting bury these</small></div>'
+    + rocksCol;
+}
+
+function setFilter(k){
+  FILTER = k;
+  try { localStorage.setItem("dann_dash_filter", k); } catch(e){}
+  render();
+}
+
+async function onDone(btn){
+  const id = btn.getAttribute("data-card");
+  btn.disabled = true;
+  try {
+    // Same semantics as the MCP connector: flip dueComplete and let the
+    // board's Butler automation move the card to Done-do. Reflect the move
+    // optimistically so the card leaves its column right away.
+    await api("/api/done", { method: "POST", body: JSON.stringify({ cardId: id }) });
+    const c = CARDS.find(x=>x.id===id); if (c) c.idList = DONE.id;
+    toast("Marked done ✓");
+    render();
+  } catch(e){ btn.disabled = false; toast("Couldn’t mark done: "+e.message); }
+}
+
+async function onMove(sel){
+  const id = sel.getAttribute("data-card");
+  const dest = sel.value; if (!dest) return;
+  sel.disabled = true;
+  try {
+    await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: dest }) });
+    const c = CARDS.find(x=>x.id===id); if (c) c.idList = dest;
+    const t = MOVE_TARGETS.find(x=>x.id===dest);
+    toast("Moved to "+(t?t.name:"list"));
+    render();
+  } catch(e){ sel.disabled = false; toast("Move failed: "+e.message); }
+}
+
+async function onCapture(){
+  const input = document.getElementById("capInput");
+  const btn = document.getElementById("capBtn");
+  const name = (input.value||"").trim();
+  if (!name) return;
+  btn.disabled = true; input.disabled = true;
+  try {
+    await api("/api/capture", { method: "POST", body: JSON.stringify({ name: name }) });
+    // refetch so the new card carries whatever id/url the server assigned
+    CARDS = await loadCards();
+    toast("Added to Inbox");
+    render();
+  } catch(e){ btn.disabled = false; input.disabled = false; toast("Couldn’t add: "+e.message); }
+}
+
+async function init(){
+  try {
+    CARDS = await loadCards();
+    render();
+  } catch(e){
+    document.getElementById("content").innerHTML =
+      '<div class="errbox">Couldn’t load your Trello board: '+esc(e.message)+'</div>';
+  }
+}
+init();
+</script>
+</body>
+</html>

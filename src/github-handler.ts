@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import { Octokit } from "octokit";
+import { DashboardHandler } from "./dashboard/handler";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "./utils";
 import {
 	addApprovedClient,
@@ -200,5 +201,8 @@ app.get("/callback", async (c) => {
 		headers,
 	});
 });
+
+// Web dashboard (/, /dashboard, /app/*, /api/*) — session-gated browser surface, see src/dashboard/.
+app.route("/", DashboardHandler);
 
 export { app as GitHubHandler };

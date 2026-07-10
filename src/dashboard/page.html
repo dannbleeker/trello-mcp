@@ -92,6 +92,17 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 
 .empty { font-size: 12px; color: #9aa3ad; font-style: italic; padding: 4px 2px; }
 
+/* snoozed expandable panel */
+.stat.click { cursor: pointer; user-select: none; }
+.stat.click:hover .lbl { color: #1c2024; }
+.snz-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  border: 1px solid #eceef1; border-radius: 9px; padding: 8px 10px; margin-bottom: 8px;
+  background: #fcfcfd; font-size: 13px;
+}
+.snz-row .meta { font-size: 11px; color: #6b7280; white-space: nowrap; }
+.snz-row .meta.overdue { color: #a5281c; font-weight: 600; }
+
 /* list overview panel */
 .ov-panel {
   background: #fff; border: 1px solid #e4e7eb; border-radius: 12px;
@@ -166,7 +177,12 @@ const OVERVIEW = [
 ];
 
 let CARDS = [];
+let SNOOZED = null;        // null = not loaded yet; [] = loaded, none
+let SNOOZE_OPEN = false;
 let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
+
+const LIST_NAMES = {};
+[...CTX, WAITING, INBOX, BIGROCKS, DONE].forEach(l => { LIST_NAMES[l.id] = l.name; });
 
 function esc(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -278,7 +294,35 @@ function render(){
     + '<div class="stat"><span class="num">'+totalNext+'</span><span class="lbl">Next actions</span></div>'
     + '<div class="stat"><span class="num">'+waitingCards.length+'</span><span class="lbl">Waiting for</span></div>'
     + '<div class="stat"><span class="num">'+rockCards.length+'</span><span class="lbl">Big rocks</span></div>'
+    + '<div class="stat click" onclick="toggleSnooze()" title="Click to '+(SNOOZE_OPEN?'collapse':'expand')+'">'
+    +   '<span class="num">'+(SNOOZED === null ? '…' : SNOOZED.length)+'</span>'
+    +   '<span class="lbl">Snoozed '+(SNOOZE_OPEN?'▴':'▾')+'</span></div>'
     + '</div><div class="wip-row">'+wipHtml+'</div></div>';
+
+  // ---- Snoozed panel (expanded via the health-bar stat) ----
+  let snoozePanel = "";
+  if (SNOOZE_OPEN){
+    let rows;
+    if (SNOOZED === null){
+      rows = '<div class="empty">loading…</div>';
+    } else if (!SNOOZED.length){
+      rows = '<div class="empty">nothing snoozed</div>';
+    } else {
+      rows = SNOOZED.map(s => {
+        const link = (s.url && /^https?:\/\//i.test(s.url))
+          ? '<a href="'+esc(s.url)+'" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">'+esc(s.name)+'</a>'
+          : esc(s.name);
+        const home = LIST_NAMES[s.homeListId] || s.homeListAlias || "?";
+        return '<div class="snz-row"><div><div class="ttl">'+link+'</div>'
+          + '<div class="meta'+(s.overdueWake?' overdue':'')+'">'
+          + (s.overdueWake ? 'overdue wake — was due ' : 'wakes ') + esc(fmtWake(s.wakeUp))
+          + ' · → '+esc(home)+'</div></div>'
+          + '<button class="btn done" data-card="'+s.id+'" onclick="onWake(this)">Wake now</button></div>';
+      }).join("");
+    }
+    snoozePanel = '<div class="col" style="margin-bottom:16px;"><div class="col-head"><span class="name">Snoozed cards</span>'
+      + '<span class="count">'+(SNOOZED ? SNOOZED.length : '…')+'</span></div>'+rows+'</div>';
+  }
 
   // ---- Quick capture ----
   let capture = '<div class="capture">'
@@ -331,6 +375,7 @@ function render(){
 
   document.getElementById("content").innerHTML =
       health
+    + snoozePanel
     + capture
     + overview
     + '<div class="zone-title">Next actions <small>by context · filter to focus</small></div>'
@@ -352,6 +397,38 @@ function setFilter(k){
   FILTER = k;
   try { localStorage.setItem("dann_dash_filter", k); } catch(e){}
   render();
+}
+
+function fmtWake(iso){
+  try {
+    return new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/Copenhagen", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch(e){ return iso.slice(0, 10); }
+}
+
+function toggleSnooze(){ SNOOZE_OPEN = !SNOOZE_OPEN; render(); }
+
+// Fetched non-blocking after the board renders — the count fills in when ready.
+async function loadSnoozed(){
+  try {
+    const r = await api("/api/snoozed");
+    SNOOZED = (r && Array.isArray(r.snoozed)) ? r.snoozed : [];
+  } catch(e){
+    SNOOZED = [];
+  }
+  render();
+}
+
+async function onWake(btn){
+  const id = btn.getAttribute("data-card");
+  btn.disabled = true;
+  try {
+    await api("/api/wake", { method: "POST", body: JSON.stringify({ cardId: id }) });
+    SNOOZED = (SNOOZED || []).filter(s => s.id !== id);
+    toast("Card is awake ✓");
+    // Refetch so the woken card appears in its home column right away.
+    CARDS = await loadCards();
+    render();
+  } catch(e){ btn.disabled = false; toast("Couldn’t wake: "+e.message); }
 }
 
 async function onDone(btn){
@@ -417,6 +494,7 @@ async function init(){
   try {
     CARDS = await loadCards();
     render();
+    loadSnoozed(); // non-blocking; fills the Snoozed stat when ready
   } catch(e){
     document.getElementById("content").innerHTML =
       '<div class="errbox">Couldn’t load your Trello board: '+esc(e.message)+'</div>';

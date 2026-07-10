@@ -34,7 +34,8 @@ import { Octokit } from "octokit";
 import { ALLOWED_LOGINS } from "../allowlist";
 import { renderDigest } from "../digest/render";
 import { TrelloClient } from "../trello/client";
-import { BOARD_ALIASES, DEFAULT_BOARD } from "../trello/constants";
+import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
+import { list_snoozed_cards } from "../trello/tools";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
 import { type DashboardEnv, DashboardApi } from "./api";
 import DASHBOARD_HTML from "./page.html";
@@ -138,8 +139,15 @@ app.get("/digest/preview", async (c) => {
 	}
 	try {
 		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const nowMs = Date.now();
 		const cards = await client.listCardsOnBoard(BOARD_ALIASES[DEFAULT_BOARD]);
-		const { html } = renderDigest(cards, Date.now());
+		let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
+		try {
+			snoozed = (await list_snoozed_cards(client, {}, nowMs)).snoozed;
+		} catch (_e) {
+			// best-effort, same as the real send
+		}
+		const { html } = renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed);
 		return c.html(html, 200, { "Cache-Control": "no-store" });
 	} catch (_e) {
 		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);

@@ -6,7 +6,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (96)
+## Tools (98)
 
 **Reads**
 
@@ -31,6 +31,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `list_my_cards_assigned` | Cross-board "everything assigned to me"; optional board filter |
 | `read_comments` | Chronological comment thread on a card |
 | `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
+| `list_snoozed_cards` | Cards hidden by the Snooze Power-Up, with wake times (`overdueWake` flags a missed wake). Read via card pluginData |
 | `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
 | `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, snoozed, big-rocks |
 | `list_notifications` | Authenticated user's bell-icon feed; filter by type + read state |
@@ -83,6 +84,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `remove_attachment` | Remove an attachment from a card |
 | `batch_add_label` | Apply the same label to up to 50 cards (per-card skip reasons reported) |
 | `batch_move_cards` | Move up to 50 cards to the same destination list (guards + WIP warning) |
+| `wake_card` | Unarchive a Power-Up-snoozed card NOW (refuses non-snoozed cards; creating snoozes via API is impossible) |
 | `create_list` | Create a new list on a board (with position) |
 | `rename_list` | Rename a list |
 | `archive_list` | Archive (default) or reopen a list |

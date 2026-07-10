@@ -168,6 +168,21 @@ export interface TrelloCard {
 	pos?: number;
 	subscribed?: boolean;
 	cover?: Partial<TrelloCardCover>;
+	/** Present only on fetches that pass pluginData=true (see listArchivedCardsWithPluginData). */
+	pluginData?: TrelloPluginData[];
+	/** Present on archived-card fetches. */
+	dateClosed?: string | null;
+}
+
+/** A Power-Up's per-model data blob. `value` is a JSON string in a plugin-defined shape. */
+export interface TrelloPluginData {
+	id: string;
+	idPlugin: string;
+	scope: string;
+	idModel: string;
+	value: string;
+	access: string;
+	dateLastUpdated: string;
 }
 
 /** Minimal Trello member shape. */
@@ -642,6 +657,34 @@ export class TrelloClient {
 			fields: CARD_FIELDS,
 		});
 		return data as TrelloCard[];
+	}
+
+	/**
+	 * Archived (closed) cards WITH their Power-Up pluginData inline — one call.
+	 * Used by the snooze reads: the Snooze Power-Up archives snoozed cards and
+	 * stores the wake time in card-scoped pluginData. v1.15.0.
+	 */
+	async listArchivedCardsWithPluginData(boardId: string): Promise<TrelloCard[]> {
+		const data = await this.request("GET", `/boards/${boardId}/cards`, {
+			fields: CARD_FIELDS,
+			filter: "closed",
+			pluginData: true,
+		});
+		return data as TrelloCard[];
+	}
+
+	/** Unarchive a card (closed=false) — it returns to its original list. The wake primitive. */
+	async unarchiveCard(cardId: string): Promise<TrelloCard> {
+		return this.updateCard(cardId, { closed: false });
+	}
+
+	/** One card WITH its pluginData — used by wake_card to verify a card is Power-Up-snoozed. */
+	async getCardWithPluginData(cardId: string): Promise<TrelloCard> {
+		const data = await this.request("GET", `/cards/${cardId}`, {
+			fields: CARD_FIELDS,
+			pluginData: true,
+		});
+		return data as TrelloCard;
 	}
 
 	async searchCards(query: string, boardId?: string): Promise<TrelloCard[]> {

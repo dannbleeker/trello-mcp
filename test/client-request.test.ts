@@ -77,6 +77,40 @@ describe("TrelloClient.request (via a public method that exercises the code path
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("does NOT retry a 5xx on POST — a gateway 5xx can arrive after the write committed (v1.13.0)", async () => {
+		fetchSpy.mockResolvedValueOnce(textResponse("bad gateway", 502));
+		await expect(client.createCard({ idList: "l1", name: "x" })).rejects.toBeInstanceOf(TrelloError);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("still retries a 5xx on idempotent PUT", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 500))
+			.mockResolvedValueOnce(jsonResponse({ id: "c1", idList: "l2" }));
+
+		const promise = client.moveCard("c1", "l2");
+		await vi.advanceTimersByTimeAsync(5_000);
+		const moved = await promise;
+
+		expect(moved).toMatchObject({ id: "c1", idList: "l2" });
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("still retries a 429 on POST — Trello rejected it before acting, so a retry can't duplicate", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("rate limited", 429, { "Retry-After": "1" }))
+			.mockResolvedValueOnce(jsonResponse({ id: "c9", name: "x" }));
+
+		const promise = client.createCard({ idList: "l1", name: "x" });
+		await vi.advanceTimersByTimeAsync(1_500);
+		const created = await promise;
+
+		expect(created).toMatchObject({ id: "c9" });
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
 	it("puts key + token on the query string of every request", async () => {
 		fetchSpy.mockResolvedValueOnce(jsonResponse([]));
 		await client.listMyBoards();

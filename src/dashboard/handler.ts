@@ -22,6 +22,10 @@
  *              manual step documented in the README.
  *
  * Change log:
+ *   1.1.0 (2026-07-10) — /app/callback: token-exchange/GitHub failures now return a
+ *                        friendly 502 and every exit path clears the one-time state
+ *                        cookie (previously an unhandled throw → bare 500 with the
+ *                        cookie left set).
  *   1.0.0 (2026-07-10) — Initial (v1.12.0 dashboard release).
  */
 
@@ -84,17 +88,31 @@ app.get("/app/callback", async (c) => {
 		});
 	}
 
-	const [accessToken, errResponse] = await fetchUpstreamAuthToken({
-		client_id: c.env.GITHUB_CLIENT_ID,
-		client_secret: c.env.GITHUB_CLIENT_SECRET,
-		code: c.req.query("code"),
-		redirect_uri: new URL("/app/callback", c.req.url).href,
-		upstream_url: "https://github.com/login/oauth/access_token",
-	});
-	if (errResponse) return errResponse;
+	// Every path out of here clears the one-time state cookie — including the
+	// failure paths, so a stuck cookie can't wedge the next login attempt.
+	let login: string;
+	try {
+		const [accessToken, errResponse] = await fetchUpstreamAuthToken({
+			client_id: c.env.GITHUB_CLIENT_ID,
+			client_secret: c.env.GITHUB_CLIENT_SECRET,
+			code: c.req.query("code"),
+			redirect_uri: new URL("/app/callback", c.req.url).href,
+			upstream_url: "https://github.com/login/oauth/access_token",
+		});
+		if (errResponse) {
+			const headers = new Headers(errResponse.headers);
+			headers.append("Set-Cookie", clearStateCookie());
+			return new Response(errResponse.body, { headers, status: errResponse.status });
+		}
 
-	const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
-	const login = user.data.login;
+		const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
+		login = user.data.login;
+	} catch (e) {
+		console.error("dashboard /app/callback error:", e);
+		return c.text("GitHub sign-in failed — restart at /app/login.", 502, {
+			"Set-Cookie": clearStateCookie(),
+		});
+	}
 
 	if (!ALLOWED_LOGINS.has(login)) {
 		return c.text(`Access denied. GitHub user "${login}" is not on this server's allowlist.`, 403, {

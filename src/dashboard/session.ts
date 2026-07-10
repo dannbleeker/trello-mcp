@@ -23,6 +23,9 @@
 
 import { signData, verifySignature } from "../workers-oauth-utils";
 
+export { getCookieValue } from "../cookies";
+import { getCookieValue } from "../cookies";
+
 /** __Host- prefix requires: Secure, Path=/, no Domain — enforced in the attribute strings below. */
 export const SESSION_COOKIE = "__Host-DASH_SESSION";
 export const STATE_COOKIE = "__Host-DASH_STATE";
@@ -41,13 +44,7 @@ export interface DashSession {
 
 const COOKIE_ATTRS = "HttpOnly; Secure; Path=/; SameSite=Lax";
 
-/** Read one cookie's value from a Cookie request header. Returns null if absent. */
-export function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
-	if (!cookieHeader) return null;
-	const cookies = cookieHeader.split(";").map((c) => c.trim());
-	const target = cookies.find((c) => c.startsWith(`${name}=`));
-	return target ? target.substring(name.length + 1) : null;
-}
+
 
 /** Build the Set-Cookie header establishing a signed session for `login`. */
 export async function createSessionCookie(

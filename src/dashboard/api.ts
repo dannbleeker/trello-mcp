@@ -111,6 +111,12 @@ function errorResponse(
 	return c.json({ error: "Internal error." }, 500);
 }
 
+/** A trimmed string field from a parsed body, or "" when absent/not a string. */
+function readString(body: Record<string, unknown>, key: string): string {
+	const v = body[key];
+	return typeof v === "string" ? v.trim() : "";
+}
+
 /** Parse a JSON request body, tolerating malformed/absent JSON as an empty object. */
 async function readJsonBody(c: { req: { json: () => Promise<unknown> } }): Promise<Record<string, unknown>> {
 	try {
@@ -139,8 +145,8 @@ api.get("/api/cards", async (c) => {
 
 api.post("/api/move", async (c) => {
 	const body = await readJsonBody(c);
-	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
-	const list = typeof body.list === "string" ? body.list.trim() : "";
+	const cardId = readString(body, "cardId");
+	const list = readString(body, "list");
 	if (!cardId || !list) {
 		return c.json({ error: "cardId and list are required non-empty strings." }, 400);
 	}
@@ -156,7 +162,7 @@ api.post("/api/move", async (c) => {
 
 api.post("/api/done", async (c) => {
 	const body = await readJsonBody(c);
-	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
+	const cardId = readString(body, "cardId");
 	if (!cardId) {
 		return c.json({ error: "cardId is a required non-empty string." }, 400);
 	}
@@ -189,7 +195,7 @@ api.get("/api/snoozed", async (c) => {
 
 api.post("/api/wake", async (c) => {
 	const body = await readJsonBody(c);
-	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
+	const cardId = readString(body, "cardId");
 	if (!cardId) {
 		return c.json({ error: "cardId is a required non-empty string." }, 400);
 	}
@@ -228,8 +234,8 @@ api.post("/api/undo-done", async (c) => {
 	// Undo for ✓ Done: clear dueComplete (so Butler doesn't re-move it) and
 	// move the card back to the list it came from. v1.16.0.
 	const body = await readJsonBody(c);
-	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
-	const list = typeof body.list === "string" ? body.list.trim() : "";
+	const cardId = readString(body, "cardId");
+	const list = readString(body, "list");
 	if (!cardId || !list) {
 		return c.json({ error: "cardId and list are required non-empty strings." }, 400);
 	}
@@ -246,7 +252,7 @@ api.post("/api/undo-done", async (c) => {
 
 api.post("/api/capture", async (c) => {
 	const body = await readJsonBody(c);
-	const name = typeof body.name === "string" ? body.name.trim() : "";
+	const name = readString(body, "name");
 	if (!name) {
 		return c.json({ error: "name is a required non-empty string." }, 400);
 	}

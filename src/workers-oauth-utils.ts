@@ -2,6 +2,7 @@
 // OAuth utility functions with CSRF and state validation security fixes
 
 import type { AuthRequest, ClientInfo } from "@cloudflare/workers-oauth-provider";
+import { getCookieValue } from "./cookies";
 
 /**
  * OAuth 2.1 compliant error class.
@@ -223,10 +224,7 @@ export function validateCSRFToken(formData: FormData, request: Request): Validat
 		throw new OAuthError("invalid_request", "Missing CSRF token in form data", 400);
 	}
 
-	const cookieHeader = request.headers.get("Cookie") || "";
-	const cookies = cookieHeader.split(";").map((c) => c.trim());
-	const csrfCookie = cookies.find((c) => c.startsWith(`${csrfCookieName}=`));
-	const tokenFromCookie = csrfCookie ? csrfCookie.substring(csrfCookieName.length + 1) : null;
+	const tokenFromCookie = getCookieValue(request.headers.get("Cookie"), csrfCookieName);
 
 	if (!tokenFromCookie) {
 		throw new OAuthError("invalid_request", "Missing CSRF token cookie", 400);
@@ -328,12 +326,7 @@ export async function validateOAuthState(
 
 	// SECURITY FIX: Validate that this state token belongs to this browser session
 	// by checking that the state hash matches the session cookie
-	const cookieHeader = request.headers.get("Cookie") || "";
-	const cookies = cookieHeader.split(";").map((c) => c.trim());
-	const consentedStateCookie = cookies.find((c) => c.startsWith(`${consentedStateCookieName}=`));
-	const consentedStateHash = consentedStateCookie
-		? consentedStateCookie.substring(consentedStateCookieName.length + 1)
-		: null;
+	const consentedStateHash = getCookieValue(request.headers.get("Cookie"), consentedStateCookieName);
 
 	if (!consentedStateHash) {
 		throw new OAuthError(
@@ -793,15 +786,9 @@ async function getApprovedClientsFromCookie(
 ): Promise<string[] | null> {
 	const approvedClientsCookieName = "__Host-APPROVED_CLIENTS";
 
-	const cookieHeader = request.headers.get("Cookie");
-	if (!cookieHeader) return null;
+	const cookieValue = getCookieValue(request.headers.get("Cookie"), approvedClientsCookieName);
+	if (!cookieValue) return null;
 
-	const cookies = cookieHeader.split(";").map((c) => c.trim());
-	const targetCookie = cookies.find((c) => c.startsWith(`${approvedClientsCookieName}=`));
-
-	if (!targetCookie) return null;
-
-	const cookieValue = targetCookie.substring(approvedClientsCookieName.length + 1);
 	const parts = cookieValue.split(".");
 
 	if (parts.length !== 2) return null;

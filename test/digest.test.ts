@@ -7,6 +7,7 @@ import { renderDigest } from "../src/digest/render";
 import {
 	hourInTz,
 	localDateInTz,
+	noteManualSend,
 	runScheduledDigest,
 	sendDigestEmail,
 	type DigestEnv,
@@ -221,5 +222,79 @@ describe("sendDigestEmail", () => {
 		await expect(
 			sendDigestEmail({ RESEND_API_KEY: "re_x", TRELLO_KEY: "k", TRELLO_TOKEN: "t" }, NOW_SUMMER),
 		).rejects.toThrow(/HTTP 422/);
+	});
+});
+
+describe("v1.14.1 bug-hunt regressions", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("render: inbox column count goes red (over style) whenever the inbox is non-empty", () => {
+		const { html } = renderDigest([card({ idList: LIST_ALIASES.inbox, name: "ClarifyMe" })], NOW_SUMMER);
+		const inboxCol = html.slice(html.indexOf("Inbox — clarify"), html.indexOf("Rolling big rocks"));
+		expect(inboxCol).toContain("#fdecea"); // the over-badge background, matching the dashboard
+	});
+
+	it("render: includes the 'Cards per list' overview panel (full-replica parity)", () => {
+		const { html } = renderDigest([], NOW_SUMMER);
+		expect(html).toContain("Cards per list");
+	});
+
+	it("render: strips zero-width characters from desc snippets like the dashboard", () => {
+		const { html } = renderDigest([card({ desc: "​‌hello‍ world﻿" })], NOW_SUMMER);
+		expect(html).toContain("hello world");
+		expect(html).not.toContain("​");
+	});
+
+	it("render: long-overdue due dates carry their year; same-year dates do not", () => {
+		const { html } = renderDigest(
+			[
+				card({ id: "old", name: "AncientCard", due: "2024-07-15T10:00:00.000Z" }),
+				card({ id: "new", name: "RecentCard", due: "2026-07-09T10:00:00.000Z" }),
+			],
+			NOW_SUMMER,
+		);
+		const dueSection = html.slice(html.indexOf("Overdue ("), html.indexOf("by context"));
+		expect(dueSection).toMatch(/AncientCard[\s\S]*?15 Jul 2024/);
+		expect(dueSection).toMatch(/RecentCard[\s\S]*?Due: 9 Jul, \d\d:\d\d/); // no year
+	});
+
+	it("scheduler: a KV flag-write failure after a successful send still returns 'sent' (no throw, no guaranteed dup)", async () => {
+		const env = {
+			OAUTH_KV: {
+				get: async () => null,
+				put: async () => {
+					throw new Error("KV transient failure");
+				},
+			} as unknown as KVNamespace,
+			RESEND_API_KEY: "re_test_key",
+			TRELLO_KEY: "k",
+			TRELLO_TOKEN: "t",
+		};
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = new URL(typeof input === "string" ? input : (input as Request).url);
+			const body = url.hostname === "api.trello.com" ? "[]" : JSON.stringify({ id: "e1" });
+			return new Response(body, { headers: { "Content-Type": "application/json" }, status: 200 });
+		});
+		await expect(runScheduledDigest(env, Date.parse("2026-07-10T02:00:00Z"))).resolves.toBe("sent");
+	});
+
+	it("noteManualSend: sets the sent flag inside the 04-06 window, not outside it", async () => {
+		const store = new Map<string, string>();
+		const env = {
+			OAUTH_KV: {
+				get: async (k: string) => store.get(k) ?? null,
+				put: async (k: string, v: string) => {
+					store.set(k, v);
+				},
+			} as unknown as KVNamespace,
+			TRELLO_KEY: "k",
+			TRELLO_TOKEN: "t",
+		};
+		await noteManualSend(env, Date.parse("2026-07-10T12:00:00Z")); // 14:00 local
+		expect(store.size).toBe(0);
+		await noteManualSend(env, Date.parse("2026-07-10T02:30:00Z")); // 04:30 local
+		expect(store.has("digest:sent:2026-07-10")).toBe(true);
 	});
 });

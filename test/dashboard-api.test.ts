@@ -308,7 +308,9 @@ describe("POST /api/undo-done (v1.16.0)", () => {
 		const putParams = fetchSpy.mock.calls
 			.filter(([, init]) => init?.method === "PUT")
 			.map(([url]) => new URL(url as string).searchParams);
-		expect(putParams.some((p) => p.get("dueComplete") === "false")).toBe(true);
-		expect(putParams.some((p) => p.get("idList") === HOME_ID)).toBe(true);
+		// Order matters (v1.16.1): move back FIRST, then clear the flag — a
+		// failed clear must leave the card visible, not stranded in Done-do.
+		expect(putParams[0].get("idList")).toBe(HOME_ID);
+		expect(putParams[1].get("dueComplete")).toBe("false");
 	});
 });

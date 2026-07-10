@@ -182,6 +182,7 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   .ov.alert { background: #3b1512; border-color: #5c221c; }
   .ov.alert .ov-num { color: #f2b8b5; }
   .badge.clarify, .badge.duover { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
+  .snz-row .meta.overdue { color: #f2b8b5; }
   .badge.dueto { background: #e5e7eb; color: #15171a; }
   .badge.bestseller { background: #e5e7eb; color: #15171a; }
   #toast { background: #e5e7eb; color: #15171a; }
@@ -282,7 +283,12 @@ function dueBadge(c){
   const t = new Date(c.due), now = new Date();
   const sameDay = t.getFullYear()===now.getFullYear() && t.getMonth()===now.getMonth() && t.getDate()===now.getDate();
   if (sameDay) return '<span class="badge dueto">today '+t.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})+'</span>';
-  if (t < now) return '<span class="badge duover">overdue · '+t.toLocaleDateString("en-GB",{day:"numeric",month:"short"})+'</span>';
+  if (t < now){
+    const opts = t.getFullYear() !== now.getFullYear()
+      ? {day:"numeric",month:"short",year:"numeric"} // year shown when it differs (digest parity)
+      : {day:"numeric",month:"short"};
+    return '<span class="badge duover">overdue · '+t.toLocaleDateString("en-GB",opts)+'</span>';
+  }
   return "";
 }
 
@@ -485,7 +491,9 @@ async function loadSnoozed(){
     const r = await api("/api/snoozed");
     SNOOZED = (r && Array.isArray(r.snoozed)) ? r.snoozed : [];
   } catch(e){
-    SNOOZED = [];
+    // Keep whatever we already had — a transient failure on a refresh must
+    // not flip the stat to 0 / the panel to "nothing snoozed". v1.16.1 fix.
+    SNOOZED = SNOOZED ?? [];
   }
   render();
 }
@@ -495,12 +503,14 @@ async function onWake(btn){
   btn.disabled = true;
   try {
     await api("/api/wake", { method: "POST", body: JSON.stringify({ cardId: id }) });
-    SNOOZED = (SNOOZED || []).filter(s => s.id !== id);
-    toast("Card is awake ✓");
-    // Refetch so the woken card appears in its home column right away.
-    CARDS = await loadCards();
-    render();
-  } catch(e){ btn.disabled = false; toast("Couldn’t wake: "+e.message); }
+  } catch(e){ btn.disabled = false; toast("Couldn’t wake: "+e.message); return; }
+  // The card IS awake from here on — a failed board refresh must not read as
+  // a wake failure (same rule as onCapture). v1.16.1 fix.
+  SNOOZED = (SNOOZED || []).filter(s => s.id !== id);
+  toast("Card is awake ✓");
+  render();
+  try { CARDS = await loadCards(); } catch(e){ /* next refresh catches up */ }
+  render();
 }
 
 async function onDone(btn){
@@ -512,7 +522,9 @@ async function onDone(btn){
     // The server flips dueComplete (Butler triggers still fire) AND moves
     // the card to Done-do, so this update matches server state, not a guess.
     const res = await api("/api/done", { method: "POST", body: JSON.stringify({ cardId: id }) });
-    if (card) card.idList = DONE.id;
+    // Re-find after the await: a concurrent refresh may have replaced CARDS,
+    // and mutating the pre-await object would update a dead array. v1.16.1 fix.
+    const cNow = CARDS.find(x=>x.id===id); if (cNow) cNow.idList = DONE.id;
     toast(res && res.warning ? res.warning : "Marked done ✓", prevList ? {
       label: "Undo",
       fn: async () => {
@@ -536,7 +548,7 @@ async function onMove(sel){
   sel.disabled = true;
   try {
     const res = await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: dest }) });
-    if (card) card.idList = dest;
+    const cNow = CARDS.find(x=>x.id===id); if (cNow) cNow.idList = dest; // re-find post-await (see onDone)
     const t = MOVE_TARGETS.find(x=>x.id===dest);
     toast(res && res.warning ? res.warning : "Moved to "+(t?t.name:"list"), prevList ? {
       label: "Undo",

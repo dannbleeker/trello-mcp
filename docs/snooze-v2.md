@@ -74,6 +74,18 @@ be fail-soft — a failed field-clear after a successful unarchive must not
 throw, only log (and the scan should treat `WakeAt <= now` on an OPEN card as
 already-woken, never as actionable).
 
+## Known limitation of the v1.15 read path (documented, not fixable)
+
+A card woken via `wake_card` / "Wake now" keeps its Snooze pluginData forever
+(REST cannot clear another plugin's data). If that card is later archived
+normally, it re-appears in `list_snoozed_cards`, the dashboard panel, and the
+digest as an eternal "overdue wake" — indistinguishable from a genuine
+Power-Up wake that hasn't fired yet. Whether Trello's Card Snooze backend
+cleans its own pluginData when its scheduled fire becomes a no-op is
+undetermined. Mitigation if it ever bothers: waking via the Trello UI's own
+Snooze button (instead of ours) lets the Power-Up clean up after itself; or
+un-archive + re-archive from the Trello UI archive view.
+
 ## Effort estimate
 
 v1.15.0-sized: one custom-field bootstrap (create `WakeAt` if missing), one

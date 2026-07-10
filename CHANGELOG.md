@@ -4,6 +4,51 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] — 2026-07-10
+
+### Added
+- **Daily email digest (Phase 2)** — "Todays Actions": a full, email-safe HTML
+  replica of the dashboard, sent every day at 04:00 Europe/Copenhagen to
+  `dann@bleeker-pedersen.dk` via [Resend](https://resend.com), with board data
+  fetched at send time.
+  - **DST-proof scheduling**: Cloudflare cron is UTC-only, so `wrangler.jsonc`
+    fires at 02:00/03:00/04:00 UTC and `src/digest/scheduler.ts` sends exactly
+    once, at the first firing whose Copenhagen hour is in [4, 6]. Later firings
+    are free retry slots if the first attempt failed (Trello/Resend down).
+    A KV sent-flag (keyed by local date, TTL 2 days, written only on success)
+    guarantees once-per-day. EU DST switches at 01:00 UTC — before the first
+    firing — so transition days need no special-casing.
+  - **Email content** (`src/digest/render.ts`, pure function, no I/O): health
+    bar with WIP status, an email-only **"Overdue & due today"** section
+    (bucketed with the DST-correct local-day boundary from v1.13.0, actionable
+    lists only), all five context columns, Waiting, Inbox, and Rolling Big
+    Rocks — every card linking to Trello, plus a link to the live dashboard.
+    Inline styles only; no JS, no external assets.
+  - **Owner test routes** (session-gated like the rest of the dashboard):
+    `GET /digest/preview` renders the exact email HTML in the browser;
+    `POST /api/digest/send` sends one immediately.
+  - **Fail-soft**: the Worker deploys and runs before the Resend account
+    exists — a missing `RESEND_API_KEY` logs and skips instead of throwing.
+    Resend failures are reported by status only (no upstream body leakage).
+- **Tests** (+14, total 130): renderer zones/escaping/scheme-check, local-day
+  due bucketing across the Copenhagen midnight, exclusion rules (dueComplete,
+  closed, dividers, non-actionable lists), WIP-over marker, `hourInTz` on both
+  2026 DST transition days, KV dedupe, retry-after-failure, fail-soft missing
+  key, opaque Resend errors.
+
+### Changed
+- `src/index.ts` default export widened from the bare `OAuthProvider` to
+  `{ fetch, scheduled }` — `fetch` delegates to the unchanged provider (HTTP
+  behavior identical, verified against `wrangler dev`), `scheduled` runs the
+  digest. New `triggers.crons` + `vars` (`DIGEST_FROM`/`DIGEST_TO`) in
+  `wrangler.jsonc`; `RESEND_API_KEY` secret documented in README.
+
+### Setup (manual, one-time)
+- Resend account + verified sending domain (`bleeker-pedersen.dk`): three DNS
+  records (DKIM TXT `resend._domainkey`, MX + SPF TXT on `send`) — they live on
+  their own subdomains, so the root SPF/Simply mail setup is untouched.
+- `wrangler secret put RESEND_API_KEY`.
+
 ## [1.13.0] — 2026-07-10
 
 Audit release: full-codebase security review + bug hunt + maintainability pass.

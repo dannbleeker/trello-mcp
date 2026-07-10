@@ -136,6 +136,15 @@ A private, browser-accessible To-Do dashboard served by this same Worker — a h
 - **Auth**: GitHub OAuth (same OAuth app as the MCP flow) + the `ALLOWED_LOGINS` allowlist, re-checked on every request. The JSON API under `/api/*` answers `401`/`403` and the page redirects itself to `/app/login`.
 - **Routes**: `/dashboard`, `/app/login`, `/app/callback`, `/app/logout`, `/api/cards`, `/api/move`, `/api/done`, `/api/capture`. The MCP surface (`/mcp`) and the reserved OAuth endpoints (`/authorize`, `/callback`, `/token`, `/register`) are untouched.
 
+## Daily email digest
+
+Since v1.14.0 the Worker also emails **"Todays Actions"** — a full HTML replica of the dashboard plus an *Overdue & due today* section — every day at **04:00 Europe/Copenhagen**, DST-proof, with board data fetched at send time.
+
+- **Scheduling**: Cloudflare cron is UTC-only, so three triggers fire at 02:00/03:00/04:00 UTC and `src/digest/scheduler.ts` sends exactly once, at the first firing whose local hour is ≥ 4; the later firings retry automatically if the first attempt failed. A KV flag (written only on success) guarantees once per local day.
+- **Delivery**: [Resend](https://resend.com), from `todo@bleeker-pedersen.dk` to `dann@bleeker-pedersen.dk` (both configurable via `DIGEST_FROM`/`DIGEST_TO` vars in `wrangler.jsonc`).
+- **Testing it**: `GET /digest/preview` (session-gated) shows the exact email HTML in the browser; `POST /api/digest/send` sends one immediately.
+- **Setup**: verify the sending domain in Resend (three DNS records on their own subdomains — root SPF/mail is untouched) and `wrangler secret put RESEND_API_KEY`. Until the key exists the scheduler logs and skips (fail-soft).
+
 ## Setup
 
 ### 1. GitHub OAuth app
@@ -208,10 +217,13 @@ src/
   utils.ts                  — auth helpers (unchanged from template)
   workers-oauth-utils.ts    — cookie/state utilities (HMAC helpers exported for the dashboard)
   dashboard/
-    handler.ts              — browser routes: /, /dashboard, /app/login|callback|logout
-    api.ts                  — session-gated JSON API: /api/cards|move|done|capture
+    handler.ts              — browser routes: /, /dashboard, /app/login|callback|logout, /digest/preview
+    api.ts                  — session-gated JSON API: /api/cards|move|done|capture|digest/send
     session.ts              — signed __Host-DASH_SESSION cookie (sign/verify/expiry)
     page.html               — the dashboard page (imported as a wrangler Text module)
+  digest/
+    render.ts               — "Todays Actions" email HTML (pure function; full dashboard replica)
+    scheduler.ts            — DST-proof 04:00-Copenhagen send window + KV dedupe + Resend call
   trello/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser

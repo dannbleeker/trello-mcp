@@ -150,13 +150,13 @@ describe("GET /api/cards", () => {
 		expect(res.status).toBe(400);
 	});
 
-	it("502 (opaque, no upstream body) when Trello errors", async () => {
+	it("Trello 4xx keeps its status class (404, opaque, no upstream body) instead of masquerading as 502", async () => {
 		const cookie = await sessionFor("dannbleeker");
 		mockTrello([
 			{ body: "secret upstream detail", method: "GET", path: `/1/boards/${BOARD_ID}/cards`, status: 404 },
 		]);
 		const res = await DashboardApi.request("/api/cards", { headers: { Cookie: cookie } }, ENV);
-		expect(res.status).toBe(502);
+		expect(res.status).toBe(404);
 		const body = await res.json();
 		expect(body.error).not.toContain("secret upstream detail");
 	});
@@ -212,11 +212,14 @@ describe("POST /api/done", () => {
 		expect(res.status).toBe(400);
 	});
 
-	it("sets dueComplete=true via the tools layer (Butler handles the move)", async () => {
+	it("sets dueComplete=true AND moves the card to Done-do (deterministic even without a due date)", async () => {
 		const cookie = await sessionFor("dannbleeker");
+		const DONE_ID = LIST_ALIASES.done;
 		const fetchSpy = mockTrello([
 			{ body: trelloCard(), method: "GET", path: "/1/cards/cccccccccccccccccccccccc" },
 			{ body: trelloCard({ dueComplete: true }), method: "PUT", path: "/1/cards/cccccccccccccccccccccccc" },
+			{ body: [trelloCard({ idList: DONE_ID })], method: "GET", path: `/1/lists/${DONE_ID}/cards` },
+			{ body: [{ id: DONE_ID, name: "Done-do" }], method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
 		]);
 		const res = await DashboardApi.request(
 			"/api/done",
@@ -225,8 +228,11 @@ describe("POST /api/done", () => {
 		);
 		expect(res.status).toBe(200);
 		expect((await res.json()).ok).toBe(true);
-		const putCall = fetchSpy.mock.calls.find(([, init]) => init?.method === "PUT");
-		expect(new URL(putCall![0] as string).searchParams.get("dueComplete")).toBe("true");
+		const putParams = fetchSpy.mock.calls
+			.filter(([, init]) => init?.method === "PUT")
+			.map(([url]) => new URL(url as string).searchParams);
+		expect(putParams.some((p) => p.get("dueComplete") === "true")).toBe(true);
+		expect(putParams.some((p) => p.get("idList") === DONE_ID)).toBe(true);
 	});
 });
 
@@ -256,5 +262,21 @@ describe("POST /api/capture", () => {
 		expect(body.card.name).toBe("Buy milk");
 		const postCall = fetchSpy.mock.calls.find(([, init]) => init?.method === "POST");
 		expect(new URL(postCall![0] as string).searchParams.get("idList")).toBe(INBOX_ID);
+	});
+
+	it("Trello 5xx on the (non-retried) POST maps to 502 without duplicating the write", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		const fetchSpy = mockTrello([
+			{ body: "gateway timeout after commit", method: "POST", path: "/1/cards", status: 502 },
+		]);
+		const res = await DashboardApi.request(
+			"/api/capture",
+			postInit({ name: "Buy milk" }, cookie),
+			ENV,
+		);
+		expect(res.status).toBe(502);
+		// The write must NOT have been re-attempted — a 5xx can arrive after
+		// Trello committed the card, and a retry would duplicate it.
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });

@@ -37,6 +37,10 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.13.0 (2026-07-10) — startOfDayMsInTz: correct day boundary on DST transition
+ *                         days (was off by 1h) and strip sub-second residue;
+ *                         batch_get: reject paths containing commas (Trello's
+ *                         /batch splits on them with no escaping).
  *   1.10.0 (2026-07-02) — Refactor pass. Extracted CARD_FIELDS + MEMBER_FIELDS
  *                         (client.ts) and ROLLING_BIG_ROCKS_ID (constants.ts) —
  *                         removes 12+ dup sites. Extracted warnIfWipExceeded
@@ -2442,6 +2446,15 @@ export async function batch_get(
 	if (input.paths.length > 10) {
 		throw new GuardError(`Trello caps /batch at 10 paths; got ${input.paths.length}.`);
 	}
+	// Trello's /batch joins paths with commas and splits on them server-side
+	// with no escaping, so a comma INSIDE a path (e.g. ?fields=name,desc)
+	// silently shatters into extra bogus requests and misaligns the results.
+	const withComma = input.paths.find((p) => p.includes(","));
+	if (withComma) {
+		throw new GuardError(
+			`Batch path "${withComma}" contains a comma — Trello's /batch splits on commas with no escaping. Use single-value query params or separate batch_get calls.`,
+		);
+	}
 	// Normalise: /boards/{id} is fine; /1/boards/{id} is also fine.
 	// Trello accepts either.
 	const results = await client.batchGet(input.paths);
@@ -2525,25 +2538,33 @@ export function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): 
 		second: "2-digit",
 		hour12: false,
 	});
-	const parts = fmt.formatToParts(new Date(nowMs));
-	const grab = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
-	// Get today's Y-M-D in the target tz, then find the epoch-ms for
-	// 00:00:00 of that Y-M-D in the same tz. Round-trip trick: subtract the
-	// tz's UTC offset at nowMs from an assumed-UTC midnight of that Y-M-D.
-	const y = Number(grab("year"));
-	const m = Number(grab("month"));
-	const d = Number(grab("day"));
-	const hh = Number(grab("hour")) % 24; // Intl "24" ↔ "00" quirk
-	const mm = Number(grab("minute"));
-	const ss = Number(grab("second"));
-	// "Wall-clock" nowMs in tz, minus wall-clock time-of-day, equals midnight in tz.
-	const utcMidnight = Date.UTC(y, m - 1, d, 0, 0, 0);
-	const wallOffsetMs = (hh * 3600 + mm * 60 + ss) * 1000;
-	// The tz's offset is (nowMs - utcOfWallClock). But we can instead observe:
-	// midnight_in_tz(epoch) = nowMs - wallOffsetMs. That's what we return.
-	// (utcMidnight is computed only to keep the derivation transparent above.)
-	void utcMidnight;
-	return nowMs - wallOffsetMs;
+	const wall = (ms: number) => {
+		const parts = fmt.formatToParts(new Date(ms));
+		const grab = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+		return {
+			y: grab("year"),
+			m: grab("month"),
+			d: grab("day"),
+			hh: grab("hour") % 24, // Intl "24" ↔ "00" quirk
+			mm: grab("minute"),
+			ss: grab("second"),
+		};
+	};
+	// Find the UTC instant whose wall-clock reading in tz is today 00:00:00.
+	// Subtracting now's wall time-of-day would assume the UTC offset is the
+	// same at midnight as it is now — wrong by an hour on the two DST
+	// transition days (v1.13.0 fix). Instead: guess midnight as if the tz
+	// were UTC, read the guess back through the tz, and correct by the
+	// difference. Two passes converge even when the first guess lands on the
+	// other side of a DST transition.
+	const today = wall(nowMs);
+	const targetAsUtc = Date.UTC(today.y, today.m - 1, today.d, 0, 0, 0);
+	let guess = targetAsUtc;
+	for (let i = 0; i < 2; i++) {
+		const w = wall(guess);
+		guess -= Date.UTC(w.y, w.m - 1, w.d, w.hh, w.mm, w.ss) - targetAsUtc;
+	}
+	return guess;
 }
 
 /**

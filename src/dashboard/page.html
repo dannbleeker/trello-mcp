@@ -168,7 +168,7 @@ const OVERVIEW = [
 let CARDS = [];
 let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
 
-function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function esc(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // Thin same-origin fetch helper. 401 -> the session expired/absent, so send the
 // browser to the GitHub login. Other non-2xx -> surface the server's {error}.
@@ -228,7 +228,8 @@ function moveSelect(c){
 
 function cardHtml(c, opts){
   opts = opts || {};
-  const link = c.url ? '<a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.name)+'</a>' : esc(c.name);
+  // Only link http(s) URLs — mirrors the server's sanitizeUrl scheme whitelist.
+  const link = (c.url && /^https?:\/\//i.test(c.url)) ? '<a href="'+esc(c.url)+'" target="_blank" rel="noopener">'+esc(c.name)+'</a>' : esc(c.name);
   let actions = "";
   if (!opts.noActions){
     actions = '<div class="card-actions">'
@@ -253,6 +254,12 @@ function passesFilter(c){
 }
 
 function render(){
+  // render() rebuilds #content wholesale — preserve any half-typed capture
+  // text (and focus) so clicking a filter chip or ✓ Done doesn't wipe it.
+  const prevInput = document.getElementById("capInput");
+  const pendingCapture = prevInput ? prevInput.value : "";
+  const captureHadFocus = prevInput && document.activeElement === prevInput;
+
   const inboxCards = cardsIn(INBOX.id);
   const waitingCards = cardsIn(WAITING.id);
   const rockCards = cardsIn(BIGROCKS.id);
@@ -333,6 +340,12 @@ function render(){
     + '<div class="two">'+waitingCol+inboxCol+'</div>'
     + '<div class="zone-title">Rolling big rocks <small>your active projects — don’t let firefighting bury these</small></div>'
     + rocksCol;
+
+  if (pendingCapture){
+    const input = document.getElementById("capInput");
+    input.value = pendingCapture;
+    if (captureHadFocus){ input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
 }
 
 function setFilter(k){
@@ -345,12 +358,11 @@ async function onDone(btn){
   const id = btn.getAttribute("data-card");
   btn.disabled = true;
   try {
-    // Same semantics as the MCP connector: flip dueComplete and let the
-    // board's Butler automation move the card to Done-do. Reflect the move
-    // optimistically so the card leaves its column right away.
-    await api("/api/done", { method: "POST", body: JSON.stringify({ cardId: id }) });
+    // The server flips dueComplete (Butler triggers still fire) AND moves
+    // the card to Done-do, so this update matches server state, not a guess.
+    const res = await api("/api/done", { method: "POST", body: JSON.stringify({ cardId: id }) });
     const c = CARDS.find(x=>x.id===id); if (c) c.idList = DONE.id;
-    toast("Marked done ✓");
+    toast(res && res.warning ? res.warning : "Marked done ✓");
     render();
   } catch(e){ btn.disabled = false; toast("Couldn’t mark done: "+e.message); }
 }
@@ -360,12 +372,18 @@ async function onMove(sel){
   const dest = sel.value; if (!dest) return;
   sel.disabled = true;
   try {
-    await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: dest }) });
+    const res = await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: dest }) });
     const c = CARDS.find(x=>x.id===id); if (c) c.idList = dest;
     const t = MOVE_TARGETS.find(x=>x.id===dest);
-    toast("Moved to "+(t?t.name:"list"));
+    toast(res && res.warning ? res.warning : "Moved to "+(t?t.name:"list"));
     render();
-  } catch(e){ sel.disabled = false; toast("Move failed: "+e.message); }
+  } catch(e){
+    // Reset to the placeholder so re-picking the same destination re-fires
+    // onchange — otherwise the natural retry is silently a no-op.
+    sel.value = "";
+    sel.disabled = false;
+    toast("Move failed: "+e.message);
+  }
 }
 
 async function onCapture(){
@@ -374,13 +392,25 @@ async function onCapture(){
   const name = (input.value||"").trim();
   if (!name) return;
   btn.disabled = true; input.disabled = true;
+  let created = null;
   try {
-    await api("/api/capture", { method: "POST", body: JSON.stringify({ name: name }) });
-    // refetch so the new card carries whatever id/url the server assigned
+    created = await api("/api/capture", { method: "POST", body: JSON.stringify({ name: name }) });
+  } catch(e){
+    btn.disabled = false; input.disabled = false;
+    toast("Couldn’t add: "+e.message);
+    return;
+  }
+  // The card exists in Trello from here on — never report failure below, or
+  // a transient refresh error invites a duplicate re-submit.
+  input.value = "";
+  try {
     CARDS = await loadCards();
-    toast("Added to Inbox");
-    render();
-  } catch(e){ btn.disabled = false; input.disabled = false; toast("Couldn’t add: "+e.message); }
+  } catch(e){
+    if (created && created.card) CARDS.push({ ...created.card, idList: (created.card.listId != null ? created.card.listId : created.card.idList) });
+  }
+  btn.disabled = false; input.disabled = false;
+  toast(created && created.warning ? created.warning : "Added to Inbox");
+  render();
 }
 
 async function init(){

@@ -4,6 +4,63 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-07-10
+
+Audit release: full-codebase security review + bug hunt + maintainability pass.
+The security review found **no exploitable vulnerabilities** (both OAuth flows,
+cookie/HMAC primitives, dashboard API, page rendering, client, and guards were
+examined); the low-confidence hardening notes it produced are fixed below.
+
+### Fixed
+- **`startOfDayMsInTz` DST day-boundary error** (`src/trello/tools.ts`) — the
+  local-midnight computation assumed the UTC offset at midnight equals the
+  offset now, so on the two Europe/Copenhagen DST transition days
+  `list_cards_due scope:"today"` and `weekly_review_pack.due_today`
+  mis-bucketed cards by one hour (and the returned midnight kept sub-second
+  residue). Now derives the actual UTC instant of local 00:00:00 via a
+  convergent two-pass offset correction. New regression tests pin the
+  2026-03-29 spring-forward and 2026-10-25 fall-back days.
+- **Non-idempotent POSTs are no longer retried on 5xx**
+  (`src/trello/client.ts`) — a gateway 5xx can arrive after Trello committed
+  the write (timeout-after-commit), so the automatic retry could duplicate
+  cards/comments/attachments. 5xx retry is now limited to GET/PUT/DELETE;
+  429 stays retried for every method (Trello rejected those before acting).
+- **`/api/done` is now deterministic for cards without a due date**
+  (`src/dashboard/api.ts`) — it still sets `dueComplete=true` (Butler triggers
+  keep firing) but then moves the card to Done-do itself. Previously a
+  no-due-date card silently stayed in its column forever (Butler's
+  due-complete trigger never fires without a due date), and a page reload
+  racing Butler "resurrected" done cards.
+- **Trello 4xx no longer masquerade as 502** (`src/dashboard/api.ts`) — a
+  stale/deleted cardId now returns 404 (422 for other Trello 4xx) with an
+  opaque message; 502 is reserved for genuine Trello 5xx.
+- **`batch_get` rejects paths containing commas** (`src/trello/tools.ts`) —
+  Trello's `/batch` splits the joined parameter on commas with no escaping,
+  so `?fields=name,desc` silently shattered into bogus extra requests and
+  misaligned results. Now refused with a clear GuardError.
+- **`/app/callback` failure handling** (`src/dashboard/handler.ts`) — a
+  GitHub/token-exchange failure now returns a friendly 502 instead of an
+  unhandled bare 500, and every exit path clears the one-time
+  `__Host-DASH_STATE` cookie.
+- **Dashboard page fixes** (`src/dashboard/page.html`):
+  - `render()` no longer wipes half-typed quick-capture text (value, focus,
+    and caret survive filter clicks and card actions).
+  - After a failed Move, the dropdown resets to the placeholder so retrying
+    the same destination re-fires (previously a silent no-op).
+  - A successful capture followed by a failed board refresh no longer reports
+    "Couldn't add" (which invited duplicate re-submits) — the created card is
+    appended locally instead.
+  - WIP-limit warnings returned by the API are now shown in the toast
+    (previously dropped — the MCP surface warned, the dashboard didn't).
+
+### Security hardening (no exploitable issue; defense-in-depth from the review)
+- `esc()` in `page.html` now escapes single quotes; card links only render as
+  anchors for `http(s)` URLs, mirroring the server's `sanitizeUrl` whitelist.
+
+### Changed
+- Small maintainability refactor in `src/dashboard/api.ts`: shared `trello()`
+  client-construction helper.
+
 ## [1.12.0] — 2026-07-10
 
 ### Added

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+	batch_get,
 	computeWakeUp,
 	decodeBase64,
 	startOfDayMsInTz,
 	summariseCard,
 } from "../src/trello/tools";
-import type { TrelloCard } from "../src/trello/client";
+import type { TrelloCard, TrelloClient } from "../src/trello/client";
+import { GuardError } from "../src/trello/guards";
 
 // Reusable card fixture — every test extends it, so we're only testing one
 // axis at a time.
@@ -144,5 +146,46 @@ describe("startOfDayMsInTz", () => {
 		const s = startOfDayMsInTz(winterNow, "Europe/Copenhagen");
 		// 2026-01-15 00:00 CET = 2026-01-14 23:00 UTC
 		expect(new Date(s).toISOString()).toBe("2026-01-14T23:00:00.000Z");
+	});
+
+	// v1.13.0 regression pins: the pre-fix implementation subtracted now's
+	// wall-clock time-of-day, implicitly assuming the UTC offset at midnight
+	// equals the offset now — off by one hour on the two DST transition days.
+
+	it("spring-forward day (2026-03-29, 23h day): midnight uses the PRE-transition offset", () => {
+		// 10:00 CEST on transition day = 08:00Z. Local midnight was still CET
+		// (UTC+1): 2026-03-29 00:00 CET = 2026-03-28 23:00 UTC.
+		const s = startOfDayMsInTz(Date.parse("2026-03-29T08:00:00Z"), "Europe/Copenhagen");
+		expect(new Date(s).toISOString()).toBe("2026-03-28T23:00:00.000Z");
+	});
+
+	it("fall-back day (2026-10-25, 25h day): midnight uses the PRE-transition offset", () => {
+		// 12:00 CET on transition day = 11:00Z. Local midnight was still CEST
+		// (UTC+2): 2026-10-25 00:00 CEST = 2026-10-24 22:00 UTC.
+		const s = startOfDayMsInTz(Date.parse("2026-10-25T11:00:00Z"), "Europe/Copenhagen");
+		expect(new Date(s).toISOString()).toBe("2026-10-24T22:00:00.000Z");
+	});
+
+	it("strips sub-second residue from the returned midnight", () => {
+		const s = startOfDayMsInTz(Date.parse("2026-07-02T18:30:00.500Z"), "UTC");
+		expect(new Date(s).toISOString()).toBe("2026-07-02T00:00:00.000Z");
+	});
+});
+
+describe("batch_get path validation", () => {
+	// Validation runs before any client call, so a bare stub suffices.
+	const neverClient = {} as unknown as TrelloClient;
+
+	it("rejects a path containing a comma (Trello /batch splits on commas, no escaping)", async () => {
+		await expect(
+			batch_get(neverClient, { paths: ["/cards/abc?fields=name,desc"] }),
+		).rejects.toBeInstanceOf(GuardError);
+	});
+
+	it("rejects an empty paths array and >10 paths", async () => {
+		await expect(batch_get(neverClient, { paths: [] })).rejects.toBeInstanceOf(GuardError);
+		await expect(
+			batch_get(neverClient, { paths: Array.from({ length: 11 }, (_, i) => `/boards/${i}`) }),
+		).rejects.toBeInstanceOf(GuardError);
 	});
 });

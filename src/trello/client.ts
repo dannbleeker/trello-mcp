@@ -10,6 +10,10 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.13.0 (2026-07-10) — retryableFetch no longer retries 5xx on non-idempotent
+ *                         methods (POST): a gateway 5xx can arrive after Trello
+ *                         committed the write, so a retry duplicated the side
+ *                         effect. 429 stays retried for every method.
  *   1.10.0 (2026-07-02) — Refactor pass surfaced by the v1.8.0 audit. Extracted
  *                         CARD_FIELDS and MEMBER_FIELDS constants (used to be
  *                         duplicated 7 and 5 times respectively). Refactored
@@ -77,6 +81,14 @@ import { CARD_FIELDS, MEMBER_FIELDS } from "./constants";
 
 const BASE = "https://api.trello.com/1";
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+/**
+ * 5xx retries are limited to idempotent methods. A gateway can return 5xx
+ * AFTER Trello committed the write (timeout-after-commit), so re-POSTing
+ * would duplicate the side effect (double card, double comment). 429 is
+ * always safe to retry — Trello rejected the request before acting on it.
+ * v1.13.0 fix.
+ */
+const IDEMPOTENT_METHODS = new Set(["GET", "PUT", "DELETE", "HEAD"]);
 const RETRY_MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5000;
@@ -424,7 +436,10 @@ export class TrelloClient {
 			const init = await initFactory();
 			const resp = await fetch(url, init);
 			if (resp.ok) return resp;
-			if (RETRY_STATUSES.has(resp.status) && attempt < RETRY_MAX_ATTEMPTS) {
+			const method = (init.method ?? "GET").toUpperCase();
+			const retriable =
+				resp.status === 429 || (RETRY_STATUSES.has(resp.status) && IDEMPOTENT_METHODS.has(method));
+			if (retriable && attempt < RETRY_MAX_ATTEMPTS) {
 				const delayMs = parseRetryAfterMs(resp.headers.get("Retry-After"), attempt);
 				await new Promise((r) => setTimeout(r, delayMs));
 				continue;

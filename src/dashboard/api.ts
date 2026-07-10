@@ -16,6 +16,10 @@
  *              plain Node without resolving the page.html Text-module import.
  *
  * Change log:
+ *   1.1.0 (2026-07-10) — /api/done now also moves the card to Done-do (deterministic
+ *                        for no-due-date cards where Butler's trigger never fires);
+ *                        Trello 4xx keep their status class (404/422) instead of
+ *                        masquerading as 502; extracted trello() client helper.
  *   1.0.0 (2026-07-10) — Initial (v1.12.0 dashboard release):
  *                        GET /api/cards, POST /api/move, POST /api/done, POST /api/capture.
  */
@@ -39,6 +43,14 @@ export type DashboardEnv = {
 
 /** Card capture always lands in the Inbox; the client never chooses the destination. */
 const CAPTURE_LIST_ALIAS = "inbox";
+
+/** Where ✓ Done sends cards (see /api/done). */
+const DONE_LIST_ALIAS = "done";
+
+/** One place to construct the Trello client from bindings. */
+function trello(env: DashboardEnv): TrelloClient {
+	return new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN);
+}
 
 const api = new Hono<{ Bindings: DashboardEnv; Variables: { login: string } }>();
 
@@ -68,15 +80,24 @@ api.use("/api/*", async (c, next) => {
 
 /**
  * Map thrown errors to the API's JSON error contract. GuardError messages were
- * written for the caller and are surfaced verbatim; Trello upstream failures
- * become an opaque 502 (never the raw upstream body — it may echo the token);
- * anything else is a generic 500.
+ * written for the caller and are surfaced verbatim. Trello failures stay
+ * opaque (never the raw upstream body — it may echo the token), but keep
+ * their status class: a Trello 4xx is the caller's problem (stale cardId →
+ * 404), not a gateway failure, so only genuine Trello 5xx become 502.
+ * Anything else is a generic 500.
  */
-function errorResponse(c: { json: (o: object, s: 403 | 500 | 502) => Response }, e: unknown): Response {
+function errorResponse(
+	c: { json: (o: object, s: 403 | 404 | 422 | 500 | 502) => Response },
+	e: unknown,
+): Response {
 	if (e instanceof GuardError) {
 		return c.json({ error: e.message }, 403);
 	}
 	if (e instanceof TrelloError) {
+		if (e.status >= 400 && e.status < 500) {
+			const status = e.status === 404 ? 404 : 422;
+			return c.json({ error: `Trello rejected the request (HTTP ${e.status}).` }, status);
+		}
 		return c.json({ error: `Trello upstream error (HTTP ${e.status}).` }, 502);
 	}
 	console.error("dashboard api error:", e);
@@ -101,7 +122,7 @@ api.get("/api/cards", async (c) => {
 	const boardId = resolveBoard(boardParam ?? BOARD_ALIASES[DEFAULT_BOARD]);
 
 	try {
-		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const client = trello(c.env);
 		const cards = await client.listCardsOnBoard(boardId);
 		return c.json({ cards });
 	} catch (e) {
@@ -118,7 +139,7 @@ api.post("/api/move", async (c) => {
 	}
 
 	try {
-		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const client = trello(c.env);
 		const { warning } = await move_card(client, { cardId, list });
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
 	} catch (e) {
@@ -134,11 +155,17 @@ api.post("/api/done", async (c) => {
 	}
 
 	try {
-		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
-		// Same semantics as the MCP set_due_complete tool: flip dueComplete and
-		// let the board's Butler automation move the card to Done-do.
+		const client = trello(c.env);
+		// Flip dueComplete first (same semantics as the MCP set_due_complete
+		// tool — Butler triggers watching it still fire), then move the card
+		// to Done-do ourselves. Butler's own move becomes a no-op, but cards
+		// WITHOUT a due date — where Butler's due-complete trigger never
+		// fires — land in Done deterministically instead of silently staying
+		// put (v1.13.0 fix). The move also makes the page's optimistic update
+		// survive a reload that races Butler.
 		await set_due_complete(client, { cardId, complete: true });
-		return c.json({ ok: true });
+		const { warning } = await move_card(client, { cardId, list: DONE_LIST_ALIAS });
+		return c.json({ ok: true, ...(warning ? { warning } : {}) });
 	} catch (e) {
 		return errorResponse(c, e);
 	}
@@ -152,7 +179,7 @@ api.post("/api/capture", async (c) => {
 	}
 
 	try {
-		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const client = trello(c.env);
 		const { card, warning } = await create_card(client, { list: CAPTURE_LIST_ALIAS, name });
 		return c.json({ card, ...(warning ? { warning } : {}) }, 201);
 	} catch (e) {

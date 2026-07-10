@@ -4,6 +4,8 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
+Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
+
 ## Tools (96)
 
 **Reads**
@@ -123,7 +125,16 @@ Enforced server-side before any Trello call — same rules for every tool, no pe
 
 ## Access control
 
-Only one GitHub login (`dannbleeker`) can call any tool — hard-coded in `src/index.ts`. Any other authenticated GitHub user reaches the OAuth flow but every tool call returns a refusal message.
+Only one GitHub login (`dannbleeker`) can call any tool or open the dashboard — hard-coded in `src/allowlist.ts` (single source of truth for both surfaces). Any other authenticated GitHub user reaches the OAuth flow but every tool call returns a refusal message, and the dashboard answers 403.
+
+## Web dashboard
+
+A private, browser-accessible To-Do dashboard served by this same Worker — a hosted, always-on version of the desktop artifact. Open `https://trello-mcp.<your-subdomain>.workers.dev/dashboard` (or just `/`, which redirects) in any browser; you'll be sent through GitHub login the first time and get a ~30-day session cookie.
+
+- **Zones**: health bar (inbox / next actions / waiting / big rocks + WIP status), quick capture → Inbox, cards-per-list overview, next actions by context with label filters, needs-attention (Waiting / Inbox), and Rolling Big Rocks (read-only).
+- **Actions**: **✓ Done** sets `dueComplete=true` (the board's Butler automation moves the card to Done-do — same semantics as the `set_due_complete` tool); **Move** and **Quick capture** reuse the tools layer, so the [safety guards](#safety-guards) above apply identically.
+- **Auth**: GitHub OAuth (same OAuth app as the MCP flow) + the `ALLOWED_LOGINS` allowlist, re-checked on every request. The JSON API under `/api/*` answers `401`/`403` and the page redirects itself to `/app/login`.
+- **Routes**: `/dashboard`, `/app/login`, `/app/callback`, `/app/logout`, `/api/cards`, `/api/move`, `/api/done`, `/api/capture`. The MCP surface (`/mcp`) and the reserved OAuth endpoints (`/authorize`, `/callback`, `/token`, `/register`) are untouched.
 
 ## Setup
 
@@ -132,13 +143,15 @@ Only one GitHub login (`dannbleeker`) can call any tool — hard-coded in `src/i
 Create an OAuth app at <https://github.com/settings/developers>:
 
 - **Homepage URL:** `https://trello-mcp.<your-subdomain>.workers.dev`
-- **Authorization callback URL:** `https://trello-mcp.<your-subdomain>.workers.dev/callback`
+- **Authorization callback URL:** `https://trello-mcp.<your-subdomain>.workers.dev/` (the origin root, **with** the trailing slash)
 - Note the **Client ID** and generate a **Client secret**.
+
+> **Why the origin root?** The MCP flow redirects to `/callback` and the web dashboard to `/app/callback`. A GitHub OAuth app has a single callback URL, but GitHub accepts any `redirect_uri` at or below the registered path — registering the root validates both. If you registered `/callback` before v1.12.0, broaden it to the root or the dashboard login will fail with `redirect_uri` mismatch (the MCP flow is unaffected either way).
 
 For local development, register a second OAuth app with:
 
 - **Homepage URL:** `http://localhost:8788`
-- **Authorization callback URL:** `http://localhost:8788/callback`
+- **Authorization callback URL:** `http://localhost:8788/`
 
 ### 2. Trello credentials
 
@@ -190,14 +203,21 @@ No tool code changes are needed — the existing tools resolve aliases at call t
 ```
 src/
   index.ts                  — Worker entry, OAuth wiring, tool registrations
-  github-handler.ts         — OAuth consent screen + GitHub callback
+  allowlist.ts              — GitHub-login allowlist (shared: MCP + dashboard)
+  github-handler.ts         — OAuth consent screen + GitHub callback; mounts the dashboard
   utils.ts                  — auth helpers (unchanged from template)
-  workers-oauth-utils.ts    — cookie/state utilities (unchanged from template)
+  workers-oauth-utils.ts    — cookie/state utilities (HMAC helpers exported for the dashboard)
+  dashboard/
+    handler.ts              — browser routes: /, /dashboard, /app/login|callback|logout
+    api.ts                  — session-gated JSON API: /api/cards|move|done|capture
+    session.ts              — signed __Host-DASH_SESSION cookie (sign/verify/expiry)
+    page.html               — the dashboard page (imported as a wrangler Text module)
   trello/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     guards.ts               — server-side safety guards
     tools.ts                — 96 tool implementations (testable in plain Node)
+test/                       — vitest unit tests (107; no real Trello calls)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

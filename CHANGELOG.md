@@ -4,6 +4,69 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-07-10
+
+### Added
+- **Web To-Do dashboard (Phase 1)** — a private, browser-accessible dashboard
+  served by this same Worker, alongside (and without touching) the `/mcp`
+  MCP surface. A later phase will add a daily email digest; this release is
+  the interactive dashboard only.
+  - **Routes** (all served by the OAuthProvider `defaultHandler`; the reserved
+    `/authorize`, `/callback`, `/token`, `/register`, `/mcp` endpoints are
+    untouched):
+    - `GET /` → 302 to `/dashboard`.
+    - `GET /dashboard` — the dashboard page (`src/dashboard/page.html`,
+      imported as a wrangler Text module) for a valid allowlisted session;
+      302 to `/app/login` otherwise.
+    - `GET /app/login` / `GET /app/callback` / `GET /app/logout` — browser
+      GitHub OAuth flow reusing the existing GitHub OAuth app
+      (`scope read:user`), with a one-time `__Host-DASH_STATE` CSRF cookie
+      (distinct from the MCP flow's `__Host-CONSENTED_STATE`).
+    - `GET /api/cards?board=<id>` → `{ cards }`;
+      `POST /api/move { cardId, list }` → `{ ok }`;
+      `POST /api/done { cardId }` → `{ ok }` (sets `dueComplete=true`; the
+      board's Butler automation moves the card to Done-do — same semantics
+      as the `set_due_complete` tool);
+      `POST /api/capture { name }` → 201 `{ card }` (destination is always
+      the Inbox, chosen server-side).
+  - **Auth**: `__Host-DASH_SESSION` cookie (`HttpOnly; Secure; SameSite=Lax;
+    Path=/`, ~30-day expiry), payload `{ login, exp }` HMAC-SHA256-signed
+    with the existing `COOKIE_ENCRYPTION_KEY`. Every gated request re-checks
+    `ALLOWED_LOGINS`, so removing a login revokes dashboard access on the
+    next request. `/api/*` returns JSON `401`/`403` (never a redirect);
+    mutating routes also reject foreign `Origin` headers.
+  - **Guard parity**: `/api/move` and `/api/capture` reuse the tools layer
+    (`move_card`, `create_card`), so the dashboard obeys the exact same
+    forbidden-list / read-only / WIP-warning guards as the MCP tools.
+    Guard refusals surface as `403 { error }`; Trello upstream failures as
+    an opaque `502` (no upstream body leakage); invalid input as `400`.
+- **Tests** (+25, total 107): session cookie sign→verify round-trip, tamper /
+  wrong-secret / expiry rejection, cookie-attribute pins (`dashboard-session.test.ts`);
+  API session gate (401 no session, 401 tampered, 403 non-allowlisted,
+  403 foreign Origin), `/api/cards` happy path + 400 + opaque 502,
+  `/api/move` validation + happy path + guard refusal before any upstream
+  call, `/api/done` semantics (`dueComplete=true` on the PUT), `/api/capture`
+  validation + server-chosen Inbox destination (`dashboard-api.test.ts`).
+  All with `globalThis.fetch` mocked — no real Trello calls.
+
+### Changed
+- `ALLOWED_LOGINS` moved from `src/index.ts` to `src/allowlist.ts` so the MCP
+  guard and the dashboard share one allowlist. Import-only change; the MCP
+  surface, tool registrations, and tool behavior are byte-for-byte unchanged.
+- `signData` / `verifySignature` in `src/workers-oauth-utils.ts` are now
+  exported (previously module-private) so the dashboard session cookie uses
+  the exact same HMAC primitive as `__Host-APPROVED_CLIENTS`. No behavior
+  change.
+- `wrangler.jsonc`: added a Text module rule (`**/*.html`) so the dashboard
+  page imports as a string. Additive; no effect on `/mcp`.
+
+### Setup (manual, one-time)
+- The GitHub OAuth app's **Authorization callback URL** must be broadened to
+  the Worker origin root (e.g. `https://trello-mcp.<subdomain>.workers.dev/`)
+  so both `/callback` (MCP flow) and `/app/callback` (dashboard flow)
+  validate. GitHub accepts any `redirect_uri` at or below the registered
+  path, so the existing MCP flow keeps working. See README → Setup.
+
 ## [1.11.0] — 2026-07-02
 
 ### Added

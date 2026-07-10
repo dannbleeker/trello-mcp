@@ -60,6 +60,7 @@ function descSnippet(desc: string): string {
 		.replace(/!\[[^\]]*\]\([^)]*\)/g, "")
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
 		.replace(/[*_`#>~]/g, "")
+		.replace(/[​‌‍﻿]/g, "") // zero-width chars (same as the dashboard)
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!d) return "";
@@ -67,15 +68,25 @@ function descSnippet(desc: string): string {
 	return d;
 }
 
-/** Format an ISO due date as a short local (Copenhagen) stamp, e.g. "10 Jul 14:00". */
-function formatDue(iso: string, tz: string): string {
+/**
+ * Format an ISO due date as a short local (Copenhagen) stamp, e.g.
+ * "10 Jul 14:00" — with the year appended ("15 Jul 2024 12:00") when it
+ * differs from the current local year, so a long-overdue card can't
+ * masquerade as this year's (v1.14.1 fix).
+ */
+function formatDue(iso: string, tz: string, nowMs: number): string {
+	const yearIn = (ms: number) =>
+		new Intl.DateTimeFormat("en-GB", { timeZone: tz, year: "numeric" }).format(new Date(ms));
+	const dueMs = Date.parse(iso);
+	const sameYear = yearIn(dueMs) === yearIn(nowMs);
 	return new Intl.DateTimeFormat("en-GB", {
 		timeZone: tz,
 		day: "numeric",
 		month: "short",
+		...(sameYear ? {} : { year: "numeric" }),
 		hour: "2-digit",
 		minute: "2-digit",
-	}).format(new Date(iso));
+	}).format(new Date(dueMs));
 }
 
 // ---- inline styles (email-safe: no classes, no <style>) ----
@@ -108,21 +119,32 @@ function badgesHtml(c: TrelloCard): string {
 	return h ? `<div style="margin-top:6px;">${h}</div>` : "";
 }
 
-function cardHtml(c: TrelloCard, tz: string, opts: { showDue?: boolean } = {}): string {
+function cardHtml(c: TrelloCard, tz: string, opts: { showDue?: boolean; nowMs?: number } = {}): string {
 	const title =
 		c.url && /^https?:\/\//i.test(c.url)
 			? `<a href="${esc(c.url)}" style="${S.link}">${esc(c.name)}</a>`
 			: esc(c.name);
 	const snippet = descSnippet(c.desc);
 	const due =
-		opts.showDue && c.due ? `<div style="${S.due}">Due: ${esc(formatDue(c.due, tz))}</div>` : "";
+		opts.showDue && c.due && opts.nowMs !== undefined
+			? `<div style="${S.due}">Due: ${esc(formatDue(c.due, tz, opts.nowMs))}</div>`
+			: "";
 	return `<div style="${S.card}"><div style="${S.title}">${title}</div>${due}${
 		snippet ? `<div style="${S.desc}">${esc(snippet)}</div>` : ""
 	}${badgesHtml(c)}</div>`;
 }
 
-function columnHtml(name: string, cards: TrelloCard[], tz: string, wip: number | null, emptyText: string): string {
-	const over = wip !== null && cards.length > wip;
+function columnHtml(
+	name: string,
+	cards: TrelloCard[],
+	tz: string,
+	wip: number | null,
+	emptyText: string,
+	forceOver = false,
+): string {
+	// forceOver mirrors the dashboard's inbox rule: any card in the inbox is
+	// "over" (red badge), WIP limit or not (v1.14.1 fix).
+	const over = forceOver || (wip !== null && cards.length > wip);
 	const count = `<span style="${over ? S.countOver : S.count}">${cards.length}${wip !== null ? `/${wip}` : ""}</span>`;
 	const body = cards.length ? cards.map((c) => cardHtml(c, tz)).join("") : `<div style="${S.empty}">${esc(emptyText)}</div>`;
 	return `<div style="${S.col}"><div style="margin-bottom:8px;"><span style="font-weight:600;font-size:13px;">${esc(name)}</span> ${count}</div>${body}</div>`;
@@ -180,20 +202,35 @@ export function renderDigest(cards: TrelloCard[], nowMs: number, tz: string = DE
 	let dueSection = "";
 	if (overdue.length || dueToday.length) {
 		const overdueHtml = overdue.length
-			? `<div style="font-weight:600;font-size:13px;color:#a5281c;margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { showDue: true })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;color:#a5281c;margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { nowMs, showDue: true })).join("")}`
 			: "";
 		const todayHtml = dueToday.length
-			? `<div style="font-weight:600;font-size:13px;margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { showDue: true })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { nowMs, showDue: true })).join("")}`
 			: "";
 		dueSection = `<div style="${S.zone}">Overdue &amp; due today</div><div style="${S.col}border:1px solid #f5c6c0;">${overdueHtml}${todayHtml}</div>`;
 	}
+
+	// ---- Cards per list overview (matches the dashboard's .ov-panel; v1.14.1) ----
+	const overviewEntries = [
+		...ctxCols.map((l) => ({ alert: l.wip !== null && l.cards.length > l.wip, count: l.cards.length, name: l.name })),
+		{ alert: false, count: waiting.length, name: "Waiting for…" },
+		{ alert: inbox.length > 0, count: inbox.length, name: "Inbox" },
+	];
+	const overviewHtml = `<div style="${S.col}"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#6b7280;margin-bottom:10px;">Cards per list</div>${overviewEntries
+		.map(
+			(e) =>
+				`<span style="display:inline-block;text-align:center;border-radius:10px;padding:10px 14px;margin:0 8px 8px 0;${
+					e.alert ? "background:#fdecea;border:1px solid #f5c6c0;" : "background:#f6f7f9;border:1px solid #eceef1;"
+				}${e.count === 0 ? "opacity:.5;" : ""}"><span style="font-size:22px;font-weight:700;line-height:1;${e.alert ? "color:#c0392b;" : "color:#1c2024;"}">${e.count}</span><br><span style="font-size:10.5px;color:#6b7280;">${esc(e.name)}</span></span>`,
+		)
+		.join("")}</div>`;
 
 	// ---- Zones (full replica) ----
 	const ctxHtml = ctxCols
 		.map((l) => columnHtml(l.name, l.cards, tz, l.wip, "clear"))
 		.join("");
 	const waitingHtml = columnHtml("Waiting for…", waiting, tz, null, "nothing pending on others");
-	const inboxHtml = columnHtml("Inbox — clarify", inbox, tz, null, "inbox zero 🎉");
+	const inboxHtml = columnHtml("Inbox — clarify", inbox, tz, null, "inbox zero 🎉", inbox.length > 0);
 	const rocksHtml = rocks.length
 		? rocks.map((c) => cardHtml(c, tz)).join("")
 		: `<div style="${S.empty}">no big rocks listed</div>`;
@@ -216,6 +253,7 @@ export function renderDigest(cards: TrelloCard[], nowMs: number, tz: string = DE
 <a href="${DASHBOARD_URL}" style="font-size:12px;color:#2563eb;">Open the live dashboard →</a></div>
 ${health}
 ${dueSection}
+${overviewHtml}
 <div style="${S.zone}">Next actions <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">by context</span></div>
 ${ctxHtml}
 <div style="${S.zone}">Needs attention</div>

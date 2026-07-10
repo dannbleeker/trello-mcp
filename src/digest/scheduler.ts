@@ -119,7 +119,7 @@ export async function runScheduledDigest(env: DigestEnv, nowMs: number): Promise
 		return "skipped-outside-window";
 	}
 
-	const flagKey = `digest:sent:${localDateInTz(nowMs)}`;
+	const flagKey = sentFlagKey(nowMs);
 	if (await env.OAUTH_KV.get(flagKey)) {
 		return "skipped-already-sent";
 	}
@@ -132,8 +132,42 @@ export async function runScheduledDigest(env: DigestEnv, nowMs: number): Promise
 		return "failed";
 	}
 
-	await env.OAUTH_KV.put(flagKey, new Date(nowMs).toISOString(), {
-		expirationTtl: SENT_FLAG_TTL_SECONDS,
-	});
+	await markSent(env, nowMs);
 	return "sent";
+}
+
+/** KV key for the once-per-local-day sent flag. */
+function sentFlagKey(nowMs: number): string {
+	return `digest:sent:${localDateInTz(nowMs)}`;
+}
+
+/**
+ * Record a successful send. A KV write failure must NOT fail the run — the
+ * email already went out, and throwing here would surface the cron invocation
+ * as an error while ALSO leaving the flag unset (guaranteeing a duplicate
+ * from the next slot). Worst case after swallowing: the flag is missing and
+ * the next slot may duplicate once — strictly better than always duplicating.
+ * v1.14.1 fix.
+ */
+async function markSent(env: DigestEnv, nowMs: number): Promise<void> {
+	try {
+		await env.OAUTH_KV.put(sentFlagKey(nowMs), new Date(nowMs).toISOString(), {
+			expirationTtl: SENT_FLAG_TTL_SECONDS,
+		});
+	} catch (e) {
+		console.error("digest sent-flag write failed:", e instanceof Error ? e.message : e);
+	}
+}
+
+/**
+ * After a MANUAL test send (POST /api/digest/send): if we're inside the cron
+ * window, set the sent flag so a remaining cron slot doesn't email a
+ * near-identical digest minutes later. Outside the window this is a no-op —
+ * a daytime test send must never suppress tomorrow's 04:00 digest.
+ * v1.14.1 fix.
+ */
+export async function noteManualSend(env: DigestEnv, nowMs: number): Promise<void> {
+	const hour = hourInTz(nowMs);
+	if (hour < WINDOW_START_HOUR || hour > WINDOW_END_HOUR) return;
+	await markSent(env, nowMs);
 }

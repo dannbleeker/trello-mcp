@@ -4,6 +4,32 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] — 2026-07-10
+
+### Fixed
+Bug-hunt pass over the v1.14.0 digest code (security sweep was clean; these
+are correctness/fidelity fixes):
+
+- **KV sent-flag write no longer fails the run** — a transient KV error after
+  a successful send previously threw out of `runScheduledDigest` (cron showed
+  an exception) AND guaranteed a duplicate email from the next slot. The
+  write is now fail-soft: logged, run still reports `sent`.
+- **Manual test-send inside the 04–06 window now sets the sent flag** so a
+  remaining cron slot doesn't email a near-identical digest minutes later.
+  Outside the window it remains a pure test (never suppresses tomorrow's
+  digest).
+- **Email replica fidelity** (`src/digest/render.ts`):
+  - Inbox column count badge now goes red whenever the inbox is non-empty,
+    matching the dashboard's rule (the health-bar number already did).
+  - The "Cards per list" overview panel is now included (was missing despite
+    the full-replica goal).
+  - Zero-width characters are stripped from description snippets, matching
+    the dashboard (pasted content no longer shifts truncation or renders
+    empty-looking snippets).
+  - Overdue dates from a different year now include the year
+    ("15 Jul 2024, 12:00") so a year-old card can't masquerade as recent.
+- +6 regression tests (136 total).
+
 ## [1.14.0] — 2026-07-10
 
 ### Added

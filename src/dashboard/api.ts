@@ -26,7 +26,7 @@
 
 import { Hono } from "hono";
 import { ALLOWED_LOGINS } from "../allowlist";
-import { sendDigestEmail } from "../digest/scheduler";
+import { noteManualSend, sendDigestEmail } from "../digest/scheduler";
 import { TrelloClient, TrelloError } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD, resolveBoard } from "../trello/constants";
 import { GuardError } from "../trello/guards";
@@ -44,6 +44,8 @@ export type DashboardEnv = {
 	RESEND_API_KEY?: string;
 	DIGEST_FROM?: string;
 	DIGEST_TO?: string;
+	// Present in the real Worker; optional here so unit tests can omit it.
+	OAUTH_KV?: KVNamespace;
 };
 
 /** Card capture always lands in the Inbox; the client never chooses the destination. */
@@ -180,7 +182,13 @@ api.post("/api/digest/send", async (c) => {
 	// Owner-facing test send of the daily digest ("does the email look right,
 	// right now?"). Session + Origin gates apply via the /api/* middleware.
 	try {
-		await sendDigestEmail(c.env, Date.now());
+		const nowMs = Date.now();
+		await sendDigestEmail(c.env, nowMs);
+		// If this test send happens inside the 04-06 cron window, flag the day
+		// as sent so a remaining cron slot doesn't duplicate it minutes later.
+		if (c.env.OAUTH_KV) {
+			await noteManualSend(c.env as Parameters<typeof noteManualSend>[0], nowMs);
+		}
 		return c.json({ ok: true, to: c.env.DIGEST_TO ?? "(default recipient)" });
 	} catch (e) {
 		if (e instanceof GuardError || e instanceof TrelloError) {

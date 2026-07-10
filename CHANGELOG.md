@@ -4,6 +4,45 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] — 2026-07-10
+
+Improvements batch (11 items from the post-v1.15.0 review).
+
+### Added
+- **Installable dashboard (PWA-lite)**: web-app manifest + SVG icon
+  (`/manifest.webmanifest`, `/icon.svg` — public routes), theme-color and
+  apple-web-app meta tags. "Add to Home Screen" installs the dashboard as a
+  standalone app.
+- **Refresh on tab return**: the dashboard refetches board + snoozed data when
+  the tab/app regains visibility (throttled to once per minute) — no more
+  acting on an overnight-stale board.
+- **Digest heartbeat (optional)**: set the `HEARTBEAT_URL` secret to a
+  healthchecks.io-style ping URL and the Worker pings it after each successful
+  cron send — a missing ping becomes an alert, so silent digest failures
+  can't hide. Fail-soft: monitoring never fails the send.
+- **`send_digest` MCP tool** (+1, total 99): send the "Todays Actions" email
+  now from chat; marks the day's cron send done if inside the morning window.
+- **Dark mode**: the dashboard follows `prefers-color-scheme` (full dark
+  palette; `color-scheme: light dark`).
+- **Due badges on dashboard cards**: red "overdue · 9 Jul" / "today HH:MM"
+  badges — the digest's most useful signal, now on the live board.
+- **Undo**: ✓ Done and Move toasts carry a 6-second Undo button. Undo-done
+  uses a new `POST /api/undo-done` (clears `dueComplete` so Butler doesn't
+  re-move the card, then moves it back).
+- **Friday weekly-review digest**: on Fridays the email appends stale
+  Waiting-for items (7+ days untouched) and could-do horizon counts — the
+  GTD weekly-review nudge, from data already in the board snapshot.
+
+### Changed
+- **`src/index.ts` split**: all 99 tool registrations moved verbatim to
+  `src/register-tools.ts` (~1,300 lines out); index.ts is now just the wiring
+  (108 lines). The advertised MCP version now tracks `package.json` (was
+  frozen at "1.11.0"). `snooze_read`'s description now points to
+  `list_snoozed_cards` for real Power-Up state.
+- **README**: documented the session kill switch — rotating
+  `COOKIE_ENCRYPTION_KEY` instantly invalidates all dashboard sessions.
+- **wrangler** 4.79 → 4.110.
+
 ## [1.15.0] — 2026-07-10
 
 ### Added

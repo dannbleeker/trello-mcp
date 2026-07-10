@@ -53,6 +53,32 @@ const app = new Hono<{ Bindings: DashboardEnv }>();
 
 app.get("/", (c) => c.redirect("/dashboard", 302));
 
+// PWA support (v1.16.0): manifest + icon are public — they contain nothing
+// sensitive and install-time fetches don't reliably carry cookies.
+app.get("/manifest.webmanifest", (c) =>
+	c.json(
+		{
+			background_color: "#f6f7f9",
+			display: "standalone",
+			icons: [{ purpose: "any", sizes: "any", src: "/icon.svg", type: "image/svg+xml" }],
+			name: "Dann — To-Do Dashboard",
+			short_name: "To-Do",
+			start_url: "/dashboard",
+			theme_color: "#1c2024",
+		},
+		200,
+		{ "Cache-Control": "public, max-age=86400", "Content-Type": "application/manifest+json" },
+	),
+);
+
+app.get("/icon.svg", (c) =>
+	c.body(
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#1c2024"/><path d="M28 52 l16 16 l30 -34" fill="none" stroke="#4ade80" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+		200,
+		{ "Cache-Control": "public, max-age=86400", "Content-Type": "image/svg+xml" },
+	),
+);
+
 app.get("/dashboard", async (c) => {
 	const session = await verifySessionCookie(c.req.header("Cookie"), c.env.COOKIE_ENCRYPTION_KEY);
 	if (!session || !ALLOWED_LOGINS.has(session.login)) {

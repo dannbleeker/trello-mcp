@@ -4,8 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dann — To-Do Dashboard</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15171a" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="To-Do">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
-:root { color-scheme: light; }
+:root { color-scheme: light dark; }
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -144,6 +151,43 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 .errbox { background:#fdecea; border:1px solid #f5c6c0; color:#a5281c; padding:12px 14px; border-radius:10px; margin-bottom:14px; font-size:13px; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+
+/* due badges */
+.badge.duover { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
+.badge.dueto  { background:#1c2024; color:#fff; }
+
+/* ---- dark mode (v1.16.0) ---- */
+@media (prefers-color-scheme: dark) {
+  body { background: #15171a; color: #e5e7eb; }
+  .health, .col, .ov-panel { background: #1e2124; border-color: #2a2e33; box-shadow: none; }
+  .card, .snz-row { background: #24272b; border-color: #2e3237; }
+  .card .desc, .stat .lbl, .zone-title small, .ov .ov-name, .snz-row .meta, .col-head .count, .ov-panel-title { color: #9aa3ad; }
+  .zone-title { color: #9aa3ad; }
+  .stat .num.alert { color: #f87171; }
+  .chip { background: #1e2124; border-color: #3a3f45; color: #d1d5db; }
+  .chip.active { background: #e5e7eb; color: #15171a; border-color: #e5e7eb; }
+  .wip { background: #24272b; border-color: #2e3237; color: #d1d5db; }
+  .wip.ok { background: #14321c; border-color: #1d4a29; }
+  .wip.over { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
+  .col-head .count { background: #2a2e33; }
+  .col-head .count.over { background: #3b1512; color: #f2b8b5; }
+  .btn, select.mv { background: #24272b; border-color: #3a3f45; color: #d1d5db; }
+  .btn:hover { background: #2e3237; }
+  .btn.done { color: #4ade80; border-color: #1d4a29; }
+  .btn.done:hover { background: #14321c; }
+  .capture input { background: #1e2124; border-color: #3a3f45; color: #e5e7eb; }
+  .capture button { background: #e5e7eb; color: #15171a; }
+  .ov { background: #24272b; border-color: #2e3237; }
+  .ov .ov-num { color: #e5e7eb; }
+  .ov.alert { background: #3b1512; border-color: #5c221c; }
+  .ov.alert .ov-num { color: #f2b8b5; }
+  .badge.clarify, .badge.duover { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
+  .badge.dueto { background: #e5e7eb; color: #15171a; }
+  .badge.bestseller { background: #e5e7eb; color: #15171a; }
+  #toast { background: #e5e7eb; color: #15171a; }
+  .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
+  .loading, .empty { color: #9aa3ad; }
+}
 </style>
 </head>
 <body>
@@ -197,16 +241,33 @@ async function api(path, opts){
 
 // Fetch + normalise the board. The API returns {cards:[...]} with Trello-native
 // idList; normalise defensively so the rest of the dashboard is unchanged.
+let LAST_LOAD = 0;
 async function loadCards(){
   const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID));
   let arr = Array.isArray(res) ? res : (res && Array.isArray(res.cards)) ? res.cards : [];
+  LAST_LOAD = Date.now();
   return arr.map(c => ({ ...c, idList: (c.listId != null ? c.listId : c.idList) }));
 }
 
-function toast(msg){
+// toast(msg) or toast(msg, {label:"Undo", fn}) — the action variant stays up
+// longer and is clickable.
+function toast(msg, action){
   const t = document.getElementById("toast");
-  t.textContent = msg; t.classList.add("show");
-  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove("show"), 2200);
+  t.innerHTML = esc(msg) + (action
+    ? ' <button id="toastBtn" class="btn" style="margin-left:10px;">'+esc(action.label)+'</button>'
+    : "");
+  if (action){
+    t.style.pointerEvents = "auto";
+    document.getElementById("toastBtn").onclick = () => {
+      t.classList.remove("show"); t.style.pointerEvents = "none";
+      action.fn();
+    };
+  } else {
+    t.style.pointerEvents = "none";
+  }
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(()=>{ t.classList.remove("show"); t.style.pointerEvents = "none"; }, action ? 6000 : 2200);
 }
 
 function cardsIn(listId){ return CARDS.filter(c => c.idList === listId && !isDivider(c)); }
@@ -214,8 +275,19 @@ function isDivider(c){ return /^-+$/.test((c.name||"").trim()); }
 function hasLabel(c, n){ return (c.labels||[]).some(l => (typeof l === "string" ? l : l.name) === n); }
 function labelNames(c){ return (c.labels||[]).map(l => typeof l === "string" ? l : l.name); }
 
+// Overdue / due-today badge from the browser's local day (same signal as the
+// digest's due section, now visible on the live board too). v1.16.0.
+function dueBadge(c){
+  if (!c.due || c.dueComplete) return "";
+  const t = new Date(c.due), now = new Date();
+  const sameDay = t.getFullYear()===now.getFullYear() && t.getMonth()===now.getMonth() && t.getDate()===now.getDate();
+  if (sameDay) return '<span class="badge dueto">today '+t.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})+'</span>';
+  if (t < now) return '<span class="badge duover">overdue · '+t.toLocaleDateString("en-GB",{day:"numeric",month:"short"})+'</span>';
+  return "";
+}
+
 function badgesHtml(c){
-  let h = "";
+  let h = dueBadge(c);
   if (hasLabel(c,"BESTSELLER")) h += '<span class="badge bestseller">BESTSELLER</span>';
   if (hasLabel(c,"DBP Invest")) h += '<span class="badge invest">DBP Invest</span>';
   if (hasLabel(c,"Please Clarify and Organize")) h += '<span class="badge clarify">clarify</span>';
@@ -433,13 +505,25 @@ async function onWake(btn){
 
 async function onDone(btn){
   const id = btn.getAttribute("data-card");
+  const card = CARDS.find(x=>x.id===id);
+  const prevList = card ? card.idList : null;
   btn.disabled = true;
   try {
     // The server flips dueComplete (Butler triggers still fire) AND moves
     // the card to Done-do, so this update matches server state, not a guess.
     const res = await api("/api/done", { method: "POST", body: JSON.stringify({ cardId: id }) });
-    const c = CARDS.find(x=>x.id===id); if (c) c.idList = DONE.id;
-    toast(res && res.warning ? res.warning : "Marked done ✓");
+    if (card) card.idList = DONE.id;
+    toast(res && res.warning ? res.warning : "Marked done ✓", prevList ? {
+      label: "Undo",
+      fn: async () => {
+        try {
+          await api("/api/undo-done", { method: "POST", body: JSON.stringify({ cardId: id, list: prevList }) });
+          const c2 = CARDS.find(x=>x.id===id); if (c2){ c2.idList = prevList; c2.dueComplete = false; }
+          toast("Restored");
+          render();
+        } catch(e){ toast("Undo failed: "+e.message); }
+      }
+    } : undefined);
     render();
   } catch(e){ btn.disabled = false; toast("Couldn’t mark done: "+e.message); }
 }
@@ -447,12 +531,24 @@ async function onDone(btn){
 async function onMove(sel){
   const id = sel.getAttribute("data-card");
   const dest = sel.value; if (!dest) return;
+  const card = CARDS.find(x=>x.id===id);
+  const prevList = card ? card.idList : null;
   sel.disabled = true;
   try {
     const res = await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: dest }) });
-    const c = CARDS.find(x=>x.id===id); if (c) c.idList = dest;
+    if (card) card.idList = dest;
     const t = MOVE_TARGETS.find(x=>x.id===dest);
-    toast(res && res.warning ? res.warning : "Moved to "+(t?t.name:"list"));
+    toast(res && res.warning ? res.warning : "Moved to "+(t?t.name:"list"), prevList ? {
+      label: "Undo",
+      fn: async () => {
+        try {
+          await api("/api/move", { method: "POST", body: JSON.stringify({ cardId: id, list: prevList }) });
+          const c2 = CARDS.find(x=>x.id===id); if (c2) c2.idList = prevList;
+          toast("Moved back");
+          render();
+        } catch(e){ toast("Undo failed: "+e.message); }
+      }
+    } : undefined);
     render();
   } catch(e){
     // Reset to the placeholder so re-picking the same destination re-fires
@@ -501,6 +597,14 @@ async function init(){
   }
 }
 init();
+
+// Refresh when the tab/app regains focus after a while — otherwise an
+// overnight tab acts on a stale board. Throttled to once per minute. v1.16.0.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - LAST_LOAD > 60000){
+    loadCards().then(cs => { CARDS = cs; render(); loadSnoozed(); }).catch(()=>{});
+  }
+});
 </script>
 </body>
 </html>

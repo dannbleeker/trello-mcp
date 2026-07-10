@@ -6,7 +6,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (98)
+## Tools (99)
 
 **Reads**
 
@@ -85,6 +85,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `batch_add_label` | Apply the same label to up to 50 cards (per-card skip reasons reported) |
 | `batch_move_cards` | Move up to 50 cards to the same destination list (guards + WIP warning) |
 | `wake_card` | Unarchive a Power-Up-snoozed card NOW (refuses non-snoozed cards; creating snoozes via API is impossible) |
+| `send_digest` | Send the "Todays Actions" digest email immediately with live board data |
 | `create_list` | Create a new list on a board (with position) |
 | `rename_list` | Rename a list |
 | `archive_list` | Archive (default) or reopen a list |
@@ -129,6 +130,8 @@ Enforced server-side before any Trello call — same rules for every tool, no pe
 
 Only one GitHub login (`dannbleeker`) can call any tool or open the dashboard — hard-coded in `src/allowlist.ts` (single source of truth for both surfaces). Any other authenticated GitHub user reaches the OAuth flow but every tool call returns a refusal message, and the dashboard answers 403.
 
+**Session kill switch**: dashboard sessions live ~30 days in a signed cookie with no server-side session store. If a device is lost, rotate the signing key — `wrangler secret put COOKIE_ENCRYPTION_KEY` (new `openssl rand -hex 32`) — which instantly invalidates every session everywhere. The MCP connector re-authenticates via GitHub on its own.
+
 ## Web dashboard
 
 A private, browser-accessible To-Do dashboard served by this same Worker — a hosted, always-on version of the desktop artifact. Open `https://trello-mcp.<your-subdomain>.workers.dev/dashboard` (or just `/`, which redirects) in any browser; you'll be sent through GitHub login the first time and get a ~30-day session cookie.
@@ -136,7 +139,9 @@ A private, browser-accessible To-Do dashboard served by this same Worker — a h
 - **Zones**: health bar (inbox / next actions / waiting / big rocks + WIP status), quick capture → Inbox, cards-per-list overview, next actions by context with label filters, needs-attention (Waiting / Inbox), and Rolling Big Rocks (read-only).
 - **Actions**: **✓ Done** sets `dueComplete=true` (the board's Butler automation moves the card to Done-do — same semantics as the `set_due_complete` tool); **Move** and **Quick capture** reuse the tools layer, so the [safety guards](#safety-guards) above apply identically.
 - **Auth**: GitHub OAuth (same OAuth app as the MCP flow) + the `ALLOWED_LOGINS` allowlist, re-checked on every request. The JSON API under `/api/*` answers `401`/`403` and the page redirects itself to `/app/login`.
-- **Routes**: `/dashboard`, `/app/login`, `/app/callback`, `/app/logout`, `/api/cards`, `/api/move`, `/api/done`, `/api/capture`. The MCP surface (`/mcp`) and the reserved OAuth endpoints (`/authorize`, `/callback`, `/token`, `/register`) are untouched.
+- **Routes**: `/dashboard`, `/app/login`, `/app/callback`, `/app/logout`, `/api/*` (cards, move, done, undo-done, capture, snoozed, wake, digest/send), plus public PWA assets (`/manifest.webmanifest`, `/icon.svg`). The MCP surface (`/mcp`) and the reserved OAuth endpoints (`/authorize`, `/callback`, `/token`, `/register`) are untouched.
+- **Installable**: the dashboard ships a web-app manifest — "Add to Home Screen" installs it as a standalone app. Dark mode follows the device preference.
+- **Digest monitoring (optional)**: set a [healthchecks.io](https://healthchecks.io) ping URL as the `HEARTBEAT_URL` secret; the Worker pings it after every successful daily send, so a silent digest failure becomes an email alert.
 
 ## Daily email digest
 

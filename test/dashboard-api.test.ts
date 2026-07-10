@@ -280,3 +280,35 @@ describe("POST /api/capture", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("POST /api/undo-done (v1.16.0)", () => {
+	it("400 when cardId or list is missing", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		for (const body of [{}, { cardId: "c1" }, { list: HOME_ID }]) {
+			const res = await DashboardApi.request("/api/undo-done", postInit(body, cookie), ENV);
+			expect(res.status).toBe(400);
+		}
+	});
+
+	it("clears dueComplete and moves the card back to its previous list", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		const fetchSpy = mockTrello([
+			{ body: trelloCard({ idList: LIST_ALIASES.done }), method: "GET", path: "/1/cards/cccccccccccccccccccccccc" },
+			{ body: trelloCard({ idList: HOME_ID }), method: "PUT", path: "/1/cards/cccccccccccccccccccccccc" },
+			{ body: [trelloCard({ idList: HOME_ID })], method: "GET", path: `/1/lists/${HOME_ID}/cards` },
+			{ body: [{ id: HOME_ID, name: "@Home" }], method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
+		]);
+		const res = await DashboardApi.request(
+			"/api/undo-done",
+			postInit({ cardId: "cccccccccccccccccccccccc", list: HOME_ID }, cookie),
+			ENV,
+		);
+		expect(res.status).toBe(200);
+		expect((await res.json()).ok).toBe(true);
+		const putParams = fetchSpy.mock.calls
+			.filter(([, init]) => init?.method === "PUT")
+			.map(([url]) => new URL(url as string).searchParams);
+		expect(putParams.some((p) => p.get("dueComplete") === "false")).toBe(true);
+		expect(putParams.some((p) => p.get("idList") === HOME_ID)).toBe(true);
+	});
+});

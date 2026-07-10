@@ -111,6 +111,13 @@ const S = {
 	zone: "font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#4b5563;margin:22px 0 10px;",
 } as const;
 
+/** Escaped card title, linked only when the URL passes the http(s) whitelist. */
+function titleLink(name: string, url: string | undefined): string {
+	return url && /^https?:\/\//i.test(url)
+		? `<a href="${esc(url)}" style="${S.link}">${esc(name)}</a>`
+		: esc(name);
+}
+
 function badgesHtml(c: TrelloCard): string {
 	let h = "";
 	if (hasLabel(c, "BESTSELLER")) h += `<span style="${S.badge}background:#1c2024;color:#ffffff;">BESTSELLER</span>`;
@@ -120,10 +127,7 @@ function badgesHtml(c: TrelloCard): string {
 }
 
 function cardHtml(c: TrelloCard, tz: string, opts: { showDue?: boolean; nowMs?: number } = {}): string {
-	const title =
-		c.url && /^https?:\/\//i.test(c.url)
-			? `<a href="${esc(c.url)}" style="${S.link}">${esc(c.name)}</a>`
-			: esc(c.name);
+	const title = titleLink(c.name, c.url);
 	const snippet = descSnippet(c.desc);
 	const due =
 		opts.showDue && c.due && opts.nowMs !== undefined
@@ -216,10 +220,7 @@ export function renderDigest(
 	if (wakingToday.length) {
 		const rows = wakingToday
 			.map((s) => {
-				const title =
-					s.url && /^https?:\/\//i.test(s.url)
-						? `<a href="${esc(s.url)}" style="${S.link}">${esc(s.name)}</a>`
-						: esc(s.name);
+				const title = titleLink(s.name, s.url);
 				const home = s.homeListAlias ?? s.homeListId;
 				const when = s.overdueWake ? "any moment (overdue wake)" : formatDue(s.wakeUp, tz, nowMs);
 				return `<div style="${S.card}"><div style="${S.title}">${title}</div><div style="${S.desc}">wakes ${esc(when)} · → ${esc(home)}</div></div>`;
@@ -262,9 +263,7 @@ export function renderDigest(
 			? `<div style="font-weight:600;font-size:13px;margin-bottom:8px;">Waiting-for items untouched 7+ days (${staleWaiting.length})</div>${staleWaiting
 					.map((c) => {
 						const days = Math.floor((nowMs - Date.parse(c.dateLastActivity)) / (24 * 3600 * 1000));
-						return `<div style="${S.card}"><div style="${S.title}">${
-							c.url && /^https?:\/\//i.test(c.url) ? `<a href="${esc(c.url)}" style="${S.link}">${esc(c.name)}</a>` : esc(c.name)
-						}</div><div style="${S.desc}">stale for ${days} days — chase or drop?</div></div>`;
+						return `<div style="${S.card}"><div style="${S.title}">${titleLink(c.name, c.url)}</div><div style="${S.desc}">stale for ${days} days — chase or drop?</div></div>`;
 					})
 					.join("")}`
 			: `<div style="${S.empty}">no stale waiting-for items — clean week</div>`;

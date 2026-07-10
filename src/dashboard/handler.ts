@@ -49,6 +49,18 @@ import {
 	verifySessionCookie,
 } from "./session";
 
+/**
+ * Session gate for browser pages: null when a valid allowlisted session exists,
+ * otherwise the redirect-to-login response to return.
+ */
+async function requireSession(c: { env: DashboardEnv; req: { header: (n: string) => string | undefined } }): Promise<Response | null> {
+	const session = await verifySessionCookie(c.req.header("Cookie"), c.env.COOKIE_ENCRYPTION_KEY);
+	if (!session || !ALLOWED_LOGINS.has(session.login)) {
+		return new Response(null, { headers: { Location: "/app/login" }, status: 302 });
+	}
+	return null;
+}
+
 const app = new Hono<{ Bindings: DashboardEnv }>();
 
 app.get("/", (c) => c.redirect("/dashboard", 302));
@@ -80,10 +92,8 @@ app.get("/icon.svg", (c) =>
 );
 
 app.get("/dashboard", async (c) => {
-	const session = await verifySessionCookie(c.req.header("Cookie"), c.env.COOKIE_ENCRYPTION_KEY);
-	if (!session || !ALLOWED_LOGINS.has(session.login)) {
-		return c.redirect("/app/login", 302);
-	}
+	const denied = await requireSession(c);
+	if (denied) return denied;
 	return c.html(DASHBOARD_HTML, 200, {
 		"Cache-Control": "no-store",
 		"X-Frame-Options": "DENY",
@@ -159,10 +169,8 @@ app.get("/app/callback", async (c) => {
 app.get("/digest/preview", async (c) => {
 	// Renders the exact email HTML in the browser (session-gated) so the
 	// digest can be eyeballed without sending anything.
-	const session = await verifySessionCookie(c.req.header("Cookie"), c.env.COOKIE_ENCRYPTION_KEY);
-	if (!session || !ALLOWED_LOGINS.has(session.login)) {
-		return c.redirect("/app/login", 302);
-	}
+	const denied = await requireSession(c);
+	if (denied) return denied;
 	try {
 		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
 		const nowMs = Date.now();

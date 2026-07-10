@@ -4,6 +4,35 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] — 2026-07-10
+
+### Added
+- **Snooze Power-Up integration** (read + wake; creating snoozes stays a
+  Trello-UI action — Trello's REST API cannot write another plugin's data).
+  Mechanism verified live: the Power-Up archives snoozed cards and stores the
+  wake time in card-scoped `pluginData` (`{"snooze":{"idCard","unixTime"}}`),
+  readable by our token; one call (`filter=closed&pluginData=true`) fetches
+  everything. All parsing is fail-soft — the shape is undocumented.
+  - **MCP** (+2 tools, total 98): `list_snoozed_cards` (name, home list,
+    `wakeUp` ISO, `overdueWake` flag, sorted soonest-first) and `wake_card`
+    (unarchives NOW; refuses cards not snoozed by the Power-Up, guards the
+    home list). `snooze_read` (dueReminder-based) is unchanged.
+  - **Dashboard**: fifth health-bar stat **"Snoozed"** — populated by a
+    non-blocking fetch, click to expand a panel listing each snoozed card
+    with wake time, home list, and a **Wake now** button
+    (`GET /api/snoozed`, `POST /api/wake`; session/allowlist/Origin-gated
+    like the rest).
+  - **Digest**: **"Waking today"** section — snoozed cards whose wake time
+    falls inside the local Copenhagen day (same DST-correct boundary as the
+    due buckets), plus overdue wakes ("any moment"). Snoozed count added to
+    the health bar. Best-effort: a failed snooze fetch omits the section,
+    never kills the email.
+- **Client**: `listArchivedCardsWithPluginData`, `getCardWithPluginData`,
+  `unarchiveCard`; `TrelloCard` gains optional `pluginData`/`dateClosed`.
+- **Tests** (+12, total 148): pluginData parsing (valid/foreign/malformed/
+  bad-shape), snoozed listing (sorting, overdue flag, query pins), wake_card
+  guard matrix + happy path, API routes, "Waking today" bucketing.
+
 ## [1.14.1] — 2026-07-10
 
 ### Fixed

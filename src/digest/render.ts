@@ -18,7 +18,7 @@
 
 import type { TrelloCard } from "../trello/client";
 import { DEFAULT_TIMEZONE, LIST_ALIASES, ROLLING_BIG_ROCKS_ID } from "../trello/constants";
-import { startOfDayMsInTz } from "../trello/tools";
+import { startOfDayMsInTz, type SnoozedCard } from "../trello/tools";
 
 /** The dashboard's zone layout, mirrored (ids from constants, WIP from list names). */
 const CONTEXTS = [
@@ -160,7 +160,12 @@ export interface Digest {
  * overdue/due-today bucketing (and tests) are deterministic; buckets use the
  * same DST-correct local-day boundary as list_cards_due.
  */
-export function renderDigest(cards: TrelloCard[], nowMs: number, tz: string = DEFAULT_TIMEZONE): Digest {
+export function renderDigest(
+	cards: TrelloCard[],
+	nowMs: number,
+	tz: string = DEFAULT_TIMEZONE,
+	snoozed: SnoozedCard[] = [],
+): Digest {
 	const open = cards.filter((c) => !c.closed && !isDivider(c));
 	const inList = (id: string) => open.filter((c) => c.idList === id);
 
@@ -196,7 +201,32 @@ export function renderDigest(cards: TrelloCard[], nowMs: number, tz: string = DE
 		.join("");
 	const stat = (num: number, label: string, alert = false) =>
 		`<span style="${S.stat}"><span style="${S.statNum}${alert ? "color:#c0392b;" : ""}">${num}</span><br><span style="${S.statLbl}">${esc(label)}</span></span>`;
-	const health = `<div style="${S.col}">${stat(inbox.length, "Inbox to clarify", inbox.length > 0)}${stat(totalNext, "Next actions")}${stat(waiting.length, "Waiting for")}${stat(rocks.length, "Big rocks")}<div style="margin-top:12px;">${wipHtml}</div></div>`;
+	const health = `<div style="${S.col}">${stat(inbox.length, "Inbox to clarify", inbox.length > 0)}${stat(totalNext, "Next actions")}${stat(waiting.length, "Waiting for")}${stat(rocks.length, "Big rocks")}${stat(snoozed.length, "Snoozed")}<div style="margin-top:12px;">${wipHtml}</div></div>`;
+
+	// ---- Waking today (Snooze Power-Up; email-only section, v1.15.0) ----
+	// Cards whose wake time falls inside the local day, plus overdue wakes
+	// (wake time passed but the Power-Up hasn't fired) — both reappear today.
+	const wakingToday = snoozed
+		.filter((s) => {
+			const t = Date.parse(s.wakeUp);
+			return s.overdueWake || (t >= dayStart && t < dayEnd);
+		})
+		.sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+	let wakeSection = "";
+	if (wakingToday.length) {
+		const rows = wakingToday
+			.map((s) => {
+				const title =
+					s.url && /^https?:\/\//i.test(s.url)
+						? `<a href="${esc(s.url)}" style="${S.link}">${esc(s.name)}</a>`
+						: esc(s.name);
+				const home = s.homeListAlias ?? s.homeListId;
+				const when = s.overdueWake ? "any moment (overdue wake)" : formatDue(s.wakeUp, tz, nowMs);
+				return `<div style="${S.card}"><div style="${S.title}">${title}</div><div style="${S.desc}">wakes ${esc(when)} · → ${esc(home)}</div></div>`;
+			})
+			.join("");
+		wakeSection = `<div style="${S.zone}">Waking today <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">snoozed cards returning to the board</span></div><div style="${S.col}">${rows}</div>`;
+	}
 
 	// ---- Overdue & due today (email-only section) ----
 	let dueSection = "";
@@ -253,6 +283,7 @@ export function renderDigest(cards: TrelloCard[], nowMs: number, tz: string = DE
 <a href="${DASHBOARD_URL}" style="font-size:12px;color:#2563eb;">Open the live dashboard →</a></div>
 ${health}
 ${dueSection}
+${wakeSection}
 ${overviewHtml}
 <div style="${S.zone}">Next actions <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">by context</span></div>
 ${ctxHtml}

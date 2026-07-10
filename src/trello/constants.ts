@@ -157,6 +157,21 @@ export function boardAliasFor(id: string): BoardAlias | null {
 }
 
 /**
+ * The Snooze Power-Up's plugin ID (verified live against dann-to-do,
+ * 2026-07-10). When a card is snoozed, the Power-Up ARCHIVES it and writes a
+ * card-scoped pluginData entry with access "shared" (so our REST token can
+ * read it):
+ *
+ *   { "snooze": { "idCard": "<cardId>", "unixTime": <wake epoch seconds> } }
+ *
+ * The Power-Up's own backend unarchives the card at unixTime. The shape is
+ * undocumented and could change — every consumer parses it fail-soft.
+ * Writing another plugin's pluginData is not possible via REST, so we can
+ * read snoozes and wake cards (unarchive), but never create snoozes.
+ */
+export const SNOOZE_PLUGIN_ID = "58dd18bdccfca7af8311792e";
+
+/**
  * Well-known Trello Power-Up (plugin) IDs. Useful for `enable_board_plugin`
  * so callers can say "custom-fields" instead of pasting a raw ID. Extend as
  * needed — every Power-Up has a stable Trello-side ID.

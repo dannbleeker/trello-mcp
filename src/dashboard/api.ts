@@ -30,7 +30,7 @@ import { noteManualSend, sendDigestEmail } from "../digest/scheduler";
 import { TrelloClient, TrelloError } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD, resolveBoard } from "../trello/constants";
 import { GuardError } from "../trello/guards";
-import { create_card, move_card, set_due_complete } from "../trello/tools";
+import { create_card, list_snoozed_cards, move_card, set_due_complete, wake_card } from "../trello/tools";
 import { verifySessionCookie } from "./session";
 
 /** The subset of Worker bindings the dashboard needs. Matches names in wrangler secrets/vars. */
@@ -173,6 +173,31 @@ api.post("/api/done", async (c) => {
 		await set_due_complete(client, { cardId, complete: true });
 		const { warning } = await move_card(client, { cardId, list: DONE_LIST_ALIAS });
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
+	} catch (e) {
+		return errorResponse(c, e);
+	}
+});
+
+api.get("/api/snoozed", async (c) => {
+	try {
+		const { snoozed } = await list_snoozed_cards(trello(c.env), {});
+		return c.json({ snoozed });
+	} catch (e) {
+		return errorResponse(c, e);
+	}
+});
+
+api.post("/api/wake", async (c) => {
+	const body = await readJsonBody(c);
+	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
+	if (!cardId) {
+		return c.json({ error: "cardId is a required non-empty string." }, 400);
+	}
+
+	try {
+		// wake_card refuses non-snoozed cards and guards the home list.
+		const { card } = await wake_card(trello(c.env), { cardId });
+		return c.json({ card, ok: true });
 	} catch (e) {
 		return errorResponse(c, e);
 	}

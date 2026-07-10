@@ -16,6 +16,8 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.15.0 (2026-07-10) — +2 tools: list_snoozed_cards, wake_card (Snooze Power-Up
+ *                         integration via pluginData reads). Total: 98.
  *   1.14.0 (2026-07-10) — Default export widened to { fetch, scheduled }: fetch
  *                         delegates to the unchanged OAuthProvider; scheduled runs
  *                         the daily email digest (src/digest/*). No HTTP-surface
@@ -132,6 +134,7 @@ import {
 	list_my_actions,
 	list_my_cards_assigned,
 	list_notifications,
+	list_snoozed_cards,
 	mark_all_notifications_read,
 	mark_card_notifications_read,
 	mark_notification_read,
@@ -162,6 +165,7 @@ import {
 	subscribe_list,
 	unvote_card,
 	update_card,
+	wake_card,
 	update_comment,
 	update_custom_field,
 	update_label,
@@ -1302,6 +1306,24 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 			"Plugin metadata (name, description, url) by alias or plugin ID.",
 			{ plugin: z.string().describe("Plugin alias or ID.") },
 			guarded(login, async (i: { plugin: string }) => get_plugin(client, i)),
+		);
+
+		// ============================================================
+		// v1.15.0 — Snooze Power-Up integration
+		// ============================================================
+
+		this.server.tool(
+			"list_snoozed_cards",
+			"Cards the Snooze Power-Up has hidden (archived) with a scheduled wake time. Returns name, home list, wakeUp (ISO), and overdueWake (wake time passed but Power-Up hasn't fired). Sorted soonest-first. Note: snooze_read is a different mechanism (dueReminder offsets) — this reads the actual Power-Up state.",
+			{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+			guarded(login, async (i: { board?: string }) => list_snoozed_cards(client, i)),
+		);
+
+		this.server.tool(
+			"wake_card",
+			"Unarchive a Power-Up-snoozed card NOW — it returns to its home list. Refuses cards that aren't snoozed by the Snooze Power-Up (this is not a blind unarchiver). Creating snoozes via the API is impossible (Power-Up-private data); snoozing stays a Trello-UI action.",
+			{ cardId: z.string().describe("Snoozed card to wake.") },
+			guarded(login, async (i: { cardId: string }) => wake_card(client, i)),
 		);
 
 		this.server.tool(

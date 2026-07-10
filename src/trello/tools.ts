@@ -152,6 +152,7 @@ import {
 	MAX_RESULTS,
 	READ_ONLY_LISTS,
 	ROLLING_BIG_ROCKS_ID,
+	SNOOZE_PLUGIN_ID,
 	boardAliasFor,
 	listAliasFor,
 	resolveBoard,
@@ -2598,6 +2599,99 @@ export function decodeBase64(input: string): Uint8Array {
 	} catch {
 		throw new GuardError("contentBase64 is not valid base64.");
 	}
+}
+
+// ============================================================
+// v1.15.0 — Snooze Power-Up integration (read + wake; creating
+// snoozes is impossible via REST — see SNOOZE_PLUGIN_ID docs)
+// ============================================================
+
+/** One snoozed card, as list_snoozed_cards returns it. */
+export interface SnoozedCard {
+	id: string;
+	name: string;
+	url: string;
+	homeListId: string;
+	homeListAlias: string | null;
+	/** ISO timestamp the Power-Up will unarchive the card. */
+	wakeUp: string;
+	/** true when wakeUp has passed but the Power-Up hasn't fired yet. */
+	overdueWake: boolean;
+}
+
+/**
+ * Extract the Snooze Power-Up's wake time (epoch ms) from a card's pluginData.
+ * Fail-soft by design: foreign plugins, malformed JSON, and unexpected shapes
+ * all yield null — the pluginData format is undocumented and may change.
+ */
+export function parseSnoozeWakeMs(card: TrelloCard): number | null {
+	for (const pd of card.pluginData ?? []) {
+		if (pd.idPlugin !== SNOOZE_PLUGIN_ID) continue;
+		try {
+			const parsed = JSON.parse(pd.value) as { snooze?: { unixTime?: unknown } };
+			const t = parsed?.snooze?.unixTime;
+			if (typeof t === "number" && Number.isFinite(t)) return t * 1000;
+		} catch (_e) {
+			// fail-soft: treat unparseable pluginData as not snoozed
+		}
+	}
+	return null;
+}
+
+/**
+ * list_snoozed_cards — cards the Snooze Power-Up has hidden (archived) with a
+ * scheduled wake time. Sorted soonest-first. `overdueWake` flags cards whose
+ * wake time has passed without the Power-Up firing yet.
+ */
+export async function list_snoozed_cards(
+	client: TrelloClient,
+	input: { board?: string },
+	nowMs = Date.now(),
+): Promise<{ snoozed: SnoozedCard[] }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const archived = await client.listArchivedCardsWithPluginData(boardId);
+	const snoozed = archived
+		.flatMap((c): SnoozedCard[] => {
+			const wakeMs = parseSnoozeWakeMs(c);
+			if (wakeMs === null) return [];
+			return [
+				{
+					homeListAlias: listAliasFor(c.idList),
+					homeListId: c.idList,
+					id: c.id,
+					name: c.name,
+					overdueWake: wakeMs <= nowMs,
+					url: c.url,
+					wakeUp: new Date(wakeMs).toISOString(),
+				},
+			];
+		})
+		.sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+	return { snoozed };
+}
+
+/**
+ * wake_card — unarchive a Power-Up-snoozed card NOW; it returns to its home
+ * list. Deliberately refuses cards that aren't snoozed (so it can't be used
+ * as a blind unarchiver) and applies the standard write guard to the home
+ * list. The Power-Up's own later wake becomes a harmless no-op.
+ */
+export async function wake_card(
+	client: TrelloClient,
+	input: { cardId: string },
+): Promise<{ card: CardSummary }> {
+	const card = await client.getCardWithPluginData(input.cardId);
+	if (!card.closed) {
+		throw new GuardError(`Card ${input.cardId} is not archived — nothing to wake.`);
+	}
+	if (parseSnoozeWakeMs(card) === null) {
+		throw new GuardError(
+			`Card ${input.cardId} is archived but not snoozed by the Snooze Power-Up. Refusing to unarchive it blindly — use the Trello UI if that's intended.`,
+		);
+	}
+	assertWritable(card.idList);
+	const woken = await client.unarchiveCard(input.cardId);
+	return { card: summariseCard(woken) };
 }
 
 /**

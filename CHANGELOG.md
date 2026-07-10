@@ -4,6 +4,48 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.1] — 2026-07-10
+
+Refactor + bug-hunt pass over the v1.15/v1.16 code (previous hunts covered
+through v1.14.1).
+
+### Fixed
+- **Wake-now success no longer reported as failure** (`page.html`) — a failed
+  board refresh after a successful `/api/wake` showed "Couldn't wake",
+  re-enabled the button (whose retry then errors), and left a stale snooze
+  row. Wake and refresh errors are now handled separately (same rule as
+  capture).
+- **Optimistic Done/Move updates survive concurrent refreshes** — the update
+  mutated a card object captured before the await; a `visibilitychange`
+  refetch replacing `CARDS` in between orphaned it, popping the card back
+  into its old column. The card is now re-found after the await.
+- **Transient `/api/snoozed` failure no longer zeroes the panel** — the
+  refresh error path kept `SNOOZED = []`, flipping the stat to 0 and an open
+  panel to "nothing snoozed"; previously-loaded data is now kept.
+- **`/api/undo-done` reordered for failure-safety** — it cleared `dueComplete`
+  before moving back, so a mid-sequence Trello failure stranded the card in
+  Done-do, flag cleared, invisible to board and Butler. It now moves back
+  first (Butler triggers on the marking action, not state, so no bounce);
+  a failed flag-clear leaves the card visible. Test pins the order.
+- **Overdue badges carry the year when it differs** (`dueBadge`) — the
+  dashboard's new badge had reintroduced the "15 Jul could be last year"
+  defect the digest fixed in v1.14.1.
+- **Dark mode: overdue-wake text readable** — `.snz-row .meta.overdue` kept
+  its light-mode red (contrast ≈2.1:1 on the dark row); now `#f2b8b5` like
+  every other red element.
+- **Documented** (docs/snooze-v2.md): a card woken via `wake_card` keeps its
+  Power-Up pluginData forever (REST can't clear it), so re-archiving it later
+  makes it reappear as an eternal "overdue wake" — with UI-side mitigations.
+
+### Changed
+- **Refactor (behavior-neutral)**: `src/cookies.ts` — one cookie parser
+  replacing three hand-rolled copies in `workers-oauth-utils.ts` (+ the
+  original in `dashboard/session.ts`), the dedup flagged back in the v1.13.0
+  audit; `readString()` body-field helper in `dashboard/api.ts`;
+  `requireSession()` gate shared by `/dashboard` and `/digest/preview`;
+  `titleLink()` replacing the thrice-duplicated scheme-checked anchor in
+  `digest/render.ts`.
+
 ## [1.16.0] — 2026-07-10
 
 Improvements batch (11 items from the post-v1.15.0 review).

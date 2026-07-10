@@ -242,8 +242,13 @@ api.post("/api/undo-done", async (c) => {
 
 	try {
 		const client = trello(c.env);
-		await set_due_complete(client, { cardId, complete: false });
+		// Move back FIRST: if the flag-clear then fails, the card is at least
+		// visible in its column (still done-flagged) instead of stranded
+		// invisible in Done-do with the flag cleared. Butler's done-automation
+		// fires on the marking ACTION, not on state, so moving a still-flagged
+		// card does not bounce it back. v1.16.1 fix.
 		const { warning } = await move_card(client, { cardId, list });
+		await set_due_complete(client, { cardId, complete: false });
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
 	} catch (e) {
 		return errorResponse(c, e);

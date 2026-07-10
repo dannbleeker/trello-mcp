@@ -224,6 +224,26 @@ api.post("/api/digest/send", async (c) => {
 	}
 });
 
+api.post("/api/undo-done", async (c) => {
+	// Undo for ✓ Done: clear dueComplete (so Butler doesn't re-move it) and
+	// move the card back to the list it came from. v1.16.0.
+	const body = await readJsonBody(c);
+	const cardId = typeof body.cardId === "string" ? body.cardId.trim() : "";
+	const list = typeof body.list === "string" ? body.list.trim() : "";
+	if (!cardId || !list) {
+		return c.json({ error: "cardId and list are required non-empty strings." }, 400);
+	}
+
+	try {
+		const client = trello(c.env);
+		await set_due_complete(client, { cardId, complete: false });
+		const { warning } = await move_card(client, { cardId, list });
+		return c.json({ ok: true, ...(warning ? { warning } : {}) });
+	} catch (e) {
+		return errorResponse(c, e);
+	}
+});
+
 api.post("/api/capture", async (c) => {
 	const body = await readJsonBody(c);
 	const name = typeof body.name === "string" ? body.name.trim() : "";

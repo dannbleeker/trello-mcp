@@ -47,6 +47,9 @@ declare namespace Cloudflare {
 		RESEND_API_KEY?: string;
 		DIGEST_FROM?: string;
 		DIGEST_TO?: string;
+		// Optional healthchecks.io-style ping URL, hit after each successful
+		// digest cron send (silent-failure monitoring). Secret; optional.
+		HEARTBEAT_URL?: string;
 	}
 }
 

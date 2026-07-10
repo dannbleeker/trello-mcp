@@ -298,3 +298,71 @@ describe("v1.14.1 bug-hunt regressions", () => {
 		expect(store.has("digest:sent:2026-07-10")).toBe(true);
 	});
 });
+
+describe("v1.16.0 additions", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function hcMock(resendStatus = 200) {
+		const pinged: string[] = [];
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = new URL(typeof input === "string" ? input : (input as Request).url);
+			if (url.hostname === "hc-ping.example") {
+				pinged.push(url.href);
+				return new Response("OK", { status: 200 });
+			}
+			const body = url.hostname === "api.trello.com" ? "[]" : JSON.stringify({ id: "e1" });
+			return new Response(body, {
+				headers: { "Content-Type": "application/json" },
+				status: url.hostname === "api.resend.com" ? resendStatus : 200,
+			});
+		});
+		return { pinged, spy };
+	}
+
+	function hcEnv(): DigestEnv {
+		const store = new Map<string, string>();
+		return {
+			HEARTBEAT_URL: "https://hc-ping.example/digest",
+			OAUTH_KV: {
+				get: async (k: string) => store.get(k) ?? null,
+				put: async (k: string, v: string) => {
+					store.set(k, v);
+				},
+			} as unknown as KVNamespace,
+			RESEND_API_KEY: "re_x",
+			TRELLO_KEY: "k",
+			TRELLO_TOKEN: "t",
+		};
+	}
+
+	it("heartbeat: pinged after a successful cron send", async () => {
+		const { pinged } = hcMock();
+		expect(await runScheduledDigest(hcEnv(), Date.parse("2026-07-10T02:00:00Z"))).toBe("sent");
+		expect(pinged).toHaveLength(1);
+	});
+
+	it("heartbeat: NOT pinged when the send fails", async () => {
+		const { pinged } = hcMock(500);
+		expect(await runScheduledDigest(hcEnv(), Date.parse("2026-07-10T02:00:00Z"))).toBe("failed");
+		expect(pinged).toHaveLength(0);
+	});
+
+	it("Friday digest includes the weekly-review section with stale waiting items; other days omit it", () => {
+		// 2026-07-10 is a Friday (Copenhagen). Stale = untouched 7+ days.
+		const friday = Date.parse("2026-07-10T10:00:00Z");
+		const saturday = Date.parse("2026-07-11T10:00:00Z");
+		const cards = [
+			card({ id: "w1", name: "StaleWaiting", idList: LIST_ALIASES.waiting, dateLastActivity: "2026-06-20T00:00:00.000Z" }),
+			card({ id: "w2", name: "FreshWaiting", idList: LIST_ALIASES.waiting, dateLastActivity: "2026-07-09T00:00:00.000Z" }),
+		];
+		const fri = renderDigest(cards, friday).html;
+		expect(fri).toContain("Weekly review");
+		const section = fri.slice(fri.indexOf("Weekly review"), fri.indexOf("Cards per list"));
+		expect(section).toContain("StaleWaiting");
+		expect(section).not.toContain("FreshWaiting");
+		expect(section).toContain("Could-do (Personal)");
+		expect(renderDigest(cards, saturday).html).not.toContain("Weekly review");
+	});
+});

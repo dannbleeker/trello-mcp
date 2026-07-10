@@ -41,6 +41,12 @@ export interface DigestSendEnv {
 /** The cron path additionally needs KV for the once-per-day sent flag. */
 export interface DigestEnv extends DigestSendEnv {
 	OAUTH_KV: KVNamespace;
+	/**
+	 * Optional healthchecks.io-style ping URL, hit after every successful cron
+	 * send. The monitoring service alerts when the daily ping goes missing —
+	 * turning a silent digest failure into a notification. v1.16.0.
+	 */
+	HEARTBEAT_URL?: string;
 }
 
 const DEFAULT_FROM = "Todays Actions <todo@bleeker-pedersen.dk>";
@@ -142,6 +148,15 @@ export async function runScheduledDigest(env: DigestEnv, nowMs: number): Promise
 	}
 
 	await markSent(env, nowMs);
+
+	// Success heartbeat — fail-soft: monitoring must never fail the send.
+	if (env.HEARTBEAT_URL) {
+		try {
+			await fetch(env.HEARTBEAT_URL);
+		} catch (e) {
+			console.error("digest heartbeat ping failed:", e instanceof Error ? e.message : e);
+		}
+	}
 	return "sent";
 }
 

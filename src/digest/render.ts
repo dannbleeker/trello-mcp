@@ -240,6 +240,43 @@ export function renderDigest(
 		dueSection = `<div style="${S.zone}">Overdue &amp; due today</div><div style="${S.col}border:1px solid #f5c6c0;">${overdueHtml}${todayHtml}</div>`;
 	}
 
+	// ---- Friday: weekly-review extras (v1.16.0) ----
+	// On Fridays the digest doubles as the GTD weekly-review nudge: stale
+	// Waiting-for items (untouched 7+ days) and the could-do horizon counts.
+	// All data is already in the board snapshot — no extra fetches.
+	let reviewSection = "";
+	const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(new Date(nowMs));
+	if (weekday === "Fri") {
+		const staleCutoff = nowMs - 7 * 24 * 3600 * 1000;
+		const staleWaiting = waiting
+			.filter((c) => Date.parse(c.dateLastActivity) < staleCutoff)
+			.sort((a, b) => Date.parse(a.dateLastActivity) - Date.parse(b.dateLastActivity));
+		const horizons = [
+			{ id: LIST_ALIASES["could-personal"], name: "Could-do (Personal)" },
+			{ id: LIST_ALIASES["could-bestseller"], name: "Could-do (BESTSELLER)" },
+			{ id: LIST_ALIASES["could-dbp-invest"], name: "Could-do (DBP Invest)" },
+			{ id: LIST_ALIASES.someday, name: "Someday maybe" },
+		].map((h) => ({ ...h, count: inList(h.id).length }));
+
+		const staleHtml = staleWaiting.length
+			? `<div style="font-weight:600;font-size:13px;margin-bottom:8px;">Waiting-for items untouched 7+ days (${staleWaiting.length})</div>${staleWaiting
+					.map((c) => {
+						const days = Math.floor((nowMs - Date.parse(c.dateLastActivity)) / (24 * 3600 * 1000));
+						return `<div style="${S.card}"><div style="${S.title}">${
+							c.url && /^https?:\/\//i.test(c.url) ? `<a href="${esc(c.url)}" style="${S.link}">${esc(c.name)}</a>` : esc(c.name)
+						}</div><div style="${S.desc}">stale for ${days} days — chase or drop?</div></div>`;
+					})
+					.join("")}`
+			: `<div style="${S.empty}">no stale waiting-for items — clean week</div>`;
+		const horizonHtml = `<div style="margin-top:10px;">${horizons
+			.map(
+				(h) =>
+					`<span style="display:inline-block;font-size:12px;padding:5px 10px;border-radius:999px;background:#eef1f4;border:1px solid #e0e4e8;margin:0 6px 6px 0;"><b>${esc(h.name)}</b> ${h.count}</span>`,
+			)
+			.join("")}</div>`;
+		reviewSection = `<div style="${S.zone}">Weekly review <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">it's Friday — worth a look</span></div><div style="${S.col}">${staleHtml}${horizonHtml}</div>`;
+	}
+
 	// ---- Cards per list overview (matches the dashboard's .ov-panel; v1.14.1) ----
 	const overviewEntries = [
 		...ctxCols.map((l) => ({ alert: l.wip !== null && l.cards.length > l.wip, count: l.cards.length, name: l.name })),
@@ -284,6 +321,7 @@ export function renderDigest(
 ${health}
 ${dueSection}
 ${wakeSection}
+${reviewSection}
 ${overviewHtml}
 <div style="${S.zone}">Next actions <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">by context</span></div>
 ${ctxHtml}

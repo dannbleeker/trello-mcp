@@ -827,7 +827,12 @@ async function getApprovedClientsFromCookie(
 	}
 }
 
-async function signData(data: string, secret: string): Promise<string> {
+/**
+ * HMAC-SHA256-sign a string with the given secret, returning the signature as hex.
+ * Exported so the dashboard session cookie (src/dashboard/session.ts) reuses the
+ * exact same primitive as the __Host-APPROVED_CLIENTS cookie.
+ */
+export async function signData(data: string, secret: string): Promise<string> {
 	const key = await importKey(secret);
 	const enc = new TextEncoder();
 	const signatureBuffer = await crypto.subtle.sign("HMAC", key, enc.encode(data));
@@ -836,7 +841,8 @@ async function signData(data: string, secret: string): Promise<string> {
 		.join("");
 }
 
-async function verifySignature(
+/** Verify a hex HMAC-SHA256 signature produced by signData. Exported for the dashboard session cookie. */
+export async function verifySignature(
 	signatureHex: string,
 	data: string,
 	secret: string,

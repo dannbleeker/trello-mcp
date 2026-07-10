@@ -16,6 +16,8 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.12.0 (2026-07-10) — ALLOWED_LOGINS moved to src/allowlist.ts so the new web
+ *                         dashboard (src/dashboard/*) shares it. No MCP-surface changes.
  *   1.11.0 (2026-07-02) — Added vitest test suite (82 unit tests across 7 files);
  *                         no runtime code changes. See test/ + CHANGELOG.md.
  *   1.10.0 (2026-07-02) — Audit-surfaced refactor pass. No behavior changes.
@@ -57,6 +59,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
+import { ALLOWED_LOGINS } from "./allowlist";
 import { GitHubHandler } from "./github-handler";
 import type { Props } from "./utils";
 
@@ -160,9 +163,6 @@ import {
 	vote_card,
 	weekly_review_pack,
 } from "./trello/tools";
-
-/** Only these GitHub logins may call any tool. Any other authenticated user is refused. */
-const ALLOWED_LOGINS = new Set<string>(["dannbleeker"]);
 
 /**
  * Format a tool's result for an MCP response. Tools return JSON-safe objects;

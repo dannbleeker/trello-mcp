@@ -16,6 +16,10 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.14.0 (2026-07-10) — Default export widened to { fetch, scheduled }: fetch
+ *                         delegates to the unchanged OAuthProvider; scheduled runs
+ *                         the daily email digest (src/digest/*). No HTTP-surface
+ *                         changes.
  *   1.12.0 (2026-07-10) — ALLOWED_LOGINS moved to src/allowlist.ts so the new web
  *                         dashboard (src/dashboard/*) shares it. No MCP-surface changes.
  *   1.11.0 (2026-07-02) — Added vitest test suite (82 unit tests across 7 files);
@@ -60,6 +64,7 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 import { ALLOWED_LOGINS } from "./allowlist";
+import { runScheduledDigest } from "./digest/scheduler";
 import { GitHubHandler } from "./github-handler";
 import type { Props } from "./utils";
 
@@ -1323,7 +1328,7 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	}
 }
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
 	apiHandler: TrelloMCP.serve("/mcp"),
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
@@ -1331,3 +1336,14 @@ export default new OAuthProvider({
 	defaultHandler: GitHubHandler as any,
 	tokenEndpoint: "/token",
 });
+
+// The OAuthProvider handles ALL HTTP exactly as before; `scheduled` is the
+// cron entry for the daily digest (see src/digest/scheduler.ts for the
+// UTC-fires-thrice / sends-once-at-04:00-Copenhagen design).
+export default {
+	fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauthProvider.fetch(request, env, ctx),
+	scheduled: async (_controller: ScheduledController, env: Env, _ctx: ExecutionContext) => {
+		const result = await runScheduledDigest(env, Date.now());
+		console.log(`digest cron: ${result}`);
+	},
+};

@@ -32,6 +32,9 @@
 import { Hono } from "hono";
 import { Octokit } from "octokit";
 import { ALLOWED_LOGINS } from "../allowlist";
+import { renderDigest } from "../digest/render";
+import { TrelloClient } from "../trello/client";
+import { BOARD_ALIASES, DEFAULT_BOARD } from "../trello/constants";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
 import { type DashboardEnv, DashboardApi } from "./api";
 import DASHBOARD_HTML from "./page.html";
@@ -124,6 +127,23 @@ app.get("/app/callback", async (c) => {
 	headers.append("Set-Cookie", clearStateCookie());
 	headers.append("Set-Cookie", await createSessionCookie(login, c.env.COOKIE_ENCRYPTION_KEY));
 	return new Response(null, { headers, status: 302 });
+});
+
+app.get("/digest/preview", async (c) => {
+	// Renders the exact email HTML in the browser (session-gated) so the
+	// digest can be eyeballed without sending anything.
+	const session = await verifySessionCookie(c.req.header("Cookie"), c.env.COOKIE_ENCRYPTION_KEY);
+	if (!session || !ALLOWED_LOGINS.has(session.login)) {
+		return c.redirect("/app/login", 302);
+	}
+	try {
+		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const cards = await client.listCardsOnBoard(BOARD_ALIASES[DEFAULT_BOARD]);
+		const { html } = renderDigest(cards, Date.now());
+		return c.html(html, 200, { "Cache-Control": "no-store" });
+	} catch (_e) {
+		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);
+	}
 });
 
 app.get("/app/logout", (c) => {

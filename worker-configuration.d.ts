@@ -40,6 +40,13 @@ declare namespace Cloudflare {
 		// Trello credentials — never leave the Worker.
 		TRELLO_KEY: string;
 		TRELLO_TOKEN: string;
+
+		// Daily email digest (v1.14.0). Key is a secret; addresses are vars in
+		// wrangler.jsonc. Optional so the Worker still deploys before the
+		// Resend account exists — the scheduler fails soft until it's set.
+		RESEND_API_KEY?: string;
+		DIGEST_FROM?: string;
+		DIGEST_TO?: string;
 	}
 }
 

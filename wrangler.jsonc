@@ -39,6 +39,17 @@
       "id": "6ddeb7f29d9b4cd898cb89a8ff6d3aca"
     }
   ],
+  // Daily digest cron. Cloudflare cron is UTC-only, so we fire at 02/03/04 UTC
+  // and the handler (src/digest/scheduler.ts) sends exactly once, at or after
+  // 04:00 Europe/Copenhagen, DST-proof — the extra firings are retry slots.
+  "triggers": {
+    "crons": ["0 2 * * *", "0 3 * * *", "0 4 * * *"]
+  },
+  // Digest addressing. RESEND_API_KEY is a secret (wrangler secret put).
+  "vars": {
+    "DIGEST_FROM": "Todays Actions <todo@bleeker-pedersen.dk>",
+    "DIGEST_TO": "dann@bleeker-pedersen.dk"
+  },
   // Import *.html as plain strings (src/dashboard/page.html). Additive; no effect on /mcp.
   "rules": [
     {

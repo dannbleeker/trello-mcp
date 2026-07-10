@@ -26,19 +26,24 @@
 
 import { Hono } from "hono";
 import { ALLOWED_LOGINS } from "../allowlist";
+import { sendDigestEmail } from "../digest/scheduler";
 import { TrelloClient, TrelloError } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD, resolveBoard } from "../trello/constants";
 import { GuardError } from "../trello/guards";
 import { create_card, move_card, set_due_complete } from "../trello/tools";
 import { verifySessionCookie } from "./session";
 
-/** The subset of Worker bindings the dashboard needs. Matches names in wrangler secrets. */
+/** The subset of Worker bindings the dashboard needs. Matches names in wrangler secrets/vars. */
 export type DashboardEnv = {
 	TRELLO_KEY: string;
 	TRELLO_TOKEN: string;
 	COOKIE_ENCRYPTION_KEY: string;
 	GITHUB_CLIENT_ID: string;
 	GITHUB_CLIENT_SECRET: string;
+	// Digest test-send (optional until the Resend account exists).
+	RESEND_API_KEY?: string;
+	DIGEST_FROM?: string;
+	DIGEST_TO?: string;
 };
 
 /** Card capture always lands in the Inbox; the client never chooses the destination. */
@@ -168,6 +173,21 @@ api.post("/api/done", async (c) => {
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
 	} catch (e) {
 		return errorResponse(c, e);
+	}
+});
+
+api.post("/api/digest/send", async (c) => {
+	// Owner-facing test send of the daily digest ("does the email look right,
+	// right now?"). Session + Origin gates apply via the /api/* middleware.
+	try {
+		await sendDigestEmail(c.env, Date.now());
+		return c.json({ ok: true, to: c.env.DIGEST_TO ?? "(default recipient)" });
+	} catch (e) {
+		if (e instanceof GuardError || e instanceof TrelloError) {
+			return errorResponse(c, e);
+		}
+		// Config/Resend errors carry no secrets and ARE the diagnosis — surface them.
+		return c.json({ error: e instanceof Error ? e.message : "Digest send failed." }, 502);
 	}
 });
 

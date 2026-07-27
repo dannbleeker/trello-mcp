@@ -20,6 +20,9 @@
  *                        for no-due-date cards where Butler's trigger never fires);
  *                        Trello 4xx keep their status class (404/422) instead of
  *                        masquerading as 502; extracted trello() client helper.
+ *   1.19.0 (2026-07-27) — ?board= goes through resolveBoardRef, so the board
+ *                         view can be pointed at a board in any workspace by
+ *                         name, ID or URL — same reference syntax as the tools.
  *   1.0.0 (2026-07-10) — Initial (v1.12.0 dashboard release):
  *                        GET /api/cards, POST /api/move, POST /api/done, POST /api/capture.
  */
@@ -28,7 +31,8 @@ import { Hono } from "hono";
 import { ALLOWED_LOGINS } from "../allowlist";
 import { noteManualSend, sendDigestEmail } from "../digest/scheduler";
 import { TrelloClient, TrelloError } from "../trello/client";
-import { BOARD_ALIASES, DEFAULT_BOARD, resolveBoard } from "../trello/constants";
+import { BOARD_ALIASES, DEFAULT_BOARD } from "../trello/constants";
+import { resolveBoardRef } from "../trello/resolve";
 import { GuardError } from "../trello/guards";
 import { create_card, list_snoozed_cards, move_card, set_due_complete, wake_card } from "../trello/tools";
 import { verifySessionCookie } from "./session";
@@ -132,7 +136,18 @@ api.get("/api/cards", async (c) => {
 	if (boardParam !== undefined && boardParam.trim().length === 0) {
 		return c.json({ error: "board must be a non-empty string." }, 400);
 	}
-	const boardId = resolveBoard(boardParam ?? BOARD_ALIASES[DEFAULT_BOARD]);
+	// resolveBoardRef (v1.19.0) accepts a board name / URL as well as an alias
+	// or ID, so the dashboard can be pointed at a board in any workspace with
+	// ?board=… — the same reference syntax the MCP tools take. One client for
+	// the whole request: the resolver's directory cache is per client, so
+	// building a second one below would throw the lookup away.
+	const client = trello(c.env);
+	let boardId: string;
+	try {
+		boardId = await resolveBoardRef(client, boardParam ?? BOARD_ALIASES[DEFAULT_BOARD]);
+	} catch (e) {
+		return errorResponse(c, e);
+	}
 
 	// ?customFields=1 adds each card's custom-field values inline (same request)
 	// plus the board's field definitions, so the page can render a value with
@@ -144,7 +159,6 @@ api.get("/api/cards", async (c) => {
 	);
 
 	try {
-		const client = trello(c.env);
 		const cards = await client.listCardsOnBoard(boardId, { customFieldItems: wantFields });
 		if (!wantFields) return c.json({ cards });
 		// A board without the Power-Up must not break the board view — fall back

@@ -37,6 +37,14 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.19.0 (2026-07-27) — Multi-workspace. Every `board` argument resolves via
+ *                         resolveBoardRef (alias / ID / URL / name, any
+ *                         workspace) and every `list` via resolveListRef, with
+ *                         an optional `board` hint. New list_workspaces tool;
+ *                         list_boards gains a `workspace` filter and every board
+ *                         summary carries the workspace it lives in.
+ *                         search_cards / search_cards_advanced /
+ *                         list_my_cards_assigned gained workspace scoping.
  *   1.18.0 (2026-07-27) — Second custom-fields pass. copy_card's COPY_KEEP_TOKENS
  *                         was missing `customFields`, so the guard REFUSED a
  *                         valid token and copies could never carry values over.
@@ -180,10 +188,8 @@
  */
 
 import {
-	BOARD_ALIASES,
 	DEFAULT_BOARD,
 	DEFAULT_TIMEZONE,
-	LIST_ALIASES,
 	MAX_RESULTS,
 	READ_ONLY_LISTS,
 	ROLLING_BIG_ROCKS_ID,
@@ -218,14 +224,39 @@ import {
 	assertWritable,
 	wipWarning,
 } from "./guards";
+import {
+	invalidateLists,
+	memberBoards,
+	memberWorkspaces,
+	resolveBoardRef,
+	resolveListRef,
+	resolveWorkspaceRef,
+	workspacesForBoards,
+} from "./resolve";
+import type { TrelloBoard, TrelloOrganization } from "./client";
 
 // ---- Result shapes ----
+
+/** The workspace a board sits in. null on a board with no workspace. v1.19.0. */
+interface WorkspaceRef {
+	id: string;
+	/** URL-safe short name, e.g. "frontlinetech". Accepted by every `workspace` argument. */
+	name: string;
+	/** Human name, e.g. "Frontline Tech". Also accepted by `workspace`. */
+	displayName: string;
+}
 
 interface BoardSummary {
 	id: string;
 	alias: string | null;
 	name: string;
 	url: string;
+	/**
+	 * Which workspace the board belongs to. Present since v1.19.0 — without it
+	 * two boards called "Roadmap" in two workspaces are indistinguishable in a
+	 * board listing.
+	 */
+	workspace: WorkspaceRef | null;
 }
 
 interface ListSummary {
@@ -275,13 +306,56 @@ export function summariseCard(card: TrelloCard): CardSummary {
 	};
 }
 
-function summariseBoard(board: { id: string; name: string; url: string }): BoardSummary {
+/**
+ * Board → BoardSummary. `workspaces` is the member's workspace list (from
+ * memberWorkspaces, cached); pass it to fill in the board's workspace, omit it
+ * when the caller has no cheap way to get one and null is acceptable.
+ */
+function summariseBoard(
+	board: { id: string; name: string; url: string; idOrganization?: string | null },
+	workspaces?: Map<string, TrelloOrganization>,
+): BoardSummary {
 	return {
 		id: board.id,
 		alias: boardAliasFor(board.id),
 		name: board.name,
 		url: board.url,
+		workspace: workspaceRefFor(board.idOrganization, workspaces),
 	};
+}
+
+/**
+ * Resolve a board's idOrganization against the member's workspaces. An ID we
+ * can't name (a workspace the member isn't a direct member of) still returns a
+ * ref carrying the ID — losing the link entirely would be worse than showing a
+ * raw ID.
+ */
+function workspaceRefFor(
+	idOrganization: string | null | undefined,
+	workspaces?: Map<string, TrelloOrganization>,
+): WorkspaceRef | null {
+	if (!idOrganization) return null;
+	const org = workspaces?.get(idOrganization);
+	return org
+		? { id: org.id, name: org.name, displayName: org.displayName }
+		: { id: idOrganization, name: idOrganization, displayName: idOrganization };
+}
+
+/**
+ * id→workspace map covering the workspaces `boards` live in — the member's own
+ * plus any foreign workspace a board was shared from. Never throws: a workspace
+ * read failure degrades a board summary to a bare ID rather than failing the
+ * whole tool, which would be a poor trade for a cosmetic field.
+ */
+async function workspaceMap(
+	client: TrelloClient,
+	boards: { idOrganization?: string | null }[],
+): Promise<Map<string, TrelloOrganization>> {
+	try {
+		return await workspacesForBoards(client, boards);
+	} catch {
+		return new Map();
+	}
 }
 
 function summariseList(list: TrelloList): ListSummary {
@@ -322,11 +396,104 @@ function applyCardFilters(
 // ============================================================================
 
 /** list_boards — every open board the authenticated Trello user belongs to. */
-export async function list_boards(client: TrelloClient): Promise<{ boards: BoardSummary[] }> {
-	const boards = await client.listMyBoards();
+export async function list_boards(
+	client: TrelloClient,
+	input: { workspace?: string } = {},
+): Promise<{ boards: BoardSummary[] }> {
+	// force on both: this is the discovery tool — it must show a board, or a
+	// whole workspace, added seconds ago, so it refills the resolver's cache
+	// rather than reading from it. Refreshing boards but not workspaces would
+	// show the new board tagged with a raw workspace ID. v1.19.0.
+	const [boards] = await Promise.all([
+		memberBoards(client, { force: true }),
+		memberWorkspaces(client, { force: true }).catch(() => []),
+	]);
+	const workspaces = await workspaceMap(client, boards);
+	const filterId = input.workspace
+		? (await resolveWorkspaceRef(client, input.workspace)).id
+		: null;
+	const scoped = filterId ? boards.filter((b) => b.idOrganization === filterId) : boards;
 	return {
-		boards: boards.filter((b) => !b.closed).map(summariseBoard),
+		boards: scoped.map((b) => summariseBoard(b, workspaces)),
 	};
+}
+
+/**
+ * list_workspaces — every Trello workspace the account belongs to, each with
+ * the open boards it holds. Boards outside any workspace are grouped under a
+ * synthetic "(no workspace)" entry with a null id, so the listing accounts for
+ * every board the member can see.
+ *
+ * This is the entry point for a multi-workspace account: names shown here are
+ * accepted by every `workspace` argument (short name or display name). v1.19.0.
+ */
+export async function list_workspaces(client: TrelloClient): Promise<{
+	workspaces: {
+		id: string | null;
+		name: string | null;
+		displayName: string;
+		url: string | null;
+		boards: BoardSummary[];
+	}[];
+}> {
+	const [orgs, boards] = await Promise.all([
+		memberWorkspaces(client, { force: true }),
+		memberBoards(client, { force: true }),
+	]);
+	// Enriched: names for workspaces the member isn't in but has a shared board
+	// from — the account collects those over the years, and listing them as raw
+	// IDs would defeat the point of the tool.
+	const byId = await workspaceMap(client, boards);
+
+	const grouped = new Map<string, TrelloBoard[]>();
+	for (const board of boards) {
+		const key = board.idOrganization ?? "";
+		const bucket = grouped.get(key);
+		if (bucket) bucket.push(board);
+		else grouped.set(key, [board]);
+	}
+
+	const rows = orgs.map((org) => ({
+		id: org.id,
+		name: org.name,
+		displayName: org.displayName,
+		url: org.url,
+		boards: (grouped.get(org.id) ?? []).map((b) => summariseBoard(b, byId)),
+	}));
+
+	// Workspaces the member can see boards in but isn't a member of, plus the
+	// personal (no-workspace) bucket. Both would otherwise vanish from the view.
+	const memberOf = new Set(orgs.map((o) => o.id));
+	for (const [key, bucket] of grouped) {
+		if (key === "" || memberOf.has(key)) continue;
+		const org = byId.get(key);
+		rows.push({
+			id: key,
+			name: org?.name ?? key,
+			displayName: org?.displayName ?? key,
+			url: org?.url ?? "",
+			boards: bucket.map((b) => summariseBoard(b, byId)),
+		});
+	}
+
+	const personal = grouped.get("") ?? [];
+	const out: {
+		id: string | null;
+		name: string | null;
+		displayName: string;
+		url: string | null;
+		boards: BoardSummary[];
+	}[] = rows;
+	if (personal.length) {
+		out.push({
+			id: null,
+			name: null,
+			displayName: "(no workspace)",
+			url: null,
+			boards: personal.map((b) => summariseBoard(b, byId)),
+		});
+	}
+	return { workspaces: out };
 }
 
 /** list_lists — lists on a board. */
@@ -334,13 +501,13 @@ export async function list_lists(
 	client: TrelloClient,
 	input: { board?: string },
 ): Promise<{ board: BoardSummary; lists: ListSummary[] }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, lists] = await Promise.all([
 		client.getBoard(boardId),
 		client.listListsOnBoard(boardId),
 	]);
 	return {
-		board: summariseBoard(board),
+		board: summariseBoard(board, await workspaceMap(client, [board])),
 		lists: lists.filter((l) => !l.closed).map(summariseList),
 	};
 }
@@ -369,11 +536,11 @@ export async function list_cards(
 	// cost is the definition lookup (memoised per board on the client).
 	const withValues = { customFieldItems: input.customFields };
 	if (input.list) {
-		const listId = resolveList(input.list);
+		const listId = await resolveListRef(client, input.list, { board: input.board });
 		scope.listId = listId;
 		raw = await client.listCardsOnList(listId, withValues);
 	} else {
-		const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+		const boardId = await resolveBoardRef(client, input.board);
 		scope.boardId = boardId;
 		raw = await client.listCardsOnBoard(boardId, withValues);
 	}
@@ -407,13 +574,23 @@ export async function get_card(
 	return { card: detail };
 }
 
-/** search_cards — fuzzy name match across a board (or all boards if board omitted). */
+/**
+ * search_cards — fuzzy name match across a board (or all boards if board
+ * omitted). `workspace` narrows an omitted-board search to one workspace,
+ * which is what keeps the result set readable once the account has several.
+ */
 export async function search_cards(
 	client: TrelloClient,
-	input: { query: string; board?: string; customFields?: boolean },
+	input: { query: string; board?: string; workspace?: string; customFields?: boolean },
 ): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
-	const boardId = input.board ? resolveBoard(input.board) : undefined;
-	const results = await client.searchCards(input.query, boardId);
+	const boardId = input.board
+		? await resolveBoardRef(client, input.board, { workspace: input.workspace })
+		: undefined;
+	const orgId =
+		!boardId && input.workspace
+			? (await resolveWorkspaceRef(client, input.workspace)).id
+			: undefined;
+	const results = await client.searchCards(input.query, boardId, orgId);
 	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
 	// Trello's /search can't return custom-field values inline, so annotating
 	// costs one board scan per distinct board in the hits — bounded by boards,
@@ -457,13 +634,14 @@ export async function create_card(
 		due?: string;
 		labels?: string[];
 		customFields?: { field: string; value: CustomFieldValue }[];
+		board?: string;
 	},
 ): Promise<{
 	card: CardSummary;
 	warning?: string;
 	customFields?: { field: string; ok: boolean; error?: string }[];
 }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertCanWriteTo(listId);
 
 	const card = await client.createCard({
@@ -511,9 +689,9 @@ export async function create_card(
 /** move_card — move a card to a different list. Guards source AND destination + WIP warning. */
 export async function move_card(
 	client: TrelloClient,
-	input: { cardId: string; list: string },
+	input: { cardId: string; list: string; board?: string },
 ): Promise<{ card: CardSummary; warning?: string }> {
-	const destListId = resolveList(input.list);
+	const destListId = await resolveListRef(client, input.list, { board: input.board });
 	assertCanWriteTo(destListId);
 
 	const sourceCard = await client.getCard(input.cardId);
@@ -725,9 +903,11 @@ export async function list_cards_due(
 	}
 	let raw: TrelloCard[];
 	if (input.list) {
-		raw = await client.listCardsOnList(resolveList(input.list));
+		raw = await client.listCardsOnList(
+			await resolveListRef(client, input.list, { board: input.board }),
+		);
 	} else {
-		const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+		const boardId = await resolveBoardRef(client, input.board);
 		raw = await client.listCardsOnBoard(boardId);
 	}
 
@@ -778,13 +958,14 @@ export async function list_cards_by_list(
 		label?: string;
 		staleDays?: number;
 		customFields?: boolean;
+		board?: string;
 	},
 ): Promise<{
 	listId: string;
 	cards: (CardSummaryWithFields & { snoozed: boolean; wakeUp: string | null })[];
 	truncated: boolean;
 }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	const raw = await client.listCardsOnList(listId, { customFieldItems: input.customFields });
 	let filtered = raw.filter((c) => !c.closed);
 
@@ -827,12 +1008,26 @@ export async function list_cards_by_list(
  */
 export async function search_cards_advanced(
 	client: TrelloClient,
-	input: { query: string; boards?: string[]; limit?: number; customFields?: boolean },
+	input: {
+		query: string;
+		boards?: string[];
+		workspaces?: string[];
+		limit?: number;
+		customFields?: boolean;
+	},
 ): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
-	const boardIds = input.boards?.map((b) => resolveBoard(b));
+	const boardIds = input.boards
+		? await Promise.all(input.boards.map((b) => resolveBoardRef(client, b)))
+		: undefined;
+	const orgIds = input.workspaces
+		? (await Promise.all(input.workspaces.map((w) => resolveWorkspaceRef(client, w)))).map(
+				(w) => w.id,
+			)
+		: undefined;
 	const results = await client.searchCardsAdvanced({
 		query: input.query,
 		boardIds,
+		orgIds,
 		cardsLimit: input.limit,
 	});
 	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
@@ -861,13 +1056,13 @@ export async function list_labels(
 	client: TrelloClient,
 	input: { board?: string },
 ): Promise<{ board: BoardSummary; labels: { id: string; name: string; color: string }[] }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, labels] = await Promise.all([
 		client.getBoard(boardId),
 		client.listLabelsOnBoard(boardId),
 	]);
 	return {
-		board: summariseBoard(board),
+		board: summariseBoard(board, await workspaceMap(client, [board])),
 		labels: labels.map((lb) => ({ id: lb.id, name: lb.name, color: lb.color })),
 	};
 }
@@ -949,11 +1144,11 @@ export async function snooze_read(
 	let raw: TrelloCard[];
 	const scope: { listId?: string; boardId?: string } = {};
 	if (input.list) {
-		const listId = resolveList(input.list);
+		const listId = await resolveListRef(client, input.list, { board: input.board });
 		scope.listId = listId;
 		raw = await client.listCardsOnList(listId);
 	} else {
-		const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+		const boardId = await resolveBoardRef(client, input.board);
 		scope.boardId = boardId;
 		raw = await client.listCardsOnBoard(boardId);
 	}
@@ -1044,7 +1239,7 @@ export async function create_label(
 	client: TrelloClient,
 	input: { board?: string; name: string; color?: string | null },
 ): Promise<{ label: { id: string; name: string; color: string } }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const color = input.color ?? null;
 	if (color !== null && color !== "" && !TRELLO_LABEL_COLORS.has(color)) {
 		throw new GuardError(
@@ -1064,7 +1259,7 @@ export async function delete_label(
 	client: TrelloClient,
 	input: { board?: string; label: string },
 ): Promise<{ deleted: { id: string; name: string; color: string } }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const resolved = await resolveLabel(client, boardId, input.label);
 	await client.deleteLabel(resolved.id);
 	return { deleted: resolved };
@@ -1088,7 +1283,13 @@ export async function remove_checklist_item(
  */
 export async function convert_checklist_item_to_card(
 	client: TrelloClient,
-	input: { cardId: string; checklistId: string; itemId: string; targetList?: string },
+	input: {
+		cardId: string;
+		checklistId: string;
+		itemId: string;
+		targetList?: string;
+		board?: string;
+	},
 ): Promise<{ card: CardSummary }> {
 	const sourceCard = await assertCardWritable(client, input.cardId);
 
@@ -1107,7 +1308,7 @@ export async function convert_checklist_item_to_card(
 	);
 
 	if (input.targetList) {
-		const targetId = resolveList(input.targetList);
+		const targetId = await resolveListRef(client, input.targetList, { board: input.board });
 		assertCanWriteTo(targetId);
 		if (targetId !== newCard.idList) {
 			newCard = await client.moveCard(newCard.id, targetId);
@@ -1193,7 +1394,7 @@ export async function batch_add_label(
  */
 export async function batch_move_cards(
 	client: TrelloClient,
-	input: { cardIds: string[]; targetList: string },
+	input: { cardIds: string[]; targetList: string; board?: string },
 ): Promise<{
 	moved: number;
 	skipped: { cardId: string; reason: string }[];
@@ -1206,7 +1407,7 @@ export async function batch_move_cards(
 		throw new GuardError(`Batch size capped at ${BATCH_MAX}; got ${input.cardIds.length}.`);
 	}
 
-	const destListId = resolveList(input.targetList);
+	const destListId = await resolveListRef(client, input.targetList, { board: input.board });
 	assertCanWriteTo(destListId);
 
 	const skipped: { cardId: string; reason: string }[] = [];
@@ -1245,12 +1446,12 @@ export async function list_board_members(
 	client: TrelloClient,
 	input: { board?: string },
 ): Promise<{ board: BoardSummary; members: TrelloMember[] }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, members] = await Promise.all([
 		client.getBoard(boardId),
 		client.listBoardMembers(boardId),
 	]);
-	return { board: summariseBoard(board), members };
+	return { board: summariseBoard(board, await workspaceMap(client, [board])), members };
 }
 
 /** list_card_members — assignees on a single card. */
@@ -1289,18 +1490,28 @@ export async function remove_member_from_card(
 }
 
 /**
- * list_my_cards_assigned — cross-board "all cards assigned to me", optionally
- * filtered by board. Useful for daily kickoff across Dann to-do + Zoo.
+ * list_my_cards_assigned — cross-board, cross-workspace "all cards assigned to
+ * me", optionally narrowed to one board or one workspace. Trello's
+ * /members/me/cards is already account-wide, so a new workspace shows up here
+ * with no configuration; `workspace` is how you get back to a single one.
  */
 export async function list_my_cards_assigned(
 	client: TrelloClient,
-	input: { board?: string },
+	input: { board?: string; workspace?: string },
 ): Promise<{ me: { id: string; username: string }; cards: CardSummary[]; truncated: boolean }> {
 	const [me, raw] = await Promise.all([client.getMe(), client.listMyAssignedCards()]);
 	let cards = raw.filter((c) => !c.closed);
 	if (input.board) {
-		const boardId = resolveBoard(input.board);
+		const boardId = await resolveBoardRef(client, input.board, { workspace: input.workspace });
 		cards = cards.filter((c) => c.idBoard === boardId);
+	} else if (input.workspace) {
+		const workspace = await resolveWorkspaceRef(client, input.workspace);
+		const inWorkspace = new Set(
+			(await memberBoards(client))
+				.filter((b) => b.idOrganization === workspace.id)
+				.map((b) => b.id),
+		);
+		cards = cards.filter((c) => inWorkspace.has(c.idBoard));
 	}
 	const totalMatching = cards.length;
 	const slice = cards.slice(0, MAX_RESULTS);
@@ -1382,6 +1593,7 @@ export async function copy_card(
 		newName?: string;
 		keepFromSource?: string;
 		position?: "top" | "bottom" | number;
+		board?: string;
 	},
 ): Promise<{ card: CardSummary; warning?: string }> {
 	// Validate keepFromSource tokens early — Trello silently ignores bad ones.
@@ -1396,7 +1608,7 @@ export async function copy_card(
 		}
 	}
 
-	const destListId = resolveList(input.targetList);
+	const destListId = await resolveListRef(client, input.targetList, { board: input.board });
 	assertCanWriteTo(destListId);
 	// Guard the SOURCE too — copying out of Butler/Repeater Cards would replicate automation rows.
 	await assertCardWritable(client, input.cardId);
@@ -1501,7 +1713,7 @@ export async function weekly_review_pack(
 	big_rocks: { count: number };
 	snoozed: { count: number };
 }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	// v1.9.0 fix: the whole composite is dann-to-do-shaped — its list aliases
 	// (inbox, waiting, @computer, could-personal, rolling-big-rocks, etc.)
 	// point at IDs on that specific board. Running it against `zoo` would
@@ -1580,7 +1792,7 @@ export async function weekly_review_pack(
 
 	return {
 		asOf: new Date(now).toISOString(),
-		board: summariseBoard(board),
+		board: summariseBoard(board, await workspaceMap(client, [board])),
 		inbox: { count: inboxCards.length, sample: await present(inboxCards.slice(0, cap)) },
 		overdue: { count: overdueCards.length, cards: await present(overdueCards.slice(0, cap)) },
 		due_today: { count: dueTodayCards.length, cards: await present(dueTodayCards.slice(0, cap)) },
@@ -1608,23 +1820,25 @@ export async function create_list(
 	client: TrelloClient,
 	input: { board?: string; name: string; position?: "top" | "bottom" | number },
 ): Promise<{ list: ListSummary; boardId: string }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const list = await client.createList({
 		boardId,
 		name: input.name,
 		pos: input.position,
 	});
+	invalidateLists(client, boardId);
 	return { list: summariseList(list), boardId };
 }
 
 /** rename_list — change a list's name. */
 export async function rename_list(
 	client: TrelloClient,
-	input: { list: string; name: string },
+	input: { list: string; name: string; board?: string },
 ): Promise<{ list: ListSummary }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertWritable(listId);
 	const updated = await client.updateList(listId, { name: input.name });
+	invalidateLists(client, updated.idBoard);
 	return { list: summariseList(updated) };
 }
 
@@ -1635,9 +1849,9 @@ export async function rename_list(
  */
 export async function archive_list(
 	client: TrelloClient,
-	input: { list: string; closed?: boolean },
+	input: { list: string; closed?: boolean; board?: string },
 ): Promise<{ list: ListSummary }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertWritable(listId);
 	assertNotReadOnly(listId, "source");
 	const updated = await client.updateList(listId, { closed: input.closed ?? true });
@@ -1651,20 +1865,32 @@ export async function archive_list(
  */
 export async function move_list(
 	client: TrelloClient,
-	input: { list: string; position?: "top" | "bottom" | number; targetBoard?: string },
+	input: {
+		list: string;
+		position?: "top" | "bottom" | number;
+		targetBoard?: string;
+		board?: string;
+		workspace?: string;
+	},
 ): Promise<{ list: ListSummary }> {
 	if (input.position === undefined && input.targetBoard === undefined) {
 		throw new GuardError("Pass at least one of `position` or `targetBoard`.");
 	}
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertWritable(listId);
 	// Rolling Big Rocks is curated — reordering it or moving it off the board
 	// would destroy Dann's ranking. Reject.
 	assertNotReadOnly(listId, "source");
+	// A cross-workspace move is a normal Trello move as far as REST is concerned
+	// — the target board just happens to live under a different organization.
+	const targetBoardId = input.targetBoard
+		? await resolveBoardRef(client, input.targetBoard, { workspace: input.workspace })
+		: undefined;
 	const updated = await client.updateList(listId, {
 		pos: input.position,
-		idBoard: input.targetBoard ? resolveBoard(input.targetBoard) : undefined,
+		idBoard: targetBoardId,
 	});
+	invalidateLists(client, updated.idBoard);
 	return { list: summariseList(updated) };
 }
 
@@ -1675,10 +1901,10 @@ export async function move_list(
  */
 export async function move_all_cards(
 	client: TrelloClient,
-	input: { sourceList: string; targetList: string },
+	input: { sourceList: string; targetList: string; board?: string },
 ): Promise<{ ok: true; sourceListId: string; targetListId: string }> {
-	const sourceListId = resolveList(input.sourceList);
-	const targetListId = resolveList(input.targetList);
+	const sourceListId = await resolveListRef(client, input.sourceList, { board: input.board });
+	const targetListId = await resolveListRef(client, input.targetList, { board: input.board });
 	assertWritable(sourceListId);
 	assertNotReadOnly(sourceListId, "source");
 	assertCanWriteTo(targetListId);
@@ -1695,9 +1921,9 @@ export async function move_all_cards(
 /** archive_all_cards — bulk-archive every open card on a list. */
 export async function archive_all_cards(
 	client: TrelloClient,
-	input: { list: string },
+	input: { list: string; board?: string },
 ): Promise<{ ok: true; listId: string }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertWritable(listId);
 	// One call empties the whole list — refuse for Rolling Big Rocks.
 	assertNotReadOnly(listId, "source");
@@ -1864,7 +2090,7 @@ export async function update_label(
 			`Unknown color "${input.color}". Use one of: ${[...TRELLO_LABEL_COLORS].join(", ")}, or null for no color.`,
 		);
 	}
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const resolved = await resolveLabel(client, boardId, input.label);
 	const updated = await client.updateLabel(resolved.id, {
 		name: input.name,
@@ -1888,9 +2114,9 @@ export async function subscribe_card(
 /** subscribe_list — watch / unwatch every card on a list (via the list's own watch flag). */
 export async function subscribe_list(
 	client: TrelloClient,
-	input: { list: string; subscribed: boolean },
+	input: { list: string; subscribed: boolean; board?: string },
 ): Promise<{ list: ListSummary; subscribed: boolean }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	assertWritable(listId);
 	const updated = await client.setListSubscribed(listId, input.subscribed);
 	return { list: summariseList(updated), subscribed: updated.subscribed ?? input.subscribed };
@@ -2097,12 +2323,12 @@ export async function mark_card_notifications_read(
 /** list_list_actions — actions on a single list. Useful for "what happened on @waiting". */
 export async function list_list_actions(
 	client: TrelloClient,
-	input: { list: string; filter?: string; limit?: number },
+	input: { list: string; filter?: string; limit?: number; board?: string },
 ): Promise<{
 	listId: string;
 	actions: { id: string; type: string; date: string; author: string | null; data: Record<string, unknown> }[];
 }> {
-	const listId = resolveList(input.list);
+	const listId = await resolveListRef(client, input.list, { board: input.board });
 	const actions = await client.listListActions(
 		listId,
 		input.filter && input.filter.length > 0 ? input.filter : "all",
@@ -2169,13 +2395,13 @@ export async function list_board_memberships(
 		member: { id: string; fullName: string; username: string } | null;
 	}[];
 }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, memberships] = await Promise.all([
 		client.getBoard(boardId),
 		client.listBoardMemberships(boardId),
 	]);
 	return {
-		board: summariseBoard(board),
+		board: summariseBoard(board, await workspaceMap(client, [board])),
 		memberships: memberships.map((m) => ({
 			id: m.id,
 			memberId: m.idMember,
@@ -2217,7 +2443,7 @@ export async function get_label(
 	if (looksLikeId) {
 		return { label: await client.getLabel(input.label) };
 	}
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const resolved = await resolveLabel(client, boardId, input.label);
 	const full = await client.getLabel(resolved.id);
 	return { label: full };
@@ -2377,12 +2603,12 @@ export async function list_custom_fields(
 	board: BoardSummary;
 	customFields: TrelloCustomField[];
 }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, fields] = await Promise.all([
 		client.getBoard(boardId),
 		customFieldDefs(client, boardId),
 	]);
-	return { board: summariseBoard(board), customFields: fields };
+	return { board: summariseBoard(board, await workspaceMap(client, [board])), customFields: fields };
 }
 
 /**
@@ -2406,7 +2632,7 @@ export async function create_custom_field(
 			`Unknown custom-field type "${input.type}". Use one of: ${[...CUSTOM_FIELD_TYPES].join(", ")}.`,
 		);
 	}
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	// Surfaces "Power-Up not enabled" as an actionable error rather than the
 	// opaque Trello 4xx that createCustomField would otherwise throw.
 	await customFieldDefs(client, boardId);
@@ -2442,7 +2668,7 @@ export async function update_custom_field(
 	) {
 		throw new GuardError("Pass at least one of `name`, `pos`, or `displayCardFront`.");
 	}
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const field = await resolveCustomField(client, boardId, input.customFieldId);
 	const updated = await client.updateCustomField(field.id, {
 		name: input.name,
@@ -2462,7 +2688,7 @@ export async function delete_custom_field(
 	client: TrelloClient,
 	input: { customFieldId: string; board?: string; confirm?: boolean },
 ): Promise<{ ok: true; deleted: { id: string; name: string; type: string } }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const field = await resolveCustomField(client, boardId, input.customFieldId);
 	if (input.confirm !== true) {
 		throw new GuardError(
@@ -2485,7 +2711,7 @@ export async function add_custom_field_option(
 		pos?: "top" | "bottom" | number;
 	},
 ): Promise<{ option: { id: string; value: string; color?: string; pos: number } }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const field = await resolveCustomField(client, boardId, input.customFieldId);
 	if (field.type !== "list") {
 		throw new GuardError(
@@ -2515,7 +2741,7 @@ export async function delete_custom_field_option(
 	client: TrelloClient,
 	input: { customFieldId: string; optionId: string; board?: string },
 ): Promise<{ ok: true }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const field = await resolveCustomField(client, boardId, input.customFieldId);
 	if (field.type !== "list") {
 		throw new GuardError(
@@ -2564,7 +2790,7 @@ export async function rename_custom_field_option(
 	if (!input.newValue.trim()) {
 		throw new GuardError("`newValue` must be a non-empty label.");
 	}
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const field = await resolveCustomField(client, boardId, input.customFieldId);
 	if (field.type !== "list") {
 		throw new GuardError(
@@ -2999,7 +3225,7 @@ export async function list_board_plugins(
 	board: BoardSummary;
 	plugins: { id: string; idPlugin: string; alias: string | null }[];
 }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const [board, plugins] = await Promise.all([
 		client.getBoard(boardId),
 		client.listBoardPlugins(boardId),
@@ -3011,7 +3237,7 @@ export async function list_board_plugins(
 		Object.entries(PLUGIN_ALIASES).map(([alias, id]) => [id, alias]),
 	);
 	return {
-		board: summariseBoard(board),
+		board: summariseBoard(board, await workspaceMap(client, [board])),
 		plugins: plugins.map((p) => ({
 			id: p.id,
 			idPlugin: p.idPlugin,
@@ -3029,7 +3255,7 @@ export async function enable_board_plugin(
 	client: TrelloClient,
 	input: { board?: string; plugin: string },
 ): Promise<{ boardPlugin: { id: string; idBoard: string; idPlugin: string } }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const idPlugin = resolvePlugin(input.plugin);
 	const bp = await client.enableBoardPlugin(boardId, idPlugin);
 	return { boardPlugin: { id: bp.id, idBoard: bp.idBoard, idPlugin: bp.idPlugin } };
@@ -3043,7 +3269,7 @@ export async function disable_board_plugin(
 	client: TrelloClient,
 	input: { board?: string; boardPluginId: string },
 ): Promise<{ ok: true }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	await client.disableBoardPlugin(boardId, input.boardPluginId);
 	return { ok: true };
 }
@@ -3102,7 +3328,7 @@ export async function list_archived_cards(
 	client: TrelloClient,
 	input: { board?: string; label?: string; staleDays?: number },
 ): Promise<{ boardId: string; cards: CardSummary[]; truncated: boolean }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const raw = await client.listArchivedCards(boardId);
 	let out = raw;
 	if (input.label) {
@@ -3277,7 +3503,7 @@ export async function list_snoozed_cards(
 	input: { board?: string },
 	nowMs = Date.now(),
 ): Promise<{ snoozed: SnoozedCard[] }> {
-	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const boardId = await resolveBoardRef(client, input.board);
 	const archived = await client.listArchivedCardsWithPluginData(boardId);
 	const snoozed = archived
 		.flatMap((c): SnoozedCard[] => {

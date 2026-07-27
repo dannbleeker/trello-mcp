@@ -140,4 +140,64 @@ describe("TrelloClient URL + param construction", () => {
 		expect(new URL(url).searchParams.get("ids")).toBeNull();
 		expect(new URL(url).searchParams.get("read")).toBe("true");
 	});
+	// ---- v1.19.0: workspaces (Trello "organizations") ----
+
+	it("listMyOrganizations → GET /members/me/organizations with trimmed fields", async () => {
+		fetchSpy.mockResolvedValueOnce(ok([]));
+		await client.listMyOrganizations();
+		const [url] = lastCall();
+		const u = new URL(url);
+		expect(u.pathname).toBe("/1/members/me/organizations");
+		expect(u.searchParams.get("fields")).toBe("name,displayName,url");
+	});
+
+	it("getOrganization → GET /organizations/{idOrName}", async () => {
+		fetchSpy.mockResolvedValueOnce(ok({ id: "o1" }));
+		await client.getOrganization("techretail1");
+		expect(new URL(lastCall()[0]).pathname).toBe("/1/organizations/techretail1");
+	});
+
+	it("listOrganizationBoards → GET /organizations/{id}/boards, open only", async () => {
+		fetchSpy.mockResolvedValueOnce(ok([]));
+		await client.listOrganizationBoards("o1");
+		const u = new URL(lastCall()[0]);
+		expect(u.pathname).toBe("/1/organizations/o1/boards");
+		expect(u.searchParams.get("filter")).toBe("open");
+	});
+
+	// Board reads must request idOrganization — it's the only link from a board
+	// back to its workspace, and Trello omits it unless asked.
+	it("listMyBoards asks for idOrganization", async () => {
+		fetchSpy.mockResolvedValueOnce(ok([]));
+		await client.listMyBoards();
+		expect(new URL(lastCall()[0]).searchParams.get("fields")).toContain("idOrganization");
+	});
+
+	it("getBoard asks for idOrganization", async () => {
+		fetchSpy.mockResolvedValueOnce(ok({ id: "b1" }));
+		await client.getBoard("b1");
+		expect(new URL(lastCall()[0]).searchParams.get("fields")).toContain("idOrganization");
+	});
+
+	it("searchCards scopes by workspace via idOrganizations", async () => {
+		fetchSpy.mockResolvedValueOnce(ok({ cards: [] }));
+		await client.searchCards("retail", undefined, "org1");
+		const u = new URL(lastCall()[0]);
+		expect(u.searchParams.get("idOrganizations")).toBe("org1");
+		expect(u.searchParams.get("idBoards")).toBeNull();
+	});
+
+	it("searchCardsAdvanced joins multiple workspace ids", async () => {
+		fetchSpy.mockResolvedValueOnce(ok({ cards: [] }));
+		await client.searchCardsAdvanced({ query: "x", orgIds: ["o1", "o2"] });
+		expect(new URL(lastCall()[0]).searchParams.get("idOrganizations")).toBe("o1,o2");
+	});
+
+	it("searchCardsAdvanced omits both scope params when neither is given", async () => {
+		fetchSpy.mockResolvedValueOnce(ok({ cards: [] }));
+		await client.searchCardsAdvanced({ query: "x", boardIds: [], orgIds: [] });
+		const u = new URL(lastCall()[0]);
+		expect(u.searchParams.get("idOrganizations")).toBeNull();
+		expect(u.searchParams.get("idBoards")).toBeNull();
+	});
 });

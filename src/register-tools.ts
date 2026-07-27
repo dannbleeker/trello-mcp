@@ -11,6 +11,11 @@
  *              byte-identical to the pre-split code — only the file moved.
  *
  * Change log:
+ *   1.1.0 (2026-07-27) — v1.19.0 multi-workspace: list_workspaces registered,
+ *                        shared boardRef / boardHint / workspaceRef schemas
+ *                        replace the 26 hand-written "Board alias or ID"
+ *                        descriptions, and the list-taking tools gained a
+ *                        `board` hint for disambiguating a list name.
  *   1.0.0 (2026-07-10) — Extracted from src/index.ts (v1.16.0 housekeeping).
  */
 
@@ -85,6 +90,7 @@ import {
 	list_my_cards_assigned,
 	list_notifications,
 	list_snoozed_cards,
+	list_workspaces,
 	mark_all_notifications_read,
 	mark_card_notifications_read,
 	mark_notification_read,
@@ -161,6 +167,39 @@ const CUSTOM_FIELD_REF = z
 	.describe("Custom-field ID, or its name (case-insensitive) — see list_custom_fields.");
 
 /**
+ * Board / workspace / list reference schemas. Since v1.19.0 a `board` may be an
+ * alias, the board's *name*, a 24-char ID, or a trello.com/b/… URL, resolved
+ * live against every board the account can see — so a board in a workspace
+ * added after this Worker was deployed is reachable without a code change.
+ * `workspace` narrows the lookup (and, on cross-board tools, the result set)
+ * to one workspace, by short name, display name, or ID.
+ */
+const boardRef = (extra?: string) =>
+	z
+		.string()
+		.optional()
+		.describe(
+			`Board — alias, name, 24-char ID, or board URL. Any workspace.${extra ? ` ${extra}` : ""} Default: dann-to-do.`,
+		);
+
+/** A board used purely to disambiguate a list *name*. No default: omit it and the
+ * list name is resolved across every board the account can see. */
+const boardHint = z
+	.string()
+	.optional()
+	.describe(
+		"Board (alias, name, ID, or URL) that the list name belongs to. Only needed when the same list name exists on more than one board.",
+	);
+
+const workspaceRef = (extra?: string) =>
+	z
+		.string()
+		.optional()
+		.describe(
+			`Workspace — short name, display name, or ID (see list_workspaces).${extra ? ` ${extra}` : ""}`,
+		);
+
+/**
  * A typed custom-field value. `.strict()` so a two-key value ({ text, number })
  * is rejected outright — non-strict objects silently drop the extra key and
  * write the wrong one. Shared by set_card_custom_field,
@@ -224,24 +263,31 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 
 	server.tool(
 		"list_boards",
-		"List all open Trello boards the authenticated user belongs to. Returns id, alias (if known), name, url.",
+		"List all open Trello boards the authenticated user belongs to, across every workspace. Returns id, alias (if known), name, url and the workspace each board sits in. Pass `workspace` to list one workspace's boards only.",
+		{ workspace: workspaceRef("Limits the listing to this workspace.") },
+		guarded(login, async (i: { workspace?: string }) => list_boards(client, i)),
+	);
+
+	server.tool(
+		"list_workspaces",
+		"List every Trello workspace the account belongs to, each with its open boards. Start here on a multi-workspace account: the names returned are what `workspace` arguments accept, and boards outside any workspace appear under \"(no workspace)\".",
 		{},
-		guarded(login, async () => list_boards(client)),
+		guarded(login, async () => list_workspaces(client)),
 	);
 
 	server.tool(
 		"list_lists",
-		"List the lists on a board. `board` accepts an alias (e.g. \"dann-to-do\", \"zoo\") or a raw board ID. Defaults to dann-to-do.",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		"List the lists on a board. `board` accepts an alias (e.g. \"dann-to-do\", \"zoo\"), the board's name, a raw board ID, or a trello.com/b/… URL — in any workspace. Defaults to dann-to-do.",
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_lists(client, i)),
 	);
 
 	server.tool(
 		"list_cards",
-		"List cards on a list (if `list` is given) or on a board. Optional filters: `label` (by name), `staleDays` (only cards untouched for N+ days). `list`/`board` accept aliases or raw IDs.",
+		"List cards on a list (if `list` is given) or on a board. Optional filters: `label` (by name), `staleDays` (only cards untouched for N+ days). `list`/`board` accept aliases, names, or raw IDs — any workspace.",
 		{
 			list: z.string().optional().describe("List alias (e.g. \"inbox\", \"@computer\") or ID."),
-			board: z.string().optional().describe("Board alias or ID. Used only if `list` is omitted. Default: dann-to-do."),
+			board: boardRef("Used only if `list` is omitted."),
 			label: z.string().optional().describe("Filter to cards carrying this label name."),
 			staleDays: z.number().int().positive().optional().describe("Filter to cards untouched for at least this many days."),
 			customFields: z
@@ -272,13 +318,18 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Fuzzy search cards by name. Scoped to one board if `board` is given, otherwise searches all boards the user belongs to.",
 		{
 			query: z.string().min(1).describe("Search text. Trello matches loosely on card name."),
-			board: z.string().optional().describe("Board alias or ID to scope the search."),
+			board: z.string().optional().describe("Board — alias, name, 24-char ID, or board URL — to scope the search. Any workspace."),
+			workspace: workspaceRef("Scopes an all-boards search to one workspace."),
 			customFields: z
 				.boolean()
 				.optional()
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { query: string; board?: string; customFields?: boolean }) => search_cards(client, i)),
+		guarded(
+			login,
+			async (i: { query: string; board?: string; workspace?: string; customFields?: boolean }) =>
+				search_cards(client, i),
+		),
 	);
 
 	server.tool(
@@ -294,7 +345,8 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"create_card",
 		"Create a new card on a list. Refused if the list is Butler / Repeater Cards / Rolling Big Rocks. Emits a WIP-limit warning if the list name contains \"(WIP limit N)\" and the post-create count exceeds N.",
 		{
-			list: z.string().describe("Destination list alias or ID."),
+			list: z.string().describe("Destination list — alias, name, or ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			name: z.string().min(1).describe("Card title."),
 			desc: z.string().optional().describe("Card description (Markdown supported by Trello)."),
 			due: z.string().optional().describe("Due date in ISO 8601 (e.g. 2026-06-30T15:00:00Z)."),
@@ -315,6 +367,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			login,
 			async (i: {
 				list: string;
+				board?: string;
 				name: string;
 				desc?: string;
 				due?: string;
@@ -329,9 +382,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Move a card to a different list. Refused if source OR destination is Butler / Repeater Cards / Rolling Big Rocks. WIP warning emitted but not blocking.",
 		{
 			cardId: z.string().describe("Card to move."),
-			list: z.string().describe("Destination list alias or ID."),
+			list: z.string().describe("Destination list — alias, name, or ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 		},
-		guarded(login, async (i: { cardId: string; list: string }) => move_card(client, i)),
+		guarded(login, async (i: { cardId: string; list: string; board?: string }) =>
+			move_card(client, i),
+		),
 	);
 
 	server.tool(
@@ -475,7 +531,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			scope: z.enum(["today", "overdue", "next_seven_days"]).describe("Due-date filter."),
 			list: z.string().optional().describe("List alias or ID. Narrows scope to one list."),
 			label: z.string().optional().describe("Filter to this label name (case-insensitive)."),
-			board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+			board: boardRef(),
 		},
 		guarded(login, async (i: { scope: "today" | "overdue" | "next_seven_days"; list?: string; label?: string; board?: string }) =>
 			list_cards_due(client, i),
@@ -486,7 +542,8 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_cards_by_list",
 		"Read every card on one list with extra filters not exposed by list_cards: `excludeDueDates` keeps only cards without a due, `includeSnoozedOnly` keeps only cards whose dueReminder is set, `label` filters by label name, `staleDays` keeps cards untouched for N+ days.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			excludeDueDates: z.boolean().optional(),
 			includeSnoozedOnly: z.boolean().optional(),
 			label: z.string().optional(),
@@ -496,25 +553,48 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.optional()
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { list: string; excludeDueDates?: boolean; includeSnoozedOnly?: boolean; label?: string; staleDays?: number; customFields?: boolean }) =>
-			list_cards_by_list(client, i),
+		guarded(
+			login,
+			async (i: {
+				list: string;
+				board?: string;
+				excludeDueDates?: boolean;
+				includeSnoozedOnly?: boolean;
+				label?: string;
+				staleDays?: number;
+				customFields?: boolean;
+			}) => list_cards_by_list(client, i),
 		),
 	);
 
 	server.tool(
 		"search_cards_advanced",
-		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`; tunable `limit` up to 1000.",
+		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`, multi-workspace scope via `workspaces`; tunable `limit` up to 1000.",
 		{
 			query: z.string().min(1).describe("Search expression. Trello operators supported."),
-			boards: z.array(z.string()).optional().describe("Board aliases or IDs to scope the search."),
+			boards: z
+				.array(z.string())
+				.optional()
+				.describe("Boards to scope the search — each an alias, name, ID, or URL. Any workspace."),
+			workspaces: z
+				.array(z.string())
+				.optional()
+				.describe("Workspaces to scope the search — short name, display name, or ID. See list_workspaces."),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max cards to return (default 50, hard cap 1000)."),
 			customFields: z
 				.boolean()
 				.optional()
 				.describe("Attach each result's custom-field values. NOTE: this annotates results — Trello's search syntax has no operator for custom fields, so you cannot FILTER on them here."),
 		},
-		guarded(login, async (i: { query: string; boards?: string[]; limit?: number; customFields?: boolean }) =>
-			search_cards_advanced(client, i),
+		guarded(
+			login,
+			async (i: {
+				query: string;
+				boards?: string[];
+				workspaces?: string[];
+				limit?: number;
+				customFields?: boolean;
+			}) => search_cards_advanced(client, i),
 		),
 	);
 
@@ -531,7 +611,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_labels",
 		"All labels defined on a board (id, name, color).",
-		{ board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_labels(client, i)),
 	);
 
@@ -539,7 +619,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"create_label",
 		"Create a new label on a board. Color must be one of yellow/purple/blue/red/green/orange/black/sky/pink/lime, or null for no color.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+			board: boardRef(),
 			name: z.string().min(1).describe("Label name."),
 			color: z.union([z.string(), z.null()]).optional().describe("Trello palette token, or null for none."),
 		},
@@ -552,7 +632,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"delete_label",
 		"Delete a label board-wide. Destructive: every card that carries this label loses it. `label` accepts the label ID or name; `board` defaults to dann-to-do.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+			board: boardRef(),
 			label: z.string().describe("Label ID or name."),
 		},
 		guarded(login, async (i: { board?: string; label: string }) =>
@@ -580,10 +660,18 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			checklistId: z.string(),
 			itemId: z.string(),
-			targetList: z.string().optional().describe("List alias or ID to move the new card to. Optional."),
+			targetList: z.string().optional().describe("List — alias, name, or ID — to move the new card to. Optional."),
+			board: boardHint,
 		},
-		guarded(login, async (i: { cardId: string; checklistId: string; itemId: string; targetList?: string }) =>
-			convert_checklist_item_to_card(client, i),
+		guarded(
+			login,
+			async (i: {
+				cardId: string;
+				checklistId: string;
+				itemId: string;
+				targetList?: string;
+				board?: string;
+			}) => convert_checklist_item_to_card(client, i),
 		),
 	);
 
@@ -616,7 +704,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Cards whose `dueReminder` is set (non-null and not -1), sorted by computed wake-up time. NOTE: `dueReminder` is the minutes-before-due reminder offset, not a hide field — for actual Snooze Power-Up state (hidden cards with wake times) use list_snoozed_cards instead. Scope to one list or one board.",
 		{
 			list: z.string().optional().describe("List alias or ID. If given, board is ignored."),
-			board: z.string().optional().describe("Board alias or ID. Defaults to dann-to-do."),
+			board: boardRef(),
 			label: z.string().optional().describe("Filter to this label name."),
 		},
 		guarded(login, async (i: { list?: string; board?: string; label?: string }) =>
@@ -641,9 +729,10 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Move up to 50 cards to the same destination list. Guards both source (per card) and destination. Skipped cards are reported but the call still completes. WIP warning included if applicable.",
 		{
 			cardIds: z.array(z.string()).min(1).max(50),
-			targetList: z.string().describe("Destination list alias or ID."),
+			targetList: z.string().describe("Destination list — alias, name, or ID."),
+			board: boardHint,
 		},
-		guarded(login, async (i: { cardIds: string[]; targetList: string }) =>
+		guarded(login, async (i: { cardIds: string[]; targetList: string; board?: string }) =>
 			batch_move_cards(client, i),
 		),
 	);
@@ -669,7 +758,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_board_members",
 		"All members with access to a board (id, fullName, username, initials).",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_board_members(client, i)),
 	);
 
@@ -702,9 +791,14 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 
 	server.tool(
 		"list_my_cards_assigned",
-		"All open cards assigned to the authenticated user across every accessible board. Optional `board` filter narrows to a single board.",
-		{ board: z.string().optional().describe("Optional board alias or ID to narrow scope.") },
-		guarded(login, async (i: { board?: string }) => list_my_cards_assigned(client, i)),
+		"All open cards assigned to the authenticated user across every accessible board and workspace. `board` narrows to a single board; `workspace` narrows to one workspace.",
+		{
+			board: z.string().optional().describe("Board — alias, name, ID, or URL — to narrow to a single board."),
+			workspace: workspaceRef("Narrows to the boards in this workspace."),
+		},
+		guarded(login, async (i: { board?: string; workspace?: string }) =>
+			list_my_cards_assigned(client, i),
+		),
 	);
 
 	server.tool(
@@ -747,13 +841,22 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Duplicate a card to a target list. `keepFromSource` controls what to copy: comma-separated subset of attachments,checklists,comments,customFields,due,start,labels,members,stickers, or \"all\" (default). Name `customFields` EXPLICITLY if you want custom-field values carried over — Trello does not reliably include them under \"all\". Optional `newName` overrides the source name; `position` is top/bottom/numeric.",
 		{
 			cardId: z.string().describe("Source card to copy."),
-			targetList: z.string().describe("Destination list alias or ID."),
+			targetList: z.string().describe("Destination list — alias, name, or ID."),
+			board: boardHint,
 			newName: z.string().min(1).optional(),
 			keepFromSource: z.string().optional().describe("e.g. \"all\", \"all,customFields\", or \"checklists,labels,customFields\"."),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
-		guarded(login, async (i: { cardId: string; targetList: string; newName?: string; keepFromSource?: string; position?: "top" | "bottom" | number }) =>
-			copy_card(client, i),
+		guarded(
+			login,
+			async (i: {
+				cardId: string;
+				targetList: string;
+				board?: string;
+				newName?: string;
+				keepFromSource?: string;
+				position?: "top" | "bottom" | number;
+			}) => copy_card(client, i),
 		),
 	);
 
@@ -799,7 +902,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"weekly_review_pack",
 		"One-call GTD weekly-review snapshot: inbox sample, overdue, due-today, due-this-week, context-list counts (@computer/@home/@phone/@errands/@lene), waiting-list stale items, could-do horizon counts, snoozed count, big-rocks count. Defaults to dann-to-do.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			staleDays: z.number().int().positive().optional().describe("Waiting-list stale threshold. Default 7."),
 			maxPerBucket: z.number().int().positive().max(200).optional().describe("Max cards returned per bucket. Default 25."),
 			customFields: z
@@ -821,7 +924,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"create_list",
 		"Create a new list on a board. Position is \"top\", \"bottom\", or a non-negative number.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			name: z.string().min(1),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
@@ -834,32 +937,50 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"rename_list",
 		"Change a list's name.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			name: z.string().min(1),
 		},
-		guarded(login, async (i: { list: string; name: string }) => rename_list(client, i)),
+		guarded(login, async (i: { list: string; board?: string; name: string }) =>
+			rename_list(client, i),
+		),
 	);
 
 	server.tool(
 		"archive_list",
 		"Archive (default) or reopen a list. Pass `closed=false` to unarchive.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			closed: z.boolean().optional().describe("true (default) = archive, false = reopen."),
 		},
-		guarded(login, async (i: { list: string; closed?: boolean }) => archive_list(client, i)),
+		guarded(login, async (i: { list: string; board?: string; closed?: boolean }) =>
+			archive_list(client, i),
+		),
 	);
 
 	server.tool(
 		"move_list",
-		"Reposition a list (`position`) and/or move it to another board (`targetBoard`). At least one is required.",
+		"Reposition a list (`position`) and/or move it to another board (`targetBoard`). At least one is required. The target board may live in a different workspace — Trello moves the list and its cards across workspaces the same way.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
-			targetBoard: z.string().optional().describe("Board alias or ID to move the list (and its cards) to."),
+			targetBoard: z
+				.string()
+				.optional()
+				.describe("Board — alias, name, ID, or URL — to move the list (and its cards) to. Any workspace."),
+			board: boardHint,
+			workspace: workspaceRef("Disambiguates `targetBoard` by workspace."),
 		},
-		guarded(login, async (i: { list: string; position?: "top" | "bottom" | number; targetBoard?: string }) =>
-			move_list(client, i),
+		guarded(
+			login,
+			async (i: {
+				list: string;
+				position?: "top" | "bottom" | number;
+				targetBoard?: string;
+				board?: string;
+				workspace?: string;
+			}) => move_list(client, i),
 		),
 	);
 
@@ -867,10 +988,11 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"move_all_cards",
 		"Bulk-move every card from one list to another. Guards source AND destination.",
 		{
-			sourceList: z.string().describe("List alias or ID to drain."),
-			targetList: z.string().describe("List alias or ID to receive."),
+			sourceList: z.string().describe("List — alias, name, or ID — to drain."),
+			targetList: z.string().describe("List — alias, name, or ID — to receive."),
+			board: boardHint,
 		},
-		guarded(login, async (i: { sourceList: string; targetList: string }) =>
+		guarded(login, async (i: { sourceList: string; targetList: string; board?: string }) =>
 			move_all_cards(client, i),
 		),
 	);
@@ -878,8 +1000,8 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"archive_all_cards",
 		"Bulk-archive every open card on a list.",
-		{ list: z.string().describe("List alias or ID.") },
-		guarded(login, async (i: { list: string }) => archive_all_cards(client, i)),
+		{ list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."), board: boardHint },
+		guarded(login, async (i: { list: string; board?: string }) => archive_all_cards(client, i)),
 	);
 
 	server.tool(
@@ -947,7 +1069,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"update_label",
 		"Rename and/or recolor a label. `label` accepts ID or name (resolved on the board); at least one of name/color must be passed. Color: palette token or null to clear.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			label: z.string().describe("Label ID or name."),
 			name: z.string().min(1).optional(),
 			color: z.union([z.string(), z.null()]).optional(),
@@ -973,10 +1095,11 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"subscribe_list",
 		"Watch (subscribe=true) or unwatch (false) a list. Activity on any card in the list will produce notifications for you.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			subscribed: z.boolean(),
 		},
-		guarded(login, async (i: { list: string; subscribed: boolean }) =>
+		guarded(login, async (i: { list: string; board?: string; subscribed: boolean }) =>
 			subscribe_list(client, i),
 		),
 	);
@@ -1103,11 +1226,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_list_actions",
 		"Actions on a single list (e.g. \"what happened on @waiting this week\"). `filter` is a comma-separated Trello action-type filter; default \"all\". Newest-first.",
 		{
-			list: z.string().describe("List alias or ID."),
+			list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."),
+			board: boardHint,
 			filter: z.string().optional(),
 			limit: z.number().int().min(1).max(1000).optional(),
 		},
-		guarded(login, async (i: { list: string; filter?: string; limit?: number }) =>
+		guarded(login, async (i: { list: string; board?: string; filter?: string; limit?: number }) =>
 			list_list_actions(client, i),
 		),
 	);
@@ -1127,7 +1251,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_board_memberships",
 		"Board memberships with role data (admin / normal / observer / virtual) plus confirmation + deactivation state. Richer than list_board_members.",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_board_memberships(client, i)),
 	);
 
@@ -1148,7 +1272,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Fetch one label directly. `label` accepts a raw label ID or a name (resolved on `board`, default dann-to-do).",
 		{
 			label: z.string().describe("Label ID or name."),
-			board: z.string().optional().describe("Board alias or ID. Used only when `label` is a name. Default: dann-to-do."),
+			board: boardRef("Used only when `label` is a name."),
 		},
 		guarded(login, async (i: { label: string; board?: string }) => get_label(client, i)),
 	);
@@ -1191,7 +1315,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_custom_fields",
 		"Custom-field DEFINITIONS on a board (Power-Up). Errors with an actionable message if the Custom Fields Power-Up is not enabled on the board.",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_custom_fields(client, i)),
 	);
 
@@ -1199,7 +1323,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"create_custom_field",
 		"Create a new custom-field definition on a board. `type` is one of checkbox / date / list / number / text. `pos` accepts \"top\" / \"bottom\" / a number.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			name: z.string().min(1),
 			type: z.enum(["checkbox", "date", "list", "number", "text"]),
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
@@ -1217,7 +1341,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Rename / reposition / toggle display-on-card-front for a custom-field definition.",
 		{
 			customFieldId: CUSTOM_FIELD_REF,
-			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			board: boardRef("Used for the name lookup."),
 			name: z.string().min(1).optional(),
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 			displayCardFront: z.boolean().optional(),
@@ -1234,7 +1358,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Delete a custom-field definition. DESTRUCTIVE and irreversible: it also erases that field's value on every card on the board. Requires confirm: true.",
 		{
 			customFieldId: CUSTOM_FIELD_REF,
-			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			board: boardRef("Used for the name lookup."),
 			confirm: z
 				.boolean()
 				.optional()
@@ -1250,7 +1374,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Add an option to a LIST-type custom field. Refused if the field is not list-type.",
 		{
 			customFieldId: CUSTOM_FIELD_REF,
-			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			board: boardRef("Used for the name lookup."),
 			value: z.string().min(1).describe("Option label text."),
 			color: CUSTOM_FIELD_COLORS.optional().describe("Trello palette token."),
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
@@ -1267,7 +1391,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"Remove an option from a LIST-type custom field. `optionId` accepts the option's ID or its label text.",
 		{
 			customFieldId: CUSTOM_FIELD_REF,
-			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			board: boardRef("Used for the name lookup."),
 			optionId: z.string().describe("Option ID, or the option's label text."),
 		},
 		guarded(login, async (i: { customFieldId: string; optionId: string; board?: string }) =>
@@ -1319,7 +1443,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			customFieldId: CUSTOM_FIELD_REF,
 			optionId: z.string().describe("Option ID, or its current label text."),
 			newValue: z.string().min(1).describe("The new label."),
-			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			board: boardRef("Used for the name lookup."),
 			color: CUSTOM_FIELD_COLORS.optional().describe("Override the colour; defaults to the old option's."),
 		},
 		guarded(
@@ -1332,7 +1456,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_board_plugins",
 		"Power-Ups currently enabled on a board. Each row includes `id` (needed for disable) and `idPlugin`, plus an `alias` when known.",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_board_plugins(client, i)),
 	);
 
@@ -1340,7 +1464,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"enable_board_plugin",
 		"Enable a Power-Up on a board. `plugin` accepts an alias (custom-fields / card-aging / voting / calendar) or a raw plugin ID.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			plugin: z.string().describe("Plugin alias (custom-fields, card-aging, voting, calendar) or ID."),
 		},
 		guarded(login, async (i: { board?: string; plugin: string }) =>
@@ -1352,7 +1476,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"disable_board_plugin",
 		"Disable a Power-Up on a board. `boardPluginId` is the `id` from list_board_plugins — NOT the plugin ID (Trello REST quirk).",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			boardPluginId: z.string().describe("The `id` from list_board_plugins (not the idPlugin)."),
 		},
 		guarded(login, async (i: { board?: string; boardPluginId: string }) =>
@@ -1374,7 +1498,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 	server.tool(
 		"list_snoozed_cards",
 		"Cards the Snooze Power-Up has hidden (archived) with a scheduled wake time. Returns name, home list, wakeUp (ISO), and overdueWake (wake time passed but Power-Up hasn't fired). Sorted soonest-first. Note: snooze_read is a different mechanism (dueReminder offsets) — this reads the actual Power-Up state.",
-		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
+		{ board: boardRef() },
 		guarded(login, async (i: { board?: string }) => list_snoozed_cards(client, i)),
 	);
 
@@ -1398,7 +1522,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_archived_cards",
 		"Closed (archived) cards on a board. Same CardSummary shape as list_cards, with optional label + staleDays filters.",
 		{
-			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
+			board: boardRef(),
 			label: z.string().optional(),
 			staleDays: z.number().int().positive().optional(),
 		},

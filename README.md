@@ -4,23 +4,26 @@ A small, opinionated [MCP](https://modelcontextprotocol.io/introduction) server 
 
 Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlying tools are generic — friendly aliases for boards / lists / labels live in [`src/trello/constants.ts`](src/trello/constants.ts) and are easy to extend for other workflows.
 
+Since v1.19.0 the connector is **multi-workspace**: every board in every workspace on the account is reachable by name, with no configuration — see [Workspaces](#workspaces).
+
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (101)
+## Tools (102)
 
 **Reads**
 
 | Tool | Purpose |
 |---|---|
-| `list_boards` | All open boards the authenticated Trello user belongs to |
-| `list_lists` | Lists on a board (alias or ID) |
+| `list_boards` | All open boards the user belongs to, in every workspace, each tagged with its workspace; optional `workspace` filter |
+| `list_workspaces` | Every workspace on the account with the boards it holds — the entry point on a multi-workspace account |
+| `list_lists` | Lists on a board (alias, name, ID, or board URL) |
 | `list_cards` | Cards on a list or board; includes `desc`; optional `label` / `staleDays` filters |
 | `list_cards_by_list` | Read one list with `excludeDueDates` / `includeSnoozedOnly` / `staleDays` filters |
 | `list_cards_due` | Filter by scope: `today` / `overdue` / `next_seven_days`; emits `snoozed` + `wakeUp` |
 | `list_archived_cards` | Closed (archived) cards on a board — same CardSummary shape as list_cards |
 | `get_card` | Full details for one card |
-| `search_cards` | Fuzzy name search, scoped or unscoped; includes `desc` |
-| `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, multi-board scope |
+| `search_cards` | Fuzzy name search, scoped by `board` or `workspace` (or unscoped); includes `desc` |
+| `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, multi-board **and multi-workspace** scope |
 | `list_checklist_items` | Checklists + items on a card |
 | `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
 | `get_attachment` | Fetch a single attachment with richer fields (previews[], edgeColor, pos) than list_attachments returns |
@@ -28,7 +31,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `get_label` | Fetch one label directly by ID or by name (with board scope) |
 | `list_board_members` | Everyone with access to a board (id, fullName, username, initials) |
 | `list_card_members` | Members assigned to one card |
-| `list_my_cards_assigned` | Cross-board "everything assigned to me"; optional board filter |
+| `list_my_cards_assigned` | Cross-board, cross-workspace "everything assigned to me"; optional `board` / `workspace` filter |
 | `read_comments` | Chronological comment thread on a card |
 | `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
 | `list_snoozed_cards` | Cards hidden by the Snooze Power-Up, with wake times (`overdueWake` flags a missed wake). Read via card pluginData |
@@ -118,6 +121,59 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `rename_custom_field_option` | Rename a list-type option without losing the cards using it (Trello has no update-option endpoint) |
 | `enable_board_plugin` | Enable a Power-Up on a board by alias (custom-fields, card-aging, voting, calendar) or ID |
 | `disable_board_plugin` | Disable a Power-Up (takes the boardPlugin id from list_board_plugins, NOT the idPlugin — Trello REST quirk) |
+
+## Workspaces
+
+The connector is workspace-agnostic. Trello scopes everything to the member behind the API token, so a workspace added to the account after the Worker was deployed is visible immediately — no redeploy, no code change.
+
+**Start with `list_workspaces`.** It returns every workspace on the account with the boards it holds, plus a `(no workspace)` bucket for personal boards and any workspace a board was merely *shared* from:
+
+```jsonc
+{
+  "workspaces": [
+    { "id": "…", "name": "techretail1", "displayName": "TECH Retail",
+      "boards": [ { "id": "…", "alias": null, "name": "TECH Retail Decision Board", "workspace": {…} } ] },
+    …
+  ]
+}
+```
+
+### Referring to a board
+
+Anywhere a tool takes `board`, it accepts — in this order:
+
+| Form | Example | Notes |
+|---|---|---|
+| Alias | `zoo` | From `BOARD_ALIASES` in `constants.ts`. No API call. |
+| 24-char ID | `6a6711c43b20b9486ab1c9f6` | Passed straight through. No API call. |
+| Board URL | `https://trello.com/b/xKeUkW8V/…` | Paste from the browser; the short link is used as the ID. |
+| **Board name** | `TECH Retail Decision Board` | Matched live against every board the account can see, in any workspace. |
+
+Name matching is case-insensitive and tiered: an exact match wins, then unique prefix, then unique substring — so `tech retail` finds the board above, while `Done` matching lists on three boards is **refused, not guessed**, with an error naming each candidate and its workspace. That refusal is the design: two workspaces will eventually both have a "Roadmap", and silently picking one is worse than asking.
+
+### Referring to a list
+
+`list` accepts an alias, a 24-char ID, or a **list name**. A name is resolved on `board` when you pass one, otherwise across every board the account can see. Since generic list names (`Backlog`, `Doing`, `Done`) collide across boards by nature, pass `board` alongside `list` on any multi-workspace board:
+
+```jsonc
+create_card({ board: "TECH Retail Decision Board", list: "Backlog", name: "Ship it" })
+```
+
+### Narrowing by workspace
+
+`workspace` takes a short name (`techretail1`), a display name (`TECH Retail`), or an ID. It appears on:
+
+- `list_boards` / `list_my_cards_assigned` — filters the result set
+- `search_cards` (`workspace`) and `search_cards_advanced` (`workspaces[]`) — passed to Trello as `idOrganizations`, so the search runs workspace-scoped server-side
+- any board lookup — disambiguates a board name that exists in two workspaces
+
+### What stays single-board
+
+Two surfaces are deliberately tied to the GTD board and are *not* workspace-generic: the **daily digest** and the **`weekly_review_pack`** tool. Both are shaped around `dann-to-do`'s specific lists (Inbox, @Contexts, Could-do horizons), and `weekly_review_pack` refuses another board outright rather than returning all-zero buckets. The **dashboard** defaults to the same board but accepts `?board=` with any of the reference forms above.
+
+### Caching
+
+Board / workspace / list directory reads are cached per client for 60 seconds, so name resolution costs at most one round trip per minute rather than one per call. `list_boards` and `list_workspaces` always bypass the cache — a board created seconds ago must show up in the tool you'd use to look for it.
 
 ## Safety guards
 
@@ -244,7 +300,11 @@ For local dev, copy `.dev.vars.example` to `.dev.vars` and fill in the values; t
 
 Settings → Connectors → Add custom connector. URL: `https://trello-mcp.<your-subdomain>.workers.dev/mcp`. Sign in with GitHub when prompted.
 
-## Adding a new board
+## Adding a new board or workspace
+
+**Nothing is required.** Since v1.19.0 a new board — in an existing workspace or a brand-new one — is reachable by name the moment Trello knows about it: `list_workspaces` shows it, and every `board` argument accepts its name, ID or URL. See [Workspaces](#workspaces).
+
+Adding an **alias** is still worth it for a board you touch constantly (it saves a name lookup and reads better in a prompt):
 
 1. In Trello: copy the board's 24-char ID from the URL or from a `list_boards` call.
 2. In `src/trello/constants.ts`: add an entry to `BOARD_ALIASES`.
@@ -274,9 +334,10 @@ src/
   trello/
     client.ts               — typed Trello REST client (retry on 429 + 5xx)
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
+    resolve.ts              — workspace / board / list reference resolution + directory cache
     guards.ts               — server-side safety guards
-    tools.ts                — 96 tool implementations (testable in plain Node)
-test/                       — vitest unit tests (107; no real Trello calls)
+    tools.ts                — 102 tool implementations (testable in plain Node)
+test/                       — vitest unit tests (265; no real Trello calls)
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

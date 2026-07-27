@@ -25,6 +25,7 @@
  */
 
 import { TrelloClient } from "../trello/client";
+import type { TrelloCustomField } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
 import { list_snoozed_cards } from "../trello/tools";
 import { renderDigest } from "./render";
@@ -93,7 +94,17 @@ export async function sendDigestEmail(env: DigestSendEnv, nowMs: number): Promis
 	}
 
 	const client = new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN);
-	const cards = await client.listCardsOnBoard(BOARD_ALIASES[DEFAULT_BOARD]);
+	const boardId = BOARD_ALIASES[DEFAULT_BOARD];
+	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+	// Custom-field definitions are best-effort for the same reason as snoozed
+	// cards below: the morning email must never die because a Power-Up read
+	// failed. Without them, cards simply render without custom-field badges.
+	let customFields: TrelloCustomField[] = [];
+	try {
+		customFields = await client.listCustomFields(boardId);
+	} catch (e) {
+		console.error("digest custom-fields fetch failed (badges omitted):", e instanceof Error ? e.message : e);
+	}
 	// Snoozed cards are best-effort: the morning email must never die because
 	// the Snooze Power-Up read failed — the section is simply omitted. v1.15.0.
 	let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
@@ -102,7 +113,7 @@ export async function sendDigestEmail(env: DigestSendEnv, nowMs: number): Promis
 	} catch (e) {
 		console.error("digest snoozed-cards fetch failed (section omitted):", e instanceof Error ? e.message : e);
 	}
-	const { html, subject } = renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed);
+	const { html, subject } = renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed, customFields);
 
 	const resp = await fetch("https://api.resend.com/emails", {
 		body: JSON.stringify({

@@ -86,6 +86,9 @@ body {
 .badge.bestseller { background:#1c2024; color:#fff; }
 .badge.invest { background:#2563eb; color:#fff; }
 .badge.clarify { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
+/* Custom-field values: deliberately quieter than the label badges — they are
+   data ABOUT the card, not a flag on it, so they must not outrank "overdue". */
+.badge.cfield { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
 .card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
 .btn {
   font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
@@ -185,6 +188,7 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   .snz-row .meta.overdue { color: #f2b8b5; }
   .badge.dueto { background: #e5e7eb; color: #15171a; }
   .badge.bestseller { background: #e5e7eb; color: #15171a; }
+  .badge.cfield { background: #23262b; color: #9aa3ad; border-color: #33373d; }
   #toast { background: #e5e7eb; color: #15171a; }
   .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
   .loading, .empty { color: #9aa3ad; }
@@ -222,6 +226,7 @@ const OVERVIEW = [
 ];
 
 let CARDS = [];
+let CUSTOM_FIELDS = [];    // board's custom-field definitions, by id (v1.18.0)
 let SNOOZED = null;        // null = not loaded yet; [] = loaded, none
 let SNOOZE_OPEN = false;
 let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
@@ -244,10 +249,43 @@ async function api(path, opts){
 // idList; normalise defensively so the rest of the dashboard is unchanged.
 let LAST_LOAD = 0;
 async function loadCards(){
-  const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID));
+  const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID) + "&customFields=1");
   let arr = Array.isArray(res) ? res : (res && Array.isArray(res.cards)) ? res.cards : [];
+  // Definitions arrive alongside the cards. A board with the Power-Up off (or
+  // no fields defined) yields [], and every custom-field branch below no-ops.
+  CUSTOM_FIELDS = (res && Array.isArray(res.customFields)) ? res.customFields : [];
   LAST_LOAD = Date.now();
   return arr.map(c => ({ ...c, idList: (c.listId != null ? c.listId : c.idList) }));
+}
+
+// Render a card's custom-field values as badges. Only fields that actually
+// have a value on this card appear — an empty field is noise on a board view.
+// Mirrors the tool layer: "true"/"false" and numbers arrive as strings, and a
+// list value is an option reference that has to be resolved to its label.
+function customFieldBadges(c){
+  if (!CUSTOM_FIELDS.length) return "";
+  const items = c.customFieldItems || [];
+  if (!items.length) return "";
+  const byId = {};
+  CUSTOM_FIELDS.forEach(f => { byId[f.id] = f; });
+  let h = "";
+  items.forEach(it => {
+    const f = byId[it.idCustomField];
+    if (!f) return;                       // definition deleted mid-flight
+    let v = null;
+    if (it.idValue){
+      const opt = (f.options || []).find(o => o.id === it.idValue);
+      v = opt && opt.value ? opt.value.text : null;
+    } else if (it.value){
+      if (typeof it.value.checked === "string") v = it.value.checked === "true" ? "yes" : "no";
+      else if (it.value.text) v = it.value.text;
+      else if (it.value.number) v = it.value.number;
+      else if (it.value.date) v = new Date(it.value.date).toLocaleDateString("en-GB", {day:"numeric",month:"short"});
+    }
+    if (v === null || v === undefined || v === "") return;
+    h += '<span class="badge cfield">' + esc(f.name) + ' · ' + esc(String(v)) + '</span>';
+  });
+  return h;
 }
 
 // toast(msg) or toast(msg, {label:"Undo", fn}) — the action variant stays up
@@ -297,6 +335,7 @@ function badgesHtml(c){
   if (hasLabel(c,"BESTSELLER")) h += '<span class="badge bestseller">BESTSELLER</span>';
   if (hasLabel(c,"DBP Invest")) h += '<span class="badge invest">DBP Invest</span>';
   if (hasLabel(c,"Please Clarify and Organize")) h += '<span class="badge clarify">clarify</span>';
+  h += customFieldBadges(c);
   return h ? '<div class="badges">'+h+'</div>' : "";
 }
 

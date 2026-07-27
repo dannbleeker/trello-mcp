@@ -4,6 +4,136 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] — 2026-07-27
+
+Second custom-fields pass, closing the gaps the v1.17.0 review left open. Two
+new tools (99 → 101), two real defects fixed, and custom-field values now
+appear everywhere cards are shown instead of only in `get_card`.
+
+### Fixed
+- **`copy_card` could not preserve custom-field values — and refused to try.**
+  `COPY_KEEP_TOKENS` omitted `customFields`, and because the guard validates
+  tokens *before* calling Trello (Trello silently ignores unrecognised ones),
+  passing it was rejected outright. Atlassian's own announcement — "Custom
+  Fields now required to be specified in keepFromSource when copying a card" —
+  is about exactly this parameter, so `all` is not a safe assumption. The token
+  is now accepted and both tool descriptions say to name it explicitly.
+- **Custom-field edits were invisible in `card_activity_log`.** The default
+  filter covered moves, due dates, labels, attachments, comments and
+  checklists, but not `updateCustomFieldItem` — so "when did Priority change to
+  High?" was unanswerable even though Trello records it.
+
+### Added
+- **`batch_set_card_custom_field`** — set the same field to the same value
+  across up to 50 cards. The win is the resolution work, not the writes: the
+  field is resolved and the value type-checked once per board rather than once
+  per card. Follows the `batch_add_label` shape (continues past per-card
+  failures, reports them in `skipped`).
+- **`rename_custom_field_option`** — Trello's Custom Fields API has GET / POST /
+  DELETE on options but no PUT, so an option's label is immutable, and the
+  obvious workaround (delete + re-add) silently clears the field on every card
+  pointing at the old option. This builds the rename from the primitives that do
+  exist, in the order that's safe if it dies halfway: add the new option →
+  re-point affected cards → delete the old one. If any card fails to move it
+  stops and leaves **both** options in place rather than destroying values.
+- **`create_card` accepts a `customFields` array.** Trello can't set custom
+  fields on `POST /cards`, so they're applied as follow-up calls and reported
+  per field. A failure does not fail the tool: the card already exists, and
+  reporting a hard error would invite a retry that creates a duplicate.
+- **`customFields: true` on every card-listing read** — `list_cards`,
+  `list_cards_by_list`, `search_cards`, `search_cards_advanced` and
+  `weekly_review_pack`, joining `get_card` from v1.17.0. Cost is bounded by the
+  number of boards touched, not cards: values ride along on the card fetch, and
+  definitions are memoised.
+- **Dashboard and digest render custom-field values as badges** when the board
+  has any — deliberately quieter than the label badges, since a custom field is
+  data *about* a card rather than a flag *on* it. Both surfaces degrade to
+  rendering nothing if the definitions can't be read, matching how the digest
+  already treats snoozed cards: the morning email must never die because a
+  Power-Up read failed.
+
+### Changed
+- **Custom-field definitions are memoised per board on the client.** v1.17.0
+  made every custom-field write resolve its definition first (to type-check the
+  value), which turned a bulk update into an extra GET per card. A `TrelloClient`
+  is built per MCP session / dashboard request, so the cache is naturally
+  short-lived and bounded; all five mutations invalidate it, so a stale
+  definition can never outlive its own change.
+- **`add_custom_field_option` and `delete_custom_field_option` take a `board`**
+  for name resolution, consistent with the other custom-field tools.
+
+### Known limitations
+- `search_cards_advanced` still cannot *filter* on custom-field values —
+  Trello's search syntax has no operator for them. `customFields: true`
+  annotates the results so the returned rows can be filtered, but it cannot
+  narrow the search itself.
+- The `customFields` token fix is based on Atlassian's published announcement;
+  it has not been verified against a live copy, because the board this server
+  targets currently has no custom fields defined to copy.
+
+## [1.17.0] — 2026-07-27
+
+Custom-fields pass. The eight custom-field tools worked, but they were the
+least ergonomic corner of the server: raw 24-char IDs everywhere, no type
+safety, and read output you had to join by hand. No new tools — still 99.
+
+### Fixed
+- **`updateCustomField` silently opted out of the retry loop** (`client.ts`) —
+  it hand-builds its URL so Trello's `display/cardFront` key keeps its literal
+  slash (`URLSearchParams` emits `%2F` and Trello drops the key), and it
+  hand-rolled `fetch()` to match. That skipped `retryableFetch`, so a 429 or a
+  transient 5xx during a field rename threw instead of backing off — the only
+  call in the client without that protection. It now passes the pre-built URL
+  to `retryableFetch` and keeps the slash.
+
+### Added
+- **Fields resolve by name, not just ID** — every custom-field tool accepts a
+  field name (case-insensitive) wherever it took a `customFieldId`, matching
+  how boards, lists and plugins already resolve. List-type options resolve by
+  their label too. Names are looked up on the tool's `board` param (default
+  board when omitted); `set_card_custom_field` infers the board from the card.
+  An ambiguous name is refused with the candidate IDs rather than guessed.
+- **`get_card({ customFields: true })`** — includes the card's custom-field
+  values, named and typed. Opt-in: the values ride along on the existing
+  request, but joining them to their definitions costs one extra call and
+  `get_card` is a hot path.
+
+### Changed
+- **`set_card_custom_field` validates the value against the field's type** —
+  sending `{ text }` to a number field previously produced an opaque Trello 400
+  or a silent no-op. It now refuses before spending the write, naming the key
+  that field actually wants. It also refuses a `listOptionId` belonging to a
+  different field; Trello accepts a foreign option ID and stores an
+  unresolvable reference.
+- **`list_card_custom_fields` joins against the board's definitions** — rows
+  now carry `name` and `type`, list-type values resolve to the option's
+  **label** rather than only an opaque `idValue`, and fields that have never
+  been set are returned with `value: null`. Trello omits unset fields entirely,
+  which made "unset" and "no such field" indistinguishable. Items whose
+  definition has since been deleted are dropped rather than surfaced with a
+  bogus name. `id` is now `string | null` (null for a never-set field).
+- **`delete_custom_field` requires `confirm: true`** — it erases the field's
+  value on every card on the board, the only cross-card destructive operation
+  in the server (there is still no hard delete for cards anywhere). The
+  refusal names the field; the success response reports what was removed.
+- **"Power-Up not enabled" is now an actionable error** — Trello returns `[]`
+  both when the Custom Fields Power-Up is off and when it's on with no fields
+  defined. The empty path is now disambiguated against `list_board_plugins`
+  and, when the Power-Up is off, the error names the `enable_board_plugin`
+  call that fixes it. Applies to `list_custom_fields` and `create_custom_field`.
+- **`add_custom_field_option` / `delete_custom_field_option` refuse non-list
+  fields** — previously passed straight through to Trello.
+- **`color` on `add_custom_field_option` is an enum** — Trello's palette is
+  fixed, so a bad token fails at the tool boundary instead of at Trello.
+- **`set_card_custom_field`'s `value` union is `.strict()`** — a two-key value
+  like `{ text, number }` is now rejected. Non-strict Zod objects silently
+  dropped the extra key and wrote whichever one matched first.
+
+### Known limitation
+- `search_cards_advanced` still cannot filter on custom-field values — Trello's
+  search syntax has no support for them, so it would need client-side filtering
+  after a fetch. Documented in the README rather than worked around.
+
 ## [1.16.1] — 2026-07-10
 
 Refactor + bug-hunt pass over the v1.15/v1.16 code (previous hunts covered

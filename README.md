@@ -6,7 +6,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (99)
+## Tools (101)
 
 **Reads**
 
@@ -44,8 +44,8 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `get_action_display` | Trello's pre-rendered human-readable version of an action |
 | `list_board_memberships` | Richer than `list_board_members` — adds memberType (admin/normal/observer/virtual) and state |
 | `get_member` | Look up any Trello member by ID or username |
-| `list_custom_fields` | Custom-field DEFINITIONS on a board (Power-Up-dependent) |
-| `list_card_custom_fields` | A card's current custom-field values |
+| `list_custom_fields` | Custom-field DEFINITIONS on a board (errors actionably if the Power-Up is off) |
+| `list_card_custom_fields` | A card's custom-field values, joined to their definitions (name + type, option labels resolved, unset fields as `null`) |
 | `list_board_plugins` | Power-Ups currently enabled on a board (id + idPlugin + alias) |
 | `get_plugin` | Plugin metadata (name, description, url) by alias or ID |
 | `batch_get` | Bundle up to 10 relative Trello paths into one request via `/batch` |
@@ -110,10 +110,12 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `mark_card_notifications_read` | Bulk-clear every notification associated with one card |
 | `create_custom_field` | Create a new custom-field definition on a board (Power-Up-dependent) |
 | `update_custom_field` | Rename / reposition / toggle display-on-card-front for a custom field |
-| `delete_custom_field` | Delete a custom-field definition (removes every card's value for it) |
+| `delete_custom_field` | Delete a custom-field definition — destructive, requires `confirm: true` (removes every card's value for it) |
 | `add_custom_field_option` | Add an option to a list-type custom field |
 | `delete_custom_field_option` | Remove an option from a list-type custom field |
-| `set_card_custom_field` | Set a custom-field value on a card (polymorphic: checkbox / date / number / text / list, or null to clear) |
+| `set_card_custom_field` | Set a custom-field value on a card (polymorphic: checkbox / date / number / text / list, or null to clear) — value is checked against the field's declared type |
+| `batch_set_card_custom_field` | Set the same custom field to the same value across many cards (resolves + type-checks once per board) |
+| `rename_custom_field_option` | Rename a list-type option without losing the cards using it (Trello has no update-option endpoint) |
 | `enable_board_plugin` | Enable a Power-Up on a board by alias (custom-fields, card-aging, voting, calendar) or ID |
 | `disable_board_plugin` | Disable a Power-Up (takes the boardPlugin id from list_board_plugins, NOT the idPlugin — Trello REST quirk) |
 
@@ -125,6 +127,44 @@ Enforced server-side before any Trello call — same rules for every tool, no pe
 - **Read-only lists** (Rolling Big Rocks) — `move_card` source OR destination refused. `create_card` to this list refused.
 - **WIP-limit warnings** — when a `move_card` or `create_card` puts a list with a `(WIP limit N)` suffix over its limit, the response includes a warning, but the call still succeeds (treats WIP as guidance, not enforcement).
 - **No hard delete** — the capability is not in the code. `archive_card` is the only destructive-feeling operation, and it's reversible from the Trello UI.
+- **`delete_custom_field` requires `confirm: true`** — deleting a field definition also erases its value on every card on the board, which is the one operation here that destroys data across many cards at once. Without the flag the call is refused, and the refusal names the field it would have deleted.
+- **Custom-field values are type-checked** — `set_card_custom_field` reads the field's declared type before writing and refuses a mismatched value (naming the key you should have used) rather than letting Trello 400 or silently no-op.
+
+## Custom fields
+
+Custom fields are a Power-Up, so a board needs it enabled first — `enable_board_plugin("custom-fields")`. If it isn't on, the read tools say so and tell you which call fixes it, rather than returning an empty list you'd have to interpret.
+
+Every custom-field tool takes a field by **name or ID**, the same way boards and lists already resolve, and list-type options resolve by their **label** as well as their ID:
+
+```jsonc
+// Both of these do the same thing.
+set_card_custom_field({ cardId, customFieldId: "Priority",                  value: { listOptionId: "High" } })
+set_card_custom_field({ cardId, customFieldId: "eeeeeeee…", value: { listOptionId: "1111aaaa…" } })
+```
+
+Names are looked up on the `board` param (default board when omitted); `set_card_custom_field` infers the board from the card. An ambiguous name is refused with the candidate IDs rather than guessed.
+
+Reads come back joined to their definitions — `name`, `type`, list values resolved to the option's label, and fields that have never been set included as `value: null` (Trello omits those entirely, which makes "unset" and "no such field" indistinguishable):
+
+```jsonc
+{ "id": "…", "idCustomField": "…", "name": "Priority", "type": "list",
+  "idValue": "2222bbbb…", "value": { "text": "Low" } }
+```
+
+`get_card`, `list_cards`, `list_cards_by_list`, `search_cards`, `search_cards_advanced` and `weekly_review_pack` all take `customFields: true` to include the same block. It's opt-in everywhere: values ride along on the card fetch, but joining them to their names costs a definition lookup, and these are hot paths. Definitions are memoised per board for the life of a request, so a batch operation pays for that lookup once, not once per card.
+
+The dashboard and the morning digest render custom-field values as badges automatically when the board has any — deliberately quieter than the label badges, since a custom field is data *about* a card rather than a flag *on* it.
+
+Two operations exist because Trello's API can't do them directly:
+
+- **`batch_set_card_custom_field`** — same field, same value, many cards. Resolves and type-checks once per board instead of once per card.
+- **`rename_custom_field_option`** — Trello has GET/POST/DELETE on options but no PUT, so an option's label is immutable and the obvious workaround (delete + re-add) silently clears the field on every card pointing at it. This adds the new option, re-points affected cards, then deletes the old one. If any card fails to move it stops and leaves *both* options in place rather than destroying values.
+
+`create_card` accepts a `customFields` array. Trello can't set them on the create call, so they're applied as follow-ups and reported per field — the card is still returned if one fails, because reporting a hard failure would invite a retry that creates a duplicate.
+
+Copying a card: name `customFields` explicitly in `keepFromSource`. Atlassian changed the semantics so that `all` is not a safe assumption for custom fields.
+
+One real limitation: **`search_cards_advanced` can't filter on custom-field values.** Trello's search syntax doesn't support them. `customFields: true` annotates the results so you can filter the returned rows, but it can't narrow the search itself.
 
 ## Access control
 

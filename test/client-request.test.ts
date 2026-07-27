@@ -120,3 +120,146 @@ describe("TrelloClient.request (via a public method that exercises the code path
 		expect(urlObj.searchParams.get("token")).toBe("test-token");
 	});
 });
+
+// updateCustomField is the one method that can't route through request() — it
+// hand-builds the URL so Trello's `display/cardFront` key keeps its literal
+// slash (URLSearchParams would emit %2F and Trello would drop the key). Until
+// v1.17.0 it hand-rolled fetch() too, and silently lost the retry loop that
+// every other call gets. These pin both halves: the slash survives, AND the
+// call still backs off on 429 / transient 5xx.
+describe("TrelloClient.updateCustomField", () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+	const client = new TrelloClient("test-key", "test-token");
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+		vi.useRealTimers();
+	});
+
+	it("sends display/cardFront with a literal slash, not %2F", async () => {
+		fetchSpy.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+		await client.updateCustomField("cf1", { displayCardFront: true });
+		const [url] = fetchSpy.mock.calls[0];
+		expect(url as string).toContain("display/cardFront=true");
+		expect(url as string).not.toContain("display%2FcardFront");
+	});
+
+	it("retries on 429 instead of throwing (v1.17.0 fix)", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("rate limited", 429, { "Retry-After": "1" }))
+			.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		await vi.advanceTimersByTimeAsync(1_500);
+		const updated = await promise;
+
+		expect(updated).toMatchObject({ id: "cf1" });
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("retries a transient 500 — PUT is idempotent", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 500))
+			.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		await vi.advanceTimersByTimeAsync(5_000);
+		await promise;
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("still throws TrelloError once retries are exhausted", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 503))
+			.mockResolvedValueOnce(textResponse("boom", 503))
+			.mockResolvedValueOnce(textResponse("boom", 503));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		const settle = promise.catch((e) => e);
+		await vi.advanceTimersByTimeAsync(10_000);
+		const err = await settle;
+
+		expect(err).toBeInstanceOf(TrelloError);
+		expect((err as TrelloError).status).toBe(503);
+		expect(fetchSpy).toHaveBeenCalledTimes(3);
+	});
+});
+
+// The definition cache added in v1.18.0. Since v1.17.0 every custom-field write
+// resolves the field first (to type-check the value), which turned a bulk update
+// into an extra GET per card. The cache removes that — but a stale definition
+// must never outlive its own mutation, so every mutation invalidates.
+describe("TrelloClient custom-field definition cache", () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it("fetches once per board and serves the rest from cache", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([{ id: "cf1", name: "Effort", type: "number" }]));
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps boards separate", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardB");
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("re-fetches after createCustomField", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.createCustomField({ boardId: "boardA", name: "New", type: "text" });
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-fetches after an option is added — options live on the definition", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.addCustomFieldOption("cf1", { value: "High" });
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-fetches after deleteCustomField", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.deleteCustomField("cf1");
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("is per-instance, so a new client never sees another's cache", async () => {
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await new TrelloClient("k", "t").listCustomFields("boardA");
+		await new TrelloClient("k", "t").listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+});

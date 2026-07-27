@@ -16,7 +16,7 @@
  *   1.0.0 (2026-07-10) — Initial (v1.14.0 digest release).
  */
 
-import type { TrelloCard } from "../trello/client";
+import type { TrelloCard, TrelloCustomField } from "../trello/client";
 import { DEFAULT_TIMEZONE, LIST_ALIASES, ROLLING_BIG_ROCKS_ID } from "../trello/constants";
 import { startOfDayMsInTz, type SnoozedCard } from "../trello/tools";
 
@@ -118,15 +118,48 @@ function titleLink(name: string, url: string | undefined): string {
 		: esc(name);
 }
 
-function badgesHtml(c: TrelloCard): string {
+/**
+ * Custom-field values as badges. Definitions are passed in because the email is
+ * rendered from a board snapshot with no client to look them up with; when the
+ * caller has none (Power-Up off, fetch failed), every card silently renders
+ * without them. Only fields with a value on this card appear. v1.18.0.
+ */
+function customFieldBadges(c: TrelloCard, defs: TrelloCustomField[]): string {
+	const items = c.customFieldItems ?? [];
+	if (!defs.length || !items.length) return "";
+	let h = "";
+	for (const it of items) {
+		const f = defs.find((d) => d.id === it.idCustomField);
+		if (!f) continue;
+		let v: string | null = null;
+		if (it.idValue) {
+			v = f.options?.find((o) => o.id === it.idValue)?.value?.text ?? null;
+		} else if (it.value) {
+			if (typeof it.value.checked === "string") v = it.value.checked === "true" ? "yes" : "no";
+			else if (it.value.text) v = it.value.text;
+			else if (it.value.number) v = it.value.number;
+			else if (it.value.date) v = it.value.date.slice(0, 10);
+		}
+		if (!v) continue;
+		h += `<span style="${S.badge}background:#eef1f4;color:#4b5563;border:1px solid #dde2e8;">${esc(f.name)} &middot; ${esc(v)}</span>`;
+	}
+	return h;
+}
+
+function badgesHtml(c: TrelloCard, customFields: TrelloCustomField[] = []): string {
 	let h = "";
 	if (hasLabel(c, "BESTSELLER")) h += `<span style="${S.badge}background:#1c2024;color:#ffffff;">BESTSELLER</span>`;
 	if (hasLabel(c, "DBP Invest")) h += `<span style="${S.badge}background:#2563eb;color:#ffffff;">DBP Invest</span>`;
 	if (hasLabel(c, "Please Clarify and Organize")) h += `<span style="${S.badge}background:#fdecea;color:#c0392b;border:1px solid #f5c6c0;">clarify</span>`;
+	h += customFieldBadges(c, customFields);
 	return h ? `<div style="margin-top:6px;">${h}</div>` : "";
 }
 
-function cardHtml(c: TrelloCard, tz: string, opts: { showDue?: boolean; nowMs?: number } = {}): string {
+function cardHtml(
+	c: TrelloCard,
+	tz: string,
+	opts: { showDue?: boolean; nowMs?: number; customFields?: TrelloCustomField[] } = {},
+): string {
 	const title = titleLink(c.name, c.url);
 	const snippet = descSnippet(c.desc);
 	const due =
@@ -135,7 +168,7 @@ function cardHtml(c: TrelloCard, tz: string, opts: { showDue?: boolean; nowMs?: 
 			: "";
 	return `<div style="${S.card}"><div style="${S.title}">${title}</div>${due}${
 		snippet ? `<div style="${S.desc}">${esc(snippet)}</div>` : ""
-	}${badgesHtml(c)}</div>`;
+	}${badgesHtml(c, opts.customFields)}</div>`;
 }
 
 function columnHtml(
@@ -145,12 +178,15 @@ function columnHtml(
 	wip: number | null,
 	emptyText: string,
 	forceOver = false,
+	customFields: TrelloCustomField[] = [],
 ): string {
 	// forceOver mirrors the dashboard's inbox rule: any card in the inbox is
 	// "over" (red badge), WIP limit or not (v1.14.1 fix).
 	const over = forceOver || (wip !== null && cards.length > wip);
 	const count = `<span style="${over ? S.countOver : S.count}">${cards.length}${wip !== null ? `/${wip}` : ""}</span>`;
-	const body = cards.length ? cards.map((c) => cardHtml(c, tz)).join("") : `<div style="${S.empty}">${esc(emptyText)}</div>`;
+	const body = cards.length
+		? cards.map((c) => cardHtml(c, tz, { customFields })).join("")
+		: `<div style="${S.empty}">${esc(emptyText)}</div>`;
 	return `<div style="${S.col}"><div style="margin-bottom:8px;"><span style="font-weight:600;font-size:13px;">${esc(name)}</span> ${count}</div>${body}</div>`;
 }
 
@@ -169,6 +205,7 @@ export function renderDigest(
 	nowMs: number,
 	tz: string = DEFAULT_TIMEZONE,
 	snoozed: SnoozedCard[] = [],
+	customFields: TrelloCustomField[] = [],
 ): Digest {
 	const open = cards.filter((c) => !c.closed && !isDivider(c));
 	const inList = (id: string) => open.filter((c) => c.idList === id);
@@ -233,10 +270,10 @@ export function renderDigest(
 	let dueSection = "";
 	if (overdue.length || dueToday.length) {
 		const overdueHtml = overdue.length
-			? `<div style="font-weight:600;font-size:13px;color:#a5281c;margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { nowMs, showDue: true })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;color:#a5281c;margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
 			: "";
 		const todayHtml = dueToday.length
-			? `<div style="font-weight:600;font-size:13px;margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { nowMs, showDue: true })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
 			: "";
 		dueSection = `<div style="${S.zone}">Overdue &amp; due today</div><div style="${S.col}border:1px solid #f5c6c0;">${overdueHtml}${todayHtml}</div>`;
 	}
@@ -293,12 +330,12 @@ export function renderDigest(
 
 	// ---- Zones (full replica) ----
 	const ctxHtml = ctxCols
-		.map((l) => columnHtml(l.name, l.cards, tz, l.wip, "clear"))
+		.map((l) => columnHtml(l.name, l.cards, tz, l.wip, "clear", false, customFields))
 		.join("");
-	const waitingHtml = columnHtml("Waiting for…", waiting, tz, null, "nothing pending on others");
-	const inboxHtml = columnHtml("Inbox — clarify", inbox, tz, null, "inbox zero 🎉", inbox.length > 0);
+	const waitingHtml = columnHtml("Waiting for…", waiting, tz, null, "nothing pending on others", false, customFields);
+	const inboxHtml = columnHtml("Inbox — clarify", inbox, tz, null, "inbox zero 🎉", inbox.length > 0, customFields);
 	const rocksHtml = rocks.length
-		? rocks.map((c) => cardHtml(c, tz)).join("")
+		? rocks.map((c) => cardHtml(c, tz, { customFields })).join("")
 		: `<div style="${S.empty}">no big rocks listed</div>`;
 
 	const dateLine = new Intl.DateTimeFormat("en-GB", {

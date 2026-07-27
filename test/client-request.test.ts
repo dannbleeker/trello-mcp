@@ -192,3 +192,74 @@ describe("TrelloClient.updateCustomField", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(3);
 	});
 });
+
+// The definition cache added in v1.18.0. Since v1.17.0 every custom-field write
+// resolves the field first (to type-check the value), which turned a bulk update
+// into an extra GET per card. The cache removes that — but a stale definition
+// must never outlive its own mutation, so every mutation invalidates.
+describe("TrelloClient custom-field definition cache", () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it("fetches once per board and serves the rest from cache", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([{ id: "cf1", name: "Effort", type: "number" }]));
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps boards separate", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.listCustomFields("boardB");
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("re-fetches after createCustomField", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.createCustomField({ boardId: "boardA", name: "New", type: "text" });
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-fetches after an option is added — options live on the definition", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.addCustomFieldOption("cf1", { value: "High" });
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-fetches after deleteCustomField", async () => {
+		const client = new TrelloClient("k", "t");
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await client.listCustomFields("boardA");
+		await client.deleteCustomField("cf1");
+		fetchSpy.mockClear();
+		await client.listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("is per-instance, so a new client never sees another's cache", async () => {
+		fetchSpy.mockImplementation(async () => jsonResponse([]));
+		await new TrelloClient("k", "t").listCustomFields("boardA");
+		await new TrelloClient("k", "t").listCustomFields("boardA");
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+});

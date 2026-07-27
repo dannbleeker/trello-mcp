@@ -37,6 +37,7 @@ import {
 	batch_add_label,
 	batch_get,
 	batch_move_cards,
+	batch_set_card_custom_field,
 	card_activity_log,
 	clear_card_cover,
 	convert_checklist_item_to_card,
@@ -97,6 +98,7 @@ import {
 	remove_label,
 	remove_member_from_card,
 	rename_checklist,
+	rename_custom_field_option,
 	rename_list,
 	reorder_checklist_item,
 	search_cards,
@@ -121,6 +123,7 @@ import {
 	vote_card,
 	weekly_review_pack,
 } from "./trello/tools";
+import type { CustomFieldValue } from "./trello/tools";
 
 /**
  * Format a tool's result for an MCP response. Tools return JSON-safe objects;
@@ -156,6 +159,23 @@ const CUSTOM_FIELD_REF = z
 	.string()
 	.min(1)
 	.describe("Custom-field ID, or its name (case-insensitive) — see list_custom_fields.");
+
+/**
+ * A typed custom-field value. `.strict()` so a two-key value ({ text, number })
+ * is rejected outright — non-strict objects silently drop the extra key and
+ * write the wrong one. Shared by set_card_custom_field,
+ * batch_set_card_custom_field and create_card's `customFields`.
+ */
+const CUSTOM_FIELD_VALUE = z
+	.union([
+		z.object({ checked: z.boolean() }).strict(),
+		z.object({ date: z.string() }).strict(),
+		z.object({ number: z.number() }).strict(),
+		z.object({ text: z.string() }).strict(),
+		z.object({ listOptionId: z.string() }).strict(),
+		z.null(),
+	])
+	.describe("Typed value; null clears the field.");
 
 /** Trello's fixed option palette. An enum fails here instead of at Trello. */
 const CUSTOM_FIELD_COLORS = z.enum([
@@ -224,8 +244,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: z.string().optional().describe("Board alias or ID. Used only if `list` is omitted. Default: dann-to-do."),
 			label: z.string().optional().describe("Filter to cards carrying this label name."),
 			staleDays: z.number().int().positive().optional().describe("Filter to cards untouched for at least this many days."),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { list?: string; board?: string; label?: string; staleDays?: number }) =>
+		guarded(login, async (i: { list?: string; board?: string; label?: string; staleDays?: number; customFields?: boolean }) =>
 			list_cards(client, i),
 		),
 	);
@@ -249,8 +273,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		{
 			query: z.string().min(1).describe("Search text. Trello matches loosely on card name."),
 			board: z.string().optional().describe("Board alias or ID to scope the search."),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { query: string; board?: string }) => search_cards(client, i)),
+		guarded(login, async (i: { query: string; board?: string; customFields?: boolean }) => search_cards(client, i)),
 	);
 
 	server.tool(
@@ -271,9 +299,28 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			desc: z.string().optional().describe("Card description (Markdown supported by Trello)."),
 			due: z.string().optional().describe("Due date in ISO 8601 (e.g. 2026-06-30T15:00:00Z)."),
 			labels: z.array(z.string()).optional().describe("Label IDs to attach at creation."),
+			customFields: z
+				.array(
+					z.object({
+						field: CUSTOM_FIELD_REF,
+						value: CUSTOM_FIELD_VALUE,
+					}),
+				)
+				.optional()
+				.describe(
+					"Custom-field values to set after creation. Trello cannot set these on the create call itself, so they are applied as follow-ups and reported per field — the card is still created if one fails.",
+				),
 		},
-		guarded(login, async (i: { list: string; name: string; desc?: string; due?: string; labels?: string[] }) =>
-			create_card(client, i),
+		guarded(
+			login,
+			async (i: {
+				list: string;
+				name: string;
+				desc?: string;
+				due?: string;
+				labels?: string[];
+				customFields?: { field: string; value: CustomFieldValue }[];
+			}) => create_card(client, i),
 		),
 	);
 
@@ -444,8 +491,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			includeSnoozedOnly: z.boolean().optional(),
 			label: z.string().optional(),
 			staleDays: z.number().int().positive().optional(),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { list: string; excludeDueDates?: boolean; includeSnoozedOnly?: boolean; label?: string; staleDays?: number }) =>
+		guarded(login, async (i: { list: string; excludeDueDates?: boolean; includeSnoozedOnly?: boolean; label?: string; staleDays?: number; customFields?: boolean }) =>
 			list_cards_by_list(client, i),
 		),
 	);
@@ -457,8 +508,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			query: z.string().min(1).describe("Search expression. Trello operators supported."),
 			boards: z.array(z.string()).optional().describe("Board aliases or IDs to scope the search."),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max cards to return (default 50, hard cap 1000)."),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Attach each result's custom-field values. NOTE: this annotates results — Trello's search syntax has no operator for custom fields, so you cannot FILTER on them here."),
 		},
-		guarded(login, async (i: { query: string; boards?: string[]; limit?: number }) =>
+		guarded(login, async (i: { query: string; boards?: string[]; limit?: number; customFields?: boolean }) =>
 			search_cards_advanced(client, i),
 		),
 	);
@@ -689,12 +744,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 
 	server.tool(
 		"copy_card",
-		"Duplicate a card to a target list. `keepFromSource` controls what to copy: comma-separated subset of attachments,checklists,comments,due,start,labels,members,stickers, or \"all\" (default). Optional `newName` overrides the source name; `position` is top/bottom/numeric.",
+		"Duplicate a card to a target list. `keepFromSource` controls what to copy: comma-separated subset of attachments,checklists,comments,customFields,due,start,labels,members,stickers, or \"all\" (default). Name `customFields` EXPLICITLY if you want custom-field values carried over — Trello does not reliably include them under \"all\". Optional `newName` overrides the source name; `position` is top/bottom/numeric.",
 		{
 			cardId: z.string().describe("Source card to copy."),
 			targetList: z.string().describe("Destination list alias or ID."),
 			newName: z.string().min(1).optional(),
-			keepFromSource: z.string().optional().describe("e.g. \"all\" or \"checklists,labels,members\"."),
+			keepFromSource: z.string().optional().describe("e.g. \"all\", \"all,customFields\", or \"checklists,labels,customFields\"."),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
 		guarded(login, async (i: { cardId: string; targetList: string; newName?: string; keepFromSource?: string; position?: "top" | "bottom" | number }) =>
@@ -747,8 +802,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: z.string().optional().describe("Board alias or ID. Default: dann-to-do."),
 			staleDays: z.number().int().positive().optional().describe("Waiting-list stale threshold. Default 7."),
 			maxPerBucket: z.number().int().positive().max(200).optional().describe("Max cards returned per bucket. Default 25."),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { board?: string; staleDays?: number; maxPerBucket?: number }) =>
+		guarded(login, async (i: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean }) =>
 			weekly_review_pack(client, i),
 		),
 	);
@@ -1229,32 +1288,44 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		{
 			cardId: z.string(),
 			customFieldId: CUSTOM_FIELD_REF,
-			// .strict() so a two-key value ({ text, number }) is rejected outright.
-			// Non-strict objects silently drop the extra key and write the wrong one.
-			value: z
-				.union([
-					z.object({ checked: z.boolean() }).strict(),
-					z.object({ date: z.string() }).strict(),
-					z.object({ number: z.number() }).strict(),
-					z.object({ text: z.string() }).strict(),
-					z.object({ listOptionId: z.string() }).strict(),
-					z.null(),
-				])
-				.describe("Typed value; null clears the field."),
+			value: CUSTOM_FIELD_VALUE,
 		},
 		guarded(
 			login,
-			async (i: {
-				cardId: string;
-				customFieldId: string;
-				value:
-					| { checked: boolean }
-					| { date: string }
-					| { number: number }
-					| { text: string }
-					| { listOptionId: string }
-					| null;
-			}) => set_card_custom_field(client, i),
+			async (i: { cardId: string; customFieldId: string; value: CustomFieldValue }) =>
+				set_card_custom_field(client, i),
+		),
+	);
+
+	server.tool(
+		"batch_set_card_custom_field",
+		"Set the SAME custom field to the SAME value across many cards. The field is resolved and type-checked once per board rather than once per card. Continues past per-card failures and reports them in `skipped`.",
+		{
+			cardIds: z.array(z.string()).min(1).describe("Card IDs. Capped at 50."),
+			customFieldId: CUSTOM_FIELD_REF,
+			value: CUSTOM_FIELD_VALUE,
+		},
+		guarded(
+			login,
+			async (i: { cardIds: string[]; customFieldId: string; value: CustomFieldValue }) =>
+				batch_set_card_custom_field(client, i),
+		),
+	);
+
+	server.tool(
+		"rename_custom_field_option",
+		"Rename a LIST-type option WITHOUT losing the cards using it. Trello's API has no update-option endpoint, so a naive delete+re-add clears the field on every card that pointed at the old option. This adds the new option, re-points affected cards, then deletes the old one — and if any card fails to move it stops and leaves BOTH options in place rather than destroying values.",
+		{
+			customFieldId: CUSTOM_FIELD_REF,
+			optionId: z.string().describe("Option ID, or its current label text."),
+			newValue: z.string().min(1).describe("The new label."),
+			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			color: CUSTOM_FIELD_COLORS.optional().describe("Override the colour; defaults to the old option's."),
+		},
+		guarded(
+			login,
+			async (i: { customFieldId: string; optionId: string; newValue: string; board?: string; color?: string }) =>
+				rename_custom_field_option(client, i),
 		),
 	);
 

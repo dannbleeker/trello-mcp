@@ -4,6 +4,73 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] — 2026-07-27
+
+Second custom-fields pass, closing the gaps the v1.17.0 review left open. Two
+new tools (99 → 101), two real defects fixed, and custom-field values now
+appear everywhere cards are shown instead of only in `get_card`.
+
+### Fixed
+- **`copy_card` could not preserve custom-field values — and refused to try.**
+  `COPY_KEEP_TOKENS` omitted `customFields`, and because the guard validates
+  tokens *before* calling Trello (Trello silently ignores unrecognised ones),
+  passing it was rejected outright. Atlassian's own announcement — "Custom
+  Fields now required to be specified in keepFromSource when copying a card" —
+  is about exactly this parameter, so `all` is not a safe assumption. The token
+  is now accepted and both tool descriptions say to name it explicitly.
+- **Custom-field edits were invisible in `card_activity_log`.** The default
+  filter covered moves, due dates, labels, attachments, comments and
+  checklists, but not `updateCustomFieldItem` — so "when did Priority change to
+  High?" was unanswerable even though Trello records it.
+
+### Added
+- **`batch_set_card_custom_field`** — set the same field to the same value
+  across up to 50 cards. The win is the resolution work, not the writes: the
+  field is resolved and the value type-checked once per board rather than once
+  per card. Follows the `batch_add_label` shape (continues past per-card
+  failures, reports them in `skipped`).
+- **`rename_custom_field_option`** — Trello's Custom Fields API has GET / POST /
+  DELETE on options but no PUT, so an option's label is immutable, and the
+  obvious workaround (delete + re-add) silently clears the field on every card
+  pointing at the old option. This builds the rename from the primitives that do
+  exist, in the order that's safe if it dies halfway: add the new option →
+  re-point affected cards → delete the old one. If any card fails to move it
+  stops and leaves **both** options in place rather than destroying values.
+- **`create_card` accepts a `customFields` array.** Trello can't set custom
+  fields on `POST /cards`, so they're applied as follow-up calls and reported
+  per field. A failure does not fail the tool: the card already exists, and
+  reporting a hard error would invite a retry that creates a duplicate.
+- **`customFields: true` on every card-listing read** — `list_cards`,
+  `list_cards_by_list`, `search_cards`, `search_cards_advanced` and
+  `weekly_review_pack`, joining `get_card` from v1.17.0. Cost is bounded by the
+  number of boards touched, not cards: values ride along on the card fetch, and
+  definitions are memoised.
+- **Dashboard and digest render custom-field values as badges** when the board
+  has any — deliberately quieter than the label badges, since a custom field is
+  data *about* a card rather than a flag *on* it. Both surfaces degrade to
+  rendering nothing if the definitions can't be read, matching how the digest
+  already treats snoozed cards: the morning email must never die because a
+  Power-Up read failed.
+
+### Changed
+- **Custom-field definitions are memoised per board on the client.** v1.17.0
+  made every custom-field write resolve its definition first (to type-check the
+  value), which turned a bulk update into an extra GET per card. A `TrelloClient`
+  is built per MCP session / dashboard request, so the cache is naturally
+  short-lived and bounded; all five mutations invalidate it, so a stale
+  definition can never outlive its own change.
+- **`add_custom_field_option` and `delete_custom_field_option` take a `board`**
+  for name resolution, consistent with the other custom-field tools.
+
+### Known limitations
+- `search_cards_advanced` still cannot *filter* on custom-field values —
+  Trello's search syntax has no operator for them. `customFields: true`
+  annotates the results so the returned rows can be filtered, but it cannot
+  narrow the search itself.
+- The `customFields` token fix is based on Atlassian's published announcement;
+  it has not been verified against a live copy, because the board this server
+  targets currently has no custom fields defined to copy.
+
 ## [1.17.0] — 2026-07-27
 
 Custom-fields pass. The eight custom-field tools worked, but they were the

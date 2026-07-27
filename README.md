@@ -6,7 +6,7 @@ Designed primarily around Dann Bleeker Pedersen's GTD workflow, but the underlyi
 
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (99)
+## Tools (101)
 
 **Reads**
 
@@ -114,6 +114,8 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `add_custom_field_option` | Add an option to a list-type custom field |
 | `delete_custom_field_option` | Remove an option from a list-type custom field |
 | `set_card_custom_field` | Set a custom-field value on a card (polymorphic: checkbox / date / number / text / list, or null to clear) — value is checked against the field's declared type |
+| `batch_set_card_custom_field` | Set the same custom field to the same value across many cards (resolves + type-checks once per board) |
+| `rename_custom_field_option` | Rename a list-type option without losing the cards using it (Trello has no update-option endpoint) |
 | `enable_board_plugin` | Enable a Power-Up on a board by alias (custom-fields, card-aging, voting, calendar) or ID |
 | `disable_board_plugin` | Disable a Power-Up (takes the boardPlugin id from list_board_plugins, NOT the idPlugin — Trello REST quirk) |
 
@@ -149,9 +151,20 @@ Reads come back joined to their definitions — `name`, `type`, list values reso
   "idValue": "2222bbbb…", "value": { "text": "Low" } }
 ```
 
-`get_card` can include the same block with `customFields: true`. It's opt-in because the join costs one extra API call and `get_card` is a hot path.
+`get_card`, `list_cards`, `list_cards_by_list`, `search_cards`, `search_cards_advanced` and `weekly_review_pack` all take `customFields: true` to include the same block. It's opt-in everywhere: values ride along on the card fetch, but joining them to their names costs a definition lookup, and these are hot paths. Definitions are memoised per board for the life of a request, so a batch operation pays for that lookup once, not once per card.
 
-One real limitation: **`search_cards_advanced` can't filter on custom-field values.** Trello's search syntax doesn't support them, so filtering has to happen client-side after fetching.
+The dashboard and the morning digest render custom-field values as badges automatically when the board has any — deliberately quieter than the label badges, since a custom field is data *about* a card rather than a flag *on* it.
+
+Two operations exist because Trello's API can't do them directly:
+
+- **`batch_set_card_custom_field`** — same field, same value, many cards. Resolves and type-checks once per board instead of once per card.
+- **`rename_custom_field_option`** — Trello has GET/POST/DELETE on options but no PUT, so an option's label is immutable and the obvious workaround (delete + re-add) silently clears the field on every card pointing at it. This adds the new option, re-points affected cards, then deletes the old one. If any card fails to move it stops and leaves *both* options in place rather than destroying values.
+
+`create_card` accepts a `customFields` array. Trello can't set them on the create call, so they're applied as follow-ups and reported per field — the card is still returned if one fails, because reporting a hard failure would invite a retry that creates a duplicate.
+
+Copying a card: name `customFields` explicitly in `keepFromSource`. Atlassian changed the semantics so that `all` is not a safe assumption for custom fields.
+
+One real limitation: **`search_cards_advanced` can't filter on custom-field values.** Trello's search syntax doesn't support them. `customFields: true` annotates the results so you can filter the returned rows, but it can't narrow the search itself.
 
 ## Access control
 

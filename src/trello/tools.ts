@@ -37,6 +37,23 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.18.0 (2026-07-27) — Second custom-fields pass. copy_card's COPY_KEEP_TOKENS
+ *                         was missing `customFields`, so the guard REFUSED a
+ *                         valid token and copies could never carry values over.
+ *                         card_activity_log's default filter gains
+ *                         updateCustomFieldItem (field edits were invisible).
+ *                         New: batch_set_card_custom_field (resolve + type-check
+ *                         once per board, not per card) and
+ *                         rename_custom_field_option (Trello has no update-option
+ *                         endpoint; delete+re-add would clear every card using it,
+ *                         so this adds → re-points → deletes, and aborts before
+ *                         the delete if any card fails to move). create_card takes
+ *                         a customFields array, applied as follow-ups and reported
+ *                         per field — a failure must not fail the tool, since the
+ *                         card already exists and a retry would duplicate it.
+ *                         customFields:true added to list_cards, list_cards_by_list,
+ *                         search_cards, search_cards_advanced, weekly_review_pack
+ *                         via the shared attachCustomFields helper.
  *   1.17.0 (2026-07-27) — Custom-fields pass. Every custom-field tool resolves a
  *                         field by name as well as by ID (resolveCustomField),
  *                         matching how boards/lists/plugins already work, and
@@ -334,23 +351,38 @@ export async function list_lists(
  */
 export async function list_cards(
 	client: TrelloClient,
-	input: { list?: string; board?: string; label?: string; staleDays?: number },
-): Promise<{ scope: { listId?: string; boardId?: string }; cards: CardSummary[]; truncated: boolean }> {
+	input: {
+		list?: string;
+		board?: string;
+		label?: string;
+		staleDays?: number;
+		customFields?: boolean;
+	},
+): Promise<{
+	scope: { listId?: string; boardId?: string };
+	cards: CardSummaryWithFields[];
+	truncated: boolean;
+}> {
 	let raw: TrelloCard[];
 	const scope: { listId?: string; boardId?: string } = {};
+	// Values ride along on the same request when asked for, so the only extra
+	// cost is the definition lookup (memoised per board on the client).
+	const withValues = { customFieldItems: input.customFields };
 	if (input.list) {
 		const listId = resolveList(input.list);
 		scope.listId = listId;
-		raw = await client.listCardsOnList(listId);
+		raw = await client.listCardsOnList(listId, withValues);
 	} else {
 		const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
 		scope.boardId = boardId;
-		raw = await client.listCardsOnBoard(boardId);
+		raw = await client.listCardsOnBoard(boardId, withValues);
 	}
 	const { cards: filtered, total } = applyCardFilters(raw, input.staleDays, input.label);
 	return {
 		scope,
-		cards: filtered.map(summariseCard),
+		cards: input.customFields
+			? await attachCustomFields(client, filtered)
+			: filtered.map(summariseCard),
 		truncated: total > MAX_RESULTS,
 	};
 }
@@ -378,13 +410,19 @@ export async function get_card(
 /** search_cards — fuzzy name match across a board (or all boards if board omitted). */
 export async function search_cards(
 	client: TrelloClient,
-	input: { query: string; board?: string },
-): Promise<{ query: string; cards: CardSummary[] }> {
+	input: { query: string; board?: string; customFields?: boolean },
+): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
 	const boardId = input.board ? resolveBoard(input.board) : undefined;
 	const results = await client.searchCards(input.query, boardId);
+	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
+	// Trello's /search can't return custom-field values inline, so annotating
+	// costs one board scan per distinct board in the hits — bounded by boards,
+	// not by result count. Scope the search to a board to keep it at one.
 	return {
 		query: input.query,
-		cards: results.filter((c) => !c.closed).slice(0, MAX_RESULTS).map(summariseCard),
+		cards: input.customFields
+			? await attachCustomFields(client, hits)
+			: hits.map(summariseCard),
 	};
 }
 
@@ -412,8 +450,19 @@ export async function list_checklist_items(
 /** create_card — create a new card on the given list. Guards + WIP warning. */
 export async function create_card(
 	client: TrelloClient,
-	input: { list: string; name: string; desc?: string; due?: string; labels?: string[] },
-): Promise<{ card: CardSummary; warning?: string }> {
+	input: {
+		list: string;
+		name: string;
+		desc?: string;
+		due?: string;
+		labels?: string[];
+		customFields?: { field: string; value: CustomFieldValue }[];
+	},
+): Promise<{
+	card: CardSummary;
+	warning?: string;
+	customFields?: { field: string; ok: boolean; error?: string }[];
+}> {
 	const listId = resolveList(input.list);
 	assertCanWriteTo(listId);
 
@@ -426,7 +475,37 @@ export async function create_card(
 	});
 
 	const warning = await warnIfWipExceeded(client, listId, card.idBoard);
-	return { card: summariseCard(card), warning };
+	const result: {
+		card: CardSummary;
+		warning?: string;
+		customFields?: { field: string; ok: boolean; error?: string }[];
+	} = { card: summariseCard(card), warning };
+
+	// Trello's POST /cards cannot set custom fields, so they're applied as
+	// follow-up calls. A failure here must NOT fail the whole tool — the card
+	// exists by now, and reporting "create_card failed" would invite a retry
+	// that creates a duplicate. Per-field outcomes are returned instead.
+	// v1.18.0.
+	if (input.customFields?.length) {
+		result.customFields = [];
+		for (const entry of input.customFields) {
+			try {
+				await set_card_custom_field(client, {
+					cardId: card.id,
+					customFieldId: entry.field,
+					value: entry.value,
+				});
+				result.customFields.push({ field: entry.field, ok: true });
+			} catch (e) {
+				result.customFields.push({
+					field: entry.field,
+					ok: false,
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		}
+	}
+	return result;
 }
 
 /** move_card — move a card to a different list. Guards source AND destination + WIP warning. */
@@ -692,10 +771,21 @@ export async function list_cards_due(
  */
 export async function list_cards_by_list(
 	client: TrelloClient,
-	input: { list: string; excludeDueDates?: boolean; includeSnoozedOnly?: boolean; label?: string; staleDays?: number },
-): Promise<{ listId: string; cards: (CardSummary & { snoozed: boolean; wakeUp: string | null })[]; truncated: boolean }> {
+	input: {
+		list: string;
+		excludeDueDates?: boolean;
+		includeSnoozedOnly?: boolean;
+		label?: string;
+		staleDays?: number;
+		customFields?: boolean;
+	},
+): Promise<{
+	listId: string;
+	cards: (CardSummaryWithFields & { snoozed: boolean; wakeUp: string | null })[];
+	truncated: boolean;
+}> {
 	const listId = resolveList(input.list);
-	const raw = await client.listCardsOnList(listId);
+	const raw = await client.listCardsOnList(listId, { customFieldItems: input.customFields });
 	let filtered = raw.filter((c) => !c.closed);
 
 	if (input.excludeDueDates) filtered = filtered.filter((c) => c.due === null);
@@ -715,12 +805,15 @@ export async function list_cards_by_list(
 	// results were actually cut off (not whether they landed on the boundary).
 	const totalMatching = filtered.length;
 	const sliced = filtered.slice(0, MAX_RESULTS);
+	const summaries = input.customFields
+		? await attachCustomFields(client, sliced)
+		: sliced.map(summariseCard);
 	return {
 		listId,
-		cards: sliced.map((c) => ({
-			...summariseCard(c),
-			snoozed: c.dueReminder !== null && c.dueReminder !== -1,
-			wakeUp: computeWakeUp(c.due, c.dueReminder),
+		cards: summaries.map((s, i) => ({
+			...s,
+			snoozed: sliced[i].dueReminder !== null && sliced[i].dueReminder !== -1,
+			wakeUp: computeWakeUp(sliced[i].due, sliced[i].dueReminder),
 		})),
 		truncated: totalMatching > MAX_RESULTS,
 	};
@@ -734,17 +827,23 @@ export async function list_cards_by_list(
  */
 export async function search_cards_advanced(
 	client: TrelloClient,
-	input: { query: string; boards?: string[]; limit?: number },
-): Promise<{ query: string; cards: CardSummary[] }> {
+	input: { query: string; boards?: string[]; limit?: number; customFields?: boolean },
+): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
 	const boardIds = input.boards?.map((b) => resolveBoard(b));
 	const results = await client.searchCardsAdvanced({
 		query: input.query,
 		boardIds,
 		cardsLimit: input.limit,
 	});
+	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
+	// NOTE: `customFields` annotates the RESULTS; it does not let you filter on
+	// custom-field values. Trello's search syntax has no operator for them, so
+	// filtering has to happen on the returned rows.
 	return {
 		query: input.query,
-		cards: results.filter((c) => !c.closed).slice(0, MAX_RESULTS).map(summariseCard),
+		cards: input.customFields
+			? await attachCustomFields(client, hits)
+			: hits.map(summariseCard),
 	};
 }
 
@@ -793,6 +892,10 @@ const ACTIVITY_DEFAULT_FILTER = [
 	"removeChecklistFromCard",
 	"updateCheckItemStateOnCard",
 	"convertToCardFromCheckItem",
+	// Custom-field edits were invisible in the feed until v1.18.0 — "when did
+	// Priority change to High?" was unanswerable through this server even
+	// though Trello records it.
+	"updateCustomFieldItem",
 ].join(",");
 
 export async function card_activity_log(
@@ -1242,11 +1345,23 @@ export async function delete_checklist(
 
 // ---- Card ops: copy + due-reminder ----
 
+/**
+ * Valid `keepFromSource` tokens for POST /cards. Validated here because Trello
+ * silently ignores unrecognised ones.
+ *
+ * `customFields` was missing until v1.18.0, which meant this guard REFUSED a
+ * legitimate token before it ever reached Trello — copy_card simply could not
+ * preserve custom-field values. Atlassian changed the semantics here (their
+ * announcement: "Custom Fields now required to be specified in keepFromSource
+ * when copying a card"), so `all` is not a safe assumption for custom fields;
+ * name the token explicitly when you want the values carried over.
+ */
 const COPY_KEEP_TOKENS = new Set([
 	"all",
 	"attachments",
 	"checklists",
 	"comments",
+	"customFields",
 	"due",
 	"start",
 	"labels",
@@ -1372,16 +1487,16 @@ const INBOX_LIST_ALIAS = "inbox";
 
 export async function weekly_review_pack(
 	client: TrelloClient,
-	input: { board?: string; staleDays?: number; maxPerBucket?: number },
+	input: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean },
 ): Promise<{
 	asOf: string;
 	board: BoardSummary;
-	inbox: { count: number; sample: CardSummary[] };
-	overdue: { count: number; cards: CardSummary[] };
-	due_today: { count: number; cards: CardSummary[] };
-	due_this_week: { count: number; cards: CardSummary[] };
+	inbox: { count: number; sample: CardSummaryWithFields[] };
+	overdue: { count: number; cards: CardSummaryWithFields[] };
+	due_today: { count: number; cards: CardSummaryWithFields[] };
+	due_this_week: { count: number; cards: CardSummaryWithFields[] };
 	contexts: Record<string, number>;
-	waiting: { count: number; stale: CardSummary[]; staleDays: number };
+	waiting: { count: number; stale: CardSummaryWithFields[]; staleDays: number };
 	could_do: Record<string, number>;
 	big_rocks: { count: number };
 	snoozed: { count: number };
@@ -1402,7 +1517,7 @@ export async function weekly_review_pack(
 
 	const [board, allCards] = await Promise.all([
 		client.getBoard(boardId),
-		client.listCardsOnBoard(boardId),
+		client.listCardsOnBoard(boardId, { customFieldItems: input.customFields }),
 	]);
 	const open = allCards.filter((c) => !c.closed);
 
@@ -1453,18 +1568,26 @@ export async function weekly_review_pack(
 		(c) => c.dueReminder !== null && c.dueReminder !== -1,
 	).length;
 
-	const waitingStale = waitingCards
-		.filter((c) => Date.parse(c.dateLastActivity) <= staleCutoff)
-		.slice(0, cap)
-		.map(summariseCard);
+	// One helper for every bucket: with customFields off it's just summariseCard,
+	// with it on the values are already inline on the cards (the board fetch
+	// above carried them), so this costs only the definition lookup.
+	const present = async (cards: TrelloCard[]): Promise<CardSummaryWithFields[]> =>
+		input.customFields ? attachCustomFields(client, cards) : cards.map(summariseCard);
+
+	const waitingStale = await present(
+		waitingCards.filter((c) => Date.parse(c.dateLastActivity) <= staleCutoff).slice(0, cap),
+	);
 
 	return {
 		asOf: new Date(now).toISOString(),
 		board: summariseBoard(board),
-		inbox: { count: inboxCards.length, sample: inboxCards.slice(0, cap).map(summariseCard) },
-		overdue: { count: overdueCards.length, cards: overdueCards.slice(0, cap).map(summariseCard) },
-		due_today: { count: dueTodayCards.length, cards: dueTodayCards.slice(0, cap).map(summariseCard) },
-		due_this_week: { count: dueThisWeekCards.length, cards: dueThisWeekCards.slice(0, cap).map(summariseCard) },
+		inbox: { count: inboxCards.length, sample: await present(inboxCards.slice(0, cap)) },
+		overdue: { count: overdueCards.length, cards: await present(overdueCards.slice(0, cap)) },
+		due_today: { count: dueTodayCards.length, cards: await present(dueTodayCards.slice(0, cap)) },
+		due_this_week: {
+			count: dueThisWeekCards.length,
+			cards: await present(dueThisWeekCards.slice(0, cap)),
+		},
 		contexts,
 		waiting: { count: waitingCards.length, stale: waitingStale, staleDays },
 		could_do: couldDo,
@@ -2224,6 +2347,19 @@ async function resolveCustomField(
 	);
 }
 
+/**
+ * A typed custom-field value as callers pass it. Exactly one key, or null to
+ * clear. Shared by set_card_custom_field, batch_set_card_custom_field and
+ * create_card's `customFields`.
+ */
+export type CustomFieldValue =
+	| { checked: boolean }
+	| { date: string }
+	| { number: number }
+	| { text: string }
+	| { listOptionId: string }
+	| null;
+
 /** The `value` key a caller must use for each field type. */
 const VALUE_KEY_FOR_TYPE = {
 	checkbox: "checked",
@@ -2392,6 +2528,103 @@ export async function delete_custom_field_option(
 }
 
 /**
+ * rename_custom_field_option — change a list option's label without losing the
+ * cards that use it.
+ *
+ * Trello's Custom Fields API has GET / POST / DELETE on options but no PUT, so
+ * an option's label is immutable. The obvious workaround — delete it and add a
+ * replacement — silently clears the field on every card that pointed at the old
+ * option, because deleting an option deletes the values referencing it.
+ *
+ * So this builds the rename out of the primitives Trello does give, in the
+ * order that is safe if it dies halfway:
+ *   1. add the new option
+ *   2. re-point every card using the old option
+ *   3. delete the old option
+ * Interrupted after (1) you have a spare unused option; after (2) you have two
+ * options with cards on the new one. Neither loses data. Doing it in any other
+ * order can. v1.18.0.
+ */
+export async function rename_custom_field_option(
+	client: TrelloClient,
+	input: {
+		customFieldId: string;
+		optionId: string;
+		newValue: string;
+		board?: string;
+		color?: string;
+	},
+): Promise<{
+	customField: { id: string; name: string };
+	oldOptionId: string;
+	newOptionId: string;
+	cardsRepointed: number;
+	failures: { cardId: string; reason: string }[];
+}> {
+	if (!input.newValue.trim()) {
+		throw new GuardError("`newValue` must be a non-empty label.");
+	}
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const field = await resolveCustomField(client, boardId, input.customFieldId);
+	if (field.type !== "list") {
+		throw new GuardError(
+			`Custom field "${field.name}" is type "${field.type}" — only LIST-type fields have options.`,
+		);
+	}
+	const oldOptionId = resolveFieldOption(field, input.optionId);
+	const oldOption = field.options?.find((o) => o.id === oldOptionId);
+
+	// 1. Add the replacement, inheriting the old option's colour and position
+	//    unless the caller overrides the colour.
+	const created = await client.addCustomFieldOption(field.id, {
+		value: input.newValue,
+		color: input.color ?? oldOption?.color,
+		pos: oldOption?.pos,
+	});
+
+	// 2. Re-point. Only cards actually using the old option are touched; the
+	//    board scan carries values inline, so this is one call plus one PUT per
+	//    affected card.
+	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+	const affected = cards.filter((c) =>
+		(c.customFieldItems ?? []).some(
+			(it) => it.idCustomField === field.id && it.idValue === oldOptionId,
+		),
+	);
+	const failures: { cardId: string; reason: string }[] = [];
+	let cardsRepointed = 0;
+	for (const card of affected) {
+		try {
+			await client.setCardCustomFieldItem(card.id, field.id, { idValue: created.id });
+			cardsRepointed += 1;
+		} catch (e) {
+			failures.push({ cardId: card.id, reason: e instanceof Error ? e.message : String(e) });
+		}
+	}
+
+	// 3. Only remove the old option once every card is off it. Bailing here
+	//    leaves both options alive, which is recoverable; deleting anyway would
+	//    clear the field on the cards that failed.
+	if (failures.length > 0) {
+		throw new GuardError(
+			`Renamed to "${input.newValue}" (option ${created.id}) and moved ${cardsRepointed} card(s), ` +
+				`but ${failures.length} failed: ${failures.map((f) => `${f.cardId} (${f.reason})`).join("; ")}. ` +
+				`The old option ${oldOptionId} was NOT deleted — both options exist, no values were lost. ` +
+				`Re-run once the failures are resolved.`,
+		);
+	}
+	await client.deleteCustomFieldOption(field.id, oldOptionId);
+
+	return {
+		customField: { id: field.id, name: field.name },
+		oldOptionId,
+		newOptionId: created.id,
+		cardsRepointed,
+		failures,
+	};
+}
+
+/**
  * Resolve a list-field option by ID or by its label text (case-insensitive).
  * Also the guard that stops an option from another field being written to this
  * one — Trello accepts a foreign idValue and stores an unresolvable reference.
@@ -2529,6 +2762,67 @@ function joinCustomFieldItems(
 		});
 }
 
+/** A card summary with its custom-field values attached. */
+export type CardSummaryWithFields = CardSummary & {
+	customFields?: ParsedCustomFieldItem[];
+};
+
+/**
+ * Attach custom-field values to a set of cards, joined to their definitions.
+ *
+ * Cost is bounded by the number of BOARDS touched, not the number of cards:
+ * for each distinct board it needs the definitions (memoised on the client)
+ * and, when the caller's fetch didn't already carry values inline, one
+ * `customFieldItems=true` board scan. Cards that arrived with their items
+ * already attached — anything fetched via a `{ customFieldItems: true }`
+ * option — cost nothing extra.
+ *
+ * A board whose definitions can't be read (Power-Up off, transient failure) is
+ * skipped rather than failing the whole listing: a read tool returning cards
+ * without custom fields is far more useful than one returning an error.
+ * v1.18.0.
+ */
+async function attachCustomFields(
+	client: TrelloClient,
+	cards: TrelloCard[],
+): Promise<CardSummaryWithFields[]> {
+	const boardIds = [...new Set(cards.map((c) => c.idBoard))];
+	const defsByBoard = new Map<string, TrelloCustomField[]>();
+	const itemsByCard = new Map<string, TrelloCustomFieldItem[]>();
+
+	for (const card of cards) {
+		if (card.customFieldItems) itemsByCard.set(card.id, card.customFieldItems);
+	}
+
+	for (const boardId of boardIds) {
+		try {
+			defsByBoard.set(boardId, await customFieldDefs(client, boardId));
+		} catch {
+			continue; // no definitions readable → those cards come back unannotated
+		}
+		// Only scan when this board's cards didn't already bring their values.
+		const needsScan = cards.some((c) => c.idBoard === boardId && !itemsByCard.has(c.id));
+		if (!needsScan) continue;
+		try {
+			const scanned = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+			for (const c of scanned) {
+				if (c.customFieldItems) itemsByCard.set(c.id, c.customFieldItems);
+			}
+		} catch {
+			// Leave those cards unannotated rather than failing the listing.
+		}
+	}
+
+	return cards.map((card) => {
+		const defs = defsByBoard.get(card.idBoard);
+		if (!defs) return summariseCard(card);
+		return {
+			...summariseCard(card),
+			customFields: joinCustomFieldItems(itemsByCard.get(card.id) ?? [], defs, card.id),
+		};
+	});
+}
+
 export async function list_card_custom_fields(
 	client: TrelloClient,
 	input: { cardId: string },
@@ -2559,13 +2853,7 @@ export async function set_card_custom_field(
 	input: {
 		cardId: string;
 		customFieldId: string;
-		value:
-			| { checked: boolean }
-			| { date: string }
-			| { number: number }
-			| { text: string }
-			| { listOptionId: string }
-			| null;
+		value: CustomFieldValue;
 	},
 ): Promise<{ item: TrelloCustomFieldItem | null }> {
 	const card = await assertCardWritable(client, input.cardId);
@@ -2573,8 +2861,22 @@ export async function set_card_custom_field(
 	// against the definition before we spend a write. Sending {text} to a
 	// number field otherwise yields an opaque Trello 400 or a silent no-op.
 	const field = await resolveCustomField(client, card.idBoard, input.customFieldId);
+	const body = customFieldBody(field, input.value);
+	const item = await client.setCardCustomFieldItem(input.cardId, field.id, body);
+	return { item };
+}
 
+/**
+ * Translate a caller's typed value into Trello's request body, validating it
+ * against the field definition on the way. Split out of set_card_custom_field
+ * in v1.18.0 so the batch setter can validate once and reuse the result.
+ */
+function customFieldBody(
+	field: TrelloCustomField,
+	value: CustomFieldValue,
+): Record<string, unknown> {
 	let body: Record<string, unknown> = {};
+	const input = { value };
 	if (input.value === null) {
 		body = {};
 	} else if ("checked" in input.value) {
@@ -2605,9 +2907,77 @@ export async function set_card_custom_field(
 			"`value` must have exactly one of: checked, date, number, text, listOptionId — or be null.",
 		);
 	}
+	return body;
+}
 
-	const item = await client.setCardCustomFieldItem(input.cardId, field.id, body);
-	return { item };
+/**
+ * batch_set_card_custom_field — set the SAME field to the SAME value across
+ * many cards. Follows the batch_add_label / batch_move_cards shape: continues
+ * on per-card failure and reports what it skipped.
+ *
+ * The point of the batch is the resolution work, not the writes: the field is
+ * resolved and the value type-checked ONCE per board rather than once per
+ * card, which is what made a loop of set_card_custom_field calls expensive.
+ * v1.18.0.
+ */
+export async function batch_set_card_custom_field(
+	client: TrelloClient,
+	input: { cardIds: string[]; customFieldId: string; value: CustomFieldValue },
+): Promise<{ updated: number; skipped: { cardId: string; reason: string }[] }> {
+	if (!Array.isArray(input.cardIds) || input.cardIds.length === 0) {
+		throw new GuardError("cardIds must be a non-empty array.");
+	}
+	if (input.cardIds.length > BATCH_MAX) {
+		throw new GuardError(`Batch size capped at ${BATCH_MAX}; got ${input.cardIds.length}.`);
+	}
+
+	// Cached per board, same rationale as batch_add_label's label cache: a
+	// GuardError means "this field/value can't work on this board" and applies
+	// to every later card there, so re-deriving it per card just repeats the
+	// same failure. A non-GuardError is a real API fault and is reported as such.
+	const perBoard = new Map<
+		string,
+		{ fieldId: string; body: Record<string, unknown> } | { error: string; fatal: boolean }
+	>();
+	const skipped: { cardId: string; reason: string }[] = [];
+	let updated = 0;
+
+	for (const cardId of input.cardIds) {
+		try {
+			const card = await assertCardWritable(client, cardId);
+			if (!perBoard.has(card.idBoard)) {
+				try {
+					const field = await resolveCustomField(client, card.idBoard, input.customFieldId);
+					perBoard.set(card.idBoard, {
+						fieldId: field.id,
+						body: customFieldBody(field, input.value),
+					});
+				} catch (e) {
+					perBoard.set(card.idBoard, {
+						error: e instanceof Error ? e.message : String(e),
+						fatal: !(e instanceof GuardError),
+					});
+				}
+			}
+			const resolved = perBoard.get(card.idBoard);
+			if (resolved && "error" in resolved) {
+				skipped.push({
+					cardId,
+					reason: resolved.fatal
+						? `field lookup failed on board ${card.idBoard}: ${resolved.error}`
+						: resolved.error,
+				});
+				continue;
+			}
+			const { fieldId, body } = resolved as { fieldId: string; body: Record<string, unknown> };
+			await client.setCardCustomFieldItem(cardId, fieldId, body);
+			updated += 1;
+		} catch (e) {
+			skipped.push({ cardId, reason: e instanceof Error ? e.message : String(e) });
+		}
+	}
+
+	return { updated, skipped };
 }
 
 /** Refuse a value whose shape doesn't match the field's declared type. */

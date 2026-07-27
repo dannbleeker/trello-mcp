@@ -10,6 +10,12 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.18.0 (2026-07-27) — listCustomFields memoised per board for the client's
+ *                         lifetime; all five custom-field mutations invalidate it.
+ *                         v1.17.0 made every custom-field write resolve its
+ *                         definition first, which turned a bulk update into an
+ *                         extra GET per card. listCardsOnBoard / listCardsOnList
+ *                         take { customFieldItems } like getCard already did.
  *   1.17.0 (2026-07-27) — updateCustomField now goes through retryableFetch. It
  *                         hand-builds its URL (to keep the literal slash in
  *                         Trello's `display/cardFront` key) and used to
@@ -655,17 +661,27 @@ export class TrelloClient {
 
 	// ---- Cards ----
 
-	async listCardsOnList(listId: string): Promise<TrelloCard[]> {
-		const data = await this.request("GET", `/lists/${listId}/cards`, {
+	async listCardsOnList(
+		listId: string,
+		opts: { customFieldItems?: boolean } = {},
+	): Promise<TrelloCard[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
 			fields: CARD_FIELDS,
-		});
+		};
+		if (opts.customFieldItems) params.customFieldItems = true;
+		const data = await this.request("GET", `/lists/${listId}/cards`, params);
 		return data as TrelloCard[];
 	}
 
-	async listCardsOnBoard(boardId: string): Promise<TrelloCard[]> {
-		const data = await this.request("GET", `/boards/${boardId}/cards`, {
+	async listCardsOnBoard(
+		boardId: string,
+		opts: { customFieldItems?: boolean } = {},
+	): Promise<TrelloCard[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
 			fields: CARD_FIELDS,
-		});
+		};
+		if (opts.customFieldItems) params.customFieldItems = true;
+		const data = await this.request("GET", `/boards/${boardId}/cards`, params);
 		return data as TrelloCard[];
 	}
 
@@ -1360,9 +1376,33 @@ export class TrelloClient {
 
 	// ---- Custom Fields (Power-Up) ----
 
+	/**
+	 * Board custom-field definitions, memoised per board for this client's
+	 * lifetime. A TrelloClient is constructed per MCP session / per dashboard
+	 * request (see src/index.ts, dashboard/api.ts, digest/scheduler.ts), so the
+	 * cache is naturally short-lived and bounded by the number of boards touched.
+	 *
+	 * Why it matters: since v1.17.0 every custom-field write resolves the field
+	 * definition first (to check the value against its type), which turned a
+	 * bulk update into an extra GET per card. Every mutation below invalidates
+	 * the affected board, so a stale definition can't outlive its own change.
+	 * v1.18.0.
+	 */
+	private customFieldCache = new Map<string, TrelloCustomField[]>();
+
+	/** Drop a board's cached definitions. Called by every custom-field mutation. */
+	private invalidateCustomFields(boardId?: string): void {
+		if (boardId) this.customFieldCache.delete(boardId);
+		else this.customFieldCache.clear();
+	}
+
 	async listCustomFields(boardId: string): Promise<TrelloCustomField[]> {
+		const cached = this.customFieldCache.get(boardId);
+		if (cached) return cached;
 		const data = await this.request("GET", `/boards/${boardId}/customFields`);
-		return data as TrelloCustomField[];
+		const fields = data as TrelloCustomField[];
+		this.customFieldCache.set(boardId, fields);
+		return fields;
 	}
 
 	async createCustomField(input: {
@@ -1383,6 +1423,7 @@ export class TrelloClient {
 			params["display_cardFront"] = input.displayCardFront;
 		}
 		const data = await this.request("POST", "/customFields", params);
+		this.invalidateCustomFields(input.boardId);
 		return data as TrelloCustomField;
 	}
 
@@ -1411,11 +1452,15 @@ export class TrelloClient {
 		}));
 		const ct = resp.headers.get("content-type") ?? "";
 		const data = ct.includes("application/json") ? await resp.json() : null;
+		// These endpoints are keyed by field ID, not board ID, so there's no
+		// board to target — clear everything. Mutations are rare next to reads.
+		this.invalidateCustomFields();
 		return data as TrelloCustomField;
 	}
 
 	async deleteCustomField(customFieldId: string): Promise<void> {
 		await this.request("DELETE", `/customFields/${customFieldId}`);
+		this.invalidateCustomFields();
 	}
 
 	async addCustomFieldOption(
@@ -1432,11 +1477,13 @@ export class TrelloClient {
 			{},
 			body,
 		);
+		this.invalidateCustomFields();
 		return data as TrelloCustomFieldOption;
 	}
 
 	async deleteCustomFieldOption(customFieldId: string, optionId: string): Promise<void> {
 		await this.request("DELETE", `/customFields/${customFieldId}/options/${optionId}`);
+		this.invalidateCustomFields();
 	}
 
 	async listCardCustomFieldItems(cardId: string): Promise<TrelloCustomFieldItem[]> {

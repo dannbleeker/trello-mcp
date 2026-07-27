@@ -134,10 +134,28 @@ api.get("/api/cards", async (c) => {
 	}
 	const boardId = resolveBoard(boardParam ?? BOARD_ALIASES[DEFAULT_BOARD]);
 
+	// ?customFields=1 adds each card's custom-field values inline (same request)
+	// plus the board's field definitions, so the page can render a value with
+	// its name without a second round trip. Off by default: the board may have
+	// no fields at all, and the extra payload is pure weight when it doesn't.
+	// v1.18.0.
+	const wantFields = ["1", "true", "yes"].includes(
+		(c.req.query("customFields") ?? "").toLowerCase(),
+	);
+
 	try {
 		const client = trello(c.env);
-		const cards = await client.listCardsOnBoard(boardId);
-		return c.json({ cards });
+		const cards = await client.listCardsOnBoard(boardId, { customFieldItems: wantFields });
+		if (!wantFields) return c.json({ cards });
+		// A board without the Power-Up must not break the board view — fall back
+		// to no definitions and the page simply renders nothing.
+		let customFields: unknown[] = [];
+		try {
+			customFields = await client.listCustomFields(boardId);
+		} catch {
+			customFields = [];
+		}
+		return c.json({ cards, customFields });
 	} catch (e) {
 		return errorResponse(c, e);
 	}

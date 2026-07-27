@@ -4,6 +4,72 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] — 2026-07-27
+
+Multi-workspace support. A second Trello workspace was added to the account and
+the connector could only half-see it: `list_boards` and `/search` returned its
+board because Trello scopes those to the member, but nothing else did. Boards
+were addressable only by an alias hard-coded in `constants.ts` or by pasting a
+24-char ID, there was no way to ask what workspaces exist, no way to tell which
+workspace a board belonged to, and no way to scope anything to one of them.
+Adding a workspace meant editing and redeploying the Worker.
+
+It no longer does. A board in any workspace is reachable by name, and every
+board the connector shows says which workspace it lives in.
+
+### Added
+- **`list_workspaces`** — every workspace on the account with the boards it
+  holds, plus a `(no workspace)` bucket for personal boards. Workspaces the
+  member isn't in but has a shared board from are surfaced too, with their real
+  names fetched individually (this account has two such boards, from *ITM* and
+  *linemolgaard1's workspace* — showing them as bare IDs would have defeated the
+  point of the tool).
+- **Board references resolve by name, URL or ID** — every `board` argument now
+  accepts an alias, a 24-char ID, a `trello.com/b/…` URL pasted from the
+  browser, or the board's name matched live against every board the account can
+  see. Aliases and IDs still resolve with no API call, so the common path costs
+  nothing.
+- **List references resolve by name too** — scoped to `board` when given,
+  otherwise across every board. New optional `board` hint on the list-taking
+  tools (`create_card`, `move_card`, `copy_card`, `batch_move_cards`,
+  `list_cards_by_list`, `rename_list`, `archive_list`, `move_list`,
+  `move_all_cards`, `archive_all_cards`, `subscribe_list`, `list_list_actions`,
+  `convert_checklist_item_to_card`) — generic names like `Backlog` / `Done`
+  collide across boards by nature.
+- **`workspace` scoping** on `list_boards`, `list_my_cards_assigned`,
+  `search_cards`, and `workspaces[]` on `search_cards_advanced`. Search scoping
+  goes to Trello as `idOrganizations` rather than being emulated with a board
+  list — cheaper, and it covers boards the member can see but hasn't joined.
+- **`workspace` on every board summary** — `{ id, name, displayName }`, or null
+  for a board outside any workspace. Two boards called "Roadmap" in two
+  workspaces are otherwise indistinguishable in a listing.
+- **New client methods**: `listMyOrganizations`, `getOrganization`,
+  `listOrganizationBoards`. Board fetches now request `idOrganization`, the only
+  link from a board back to its workspace.
+- **`src/trello/resolve.ts`** — the resolution layer, with a 60-second per-client
+  directory cache for boards / workspaces / a board's lists. Time-bounded rather
+  than session-lifetime on purpose: a `TrelloClient` lives as long as an MCP
+  session, and a workspace added mid-session has to become visible without a
+  reconnect. `list_boards` and `list_workspaces` bypass the cache entirely.
+
+### Changed
+- **Ambiguity is refused, never guessed.** A board or list name matching more
+  than one candidate raises a guard error naming each one *and its workspace*,
+  and says how to disambiguate (`workspace`, `board`, or the raw ID). Matching
+  is tiered — exact, then unique prefix, then unique substring — so an exact
+  "Done" wins over "Done (since last)" instead of tripping the ambiguity check.
+- **The dashboard's `?board=` accepts the same reference forms** as the MCP
+  tools, so it can be pointed at a board in any workspace.
+- Archived boards and lists are never resolution candidates.
+
+### Notes
+- **The daily digest and `weekly_review_pack` stay single-board by design.** Both
+  are shaped around `dann-to-do`'s specific lists; `weekly_review_pack` already
+  refuses other boards rather than returning all-zero buckets, and that stands.
+- Adding an alias in `constants.ts` remains useful for a board you touch
+  constantly — it skips the name lookup — but is no longer a prerequisite for
+  using a board at all.
+
 ## [1.18.0] — 2026-07-27
 
 Second custom-fields pass, closing the gaps the v1.17.0 review left open. Two

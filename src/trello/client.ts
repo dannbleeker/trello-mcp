@@ -10,6 +10,13 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.19.0 (2026-07-27) — Multi-workspace. New TrelloOrganization type and
+ *                         listMyOrganizations / getOrganization /
+ *                         listOrganizationBoards. Board fetches request
+ *                         idOrganization (BOARD_FIELDS) — the only link from a
+ *                         board to its workspace. searchCards / searchCardsAdvanced
+ *                         take workspace ids and pass them as idOrganizations,
+ *                         which scopes the search server-side.
  *   1.18.0 (2026-07-27) — listCustomFields memoised per board for the client's
  *                         lifetime; all five custom-field mutations invalidate it.
  *                         v1.17.0 made every custom-field write resolve its
@@ -91,7 +98,7 @@
  *   1.0.0 (2026-06-12) — Initial.
  */
 
-import { CARD_FIELDS, MEMBER_FIELDS } from "./constants";
+import { BOARD_FIELDS, CARD_FIELDS, MEMBER_FIELDS, ORGANIZATION_FIELDS } from "./constants";
 
 const BASE = "https://api.trello.com/1";
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -357,12 +364,31 @@ export interface TrelloList {
 	subscribed?: boolean;
 }
 
-/** Minimal board shape. */
+/**
+ * Minimal board shape. `idOrganization` is the workspace the board lives in —
+ * null/absent for a board that sits directly under the member's personal
+ * space. Every board fetch requests it (v1.19.0) so multi-workspace callers
+ * can group and scope without a second round trip.
+ */
 export interface TrelloBoard {
 	id: string;
 	name: string;
 	url: string;
 	closed: boolean;
+	idOrganization?: string | null;
+}
+
+/**
+ * A Trello workspace (the API still calls it an "organization"). `name` is the
+ * URL-safe short name (e.g. "frontlinetech"), `displayName` the human one
+ * (e.g. "Frontline Tech"). Both are accepted wherever a tool takes a
+ * `workspace` argument. v1.19.0.
+ */
+export interface TrelloOrganization {
+	id: string;
+	name: string;
+	displayName: string;
+	url: string;
 }
 
 /** Minimal label shape. */
@@ -557,7 +583,7 @@ export class TrelloClient {
 
 	async listMyBoards(): Promise<TrelloBoard[]> {
 		const data = await this.request("GET", "/members/me/boards", {
-			fields: "name,url,closed",
+			fields: BOARD_FIELDS,
 			filter: "open",
 		});
 		return data as TrelloBoard[];
@@ -565,9 +591,45 @@ export class TrelloClient {
 
 	async getBoard(boardId: string): Promise<TrelloBoard> {
 		const data = await this.request("GET", `/boards/${boardId}`, {
-			fields: "name,url,closed",
+			fields: BOARD_FIELDS,
 		});
 		return data as TrelloBoard;
+	}
+
+	// ---- Workspaces (Trello calls them organizations) ----
+
+	/**
+	 * Every workspace the authenticated member belongs to. Boards that sit
+	 * outside any workspace (personal boards) have idOrganization null and are
+	 * therefore not represented here — group by board, not by this list, when
+	 * you need full coverage. v1.19.0.
+	 */
+	async listMyOrganizations(): Promise<TrelloOrganization[]> {
+		const data = await this.request("GET", "/members/me/organizations", {
+			fields: ORGANIZATION_FIELDS,
+		});
+		return data as TrelloOrganization[];
+	}
+
+	/** One workspace by ID or short name. */
+	async getOrganization(idOrName: string): Promise<TrelloOrganization> {
+		const data = await this.request("GET", `/organizations/${idOrName}`, {
+			fields: ORGANIZATION_FIELDS,
+		});
+		return data as TrelloOrganization;
+	}
+
+	/**
+	 * Open boards in one workspace. Note this returns boards the member can see
+	 * in that workspace, which for an admin can exceed their own board
+	 * membership — resolution paths intersect it with listMyBoards.
+	 */
+	async listOrganizationBoards(orgId: string): Promise<TrelloBoard[]> {
+		const data = await this.request("GET", `/organizations/${orgId}/boards`, {
+			fields: BOARD_FIELDS,
+			filter: "open",
+		});
+		return data as TrelloBoard[];
 	}
 
 	// ---- Lists ----
@@ -713,7 +775,7 @@ export class TrelloClient {
 		return data as TrelloCard;
 	}
 
-	async searchCards(query: string, boardId?: string): Promise<TrelloCard[]> {
+	async searchCards(query: string, boardId?: string, orgId?: string): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query,
 			modelTypes: "cards",
@@ -722,6 +784,9 @@ export class TrelloClient {
 			partial: true,
 		};
 		if (boardId) params.idBoards = boardId;
+		// Trello scopes /search by workspace natively — cheaper and more complete
+		// than fetching the workspace's boards and passing idBoards. v1.19.0.
+		if (orgId) params.idOrganizations = orgId;
 		const data = await this.request("GET", "/search", params);
 		const { cards = [] } = data as { cards?: TrelloCard[] };
 		return cards;
@@ -736,6 +801,7 @@ export class TrelloClient {
 	async searchCardsAdvanced(input: {
 		query: string;
 		boardIds?: string[];
+		orgIds?: string[];
 		cardsLimit?: number;
 	}): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
@@ -746,6 +812,7 @@ export class TrelloClient {
 			partial: true,
 		};
 		if (input.boardIds && input.boardIds.length) params.idBoards = input.boardIds.join(",");
+		if (input.orgIds && input.orgIds.length) params.idOrganizations = input.orgIds.join(",");
 		const data = await this.request("GET", "/search", params);
 		const { cards = [] } = data as { cards?: TrelloCard[] };
 		return cards;

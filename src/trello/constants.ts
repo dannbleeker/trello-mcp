@@ -10,6 +10,11 @@
  *              an alias; tools resolve aliases at call time.
  *
  * Change log:
+ *   1.19.0 (2026-07-27) — BOARD_FIELDS / ORGANIZATION_FIELDS for workspace-aware
+ *                         fetches; isTrelloId + boardShortLinkFromUrl, used by
+ *                         resolve.ts to tell an ID or a pasted board URL from a
+ *                         name that needs looking up. Aliases are now an
+ *                         optimisation, not the only way to reach a board.
  *   1.0.0 (2026-06-12) — Initial. Captures Dann to-do (GTD) and Zoo Leadership Meeting layouts.
  */
 
@@ -113,6 +118,16 @@ export const CARD_FIELDS =
 export const MEMBER_FIELDS = "fullName,username,initials";
 
 /**
+ * Board `fields` query-string. `idOrganization` is what makes the connector
+ * workspace-aware: it is the only link from a board back to the workspace it
+ * lives in, and Trello omits it unless asked. v1.19.0.
+ */
+export const BOARD_FIELDS = "name,url,closed,idOrganization";
+
+/** Workspace (organization) `fields` query-string. v1.19.0. */
+export const ORGANIZATION_FIELDS = "name,displayName,url";
+
+/**
  * IANA timezone used for day-boundary math (list_cards_due today scope,
  * weekly_review_pack due_today bucket, etc.). Cloudflare Workers run in UTC,
  * so without this the day-buckets misclassify Dann's cards by up to two hours.
@@ -126,6 +141,26 @@ export const DEFAULT_TIMEZONE = "Europe/Copenhagen";
 export function parseWipLimit(listName: string): number | null {
 	const match = listName.match(/\(WIP limit (\d+)\)/i);
 	return match ? Number(match[1]) : null;
+}
+
+/**
+ * True for a raw 24-char hex Trello object ID. Used by the reference resolvers
+ * to tell "this is already an ID" from "this is a name to look up". v1.19.0.
+ */
+export function isTrelloId(value: string): boolean {
+	return /^[0-9a-f]{24}$/i.test(value.trim());
+}
+
+/**
+ * Pull the short link out of a Trello board URL
+ * (https://trello.com/b/xKeUkW8V/tech-retail-decision-board → xKeUkW8V).
+ * Trello's REST API accepts a short link anywhere a board ID is accepted, so
+ * pasting a URL from any workspace just works. Returns null for non-URLs.
+ * v1.19.0.
+ */
+export function boardShortLinkFromUrl(value: string): string | null {
+	const m = value.trim().match(/^https?:\/\/(?:www\.)?trello\.com\/b\/([A-Za-z0-9]+)/);
+	return m ? m[1] : null;
 }
 
 /** Resolve a board key/ID to the canonical 24-char ID. */

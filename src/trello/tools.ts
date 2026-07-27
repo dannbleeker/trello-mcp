@@ -37,6 +37,24 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.17.0 (2026-07-27) — Custom-fields pass. Every custom-field tool resolves a
+ *                         field by name as well as by ID (resolveCustomField),
+ *                         matching how boards/lists/plugins already work, and
+ *                         list-type options resolve by label too. Values are now
+ *                         validated against the field's declared type before the
+ *                         write — sending {text} to a number field was an opaque
+ *                         Trello 400 or a silent no-op. list_card_custom_fields
+ *                         joins against the board definitions: each row carries
+ *                         name + type, list values resolve to the option LABEL,
+ *                         and never-set fields come back with value: null
+ *                         (Trello omits them, making "unset" and "no such field"
+ *                         indistinguishable). get_card gains customFields: true.
+ *                         An empty field list is now disambiguated against
+ *                         list_board_plugins, so "Power-Up not enabled" is an
+ *                         actionable error instead of []. delete_custom_field
+ *                         requires confirm: true — it erases the field's value
+ *                         on every card, and it's the only cross-card
+ *                         destructive op in the server.
  *   1.13.0 (2026-07-10) — startOfDayMsInTz: correct day boundary on DST transition
  *                         days (was off by 1h) and strip sub-second residue;
  *                         batch_get: reject paths containing commas (Trello's
@@ -218,6 +236,8 @@ export interface CardSummary {
 
 interface CardDetail extends CardSummary {
 	boardId: string;
+	/** Present only when get_card is called with customFields: true. */
+	customFields?: ParsedCustomFieldItem[];
 }
 
 export function summariseCard(card: TrelloCard): CardSummary {
@@ -338,15 +358,21 @@ export async function list_cards(
 /** get_card — full details for one card. */
 export async function get_card(
 	client: TrelloClient,
-	input: { cardId: string },
+	input: { cardId: string; customFields?: boolean },
 ): Promise<{ card: CardDetail }> {
-	const card = await client.getCard(input.cardId);
-	return {
-		card: {
-			...summariseCard(card),
-			boardId: card.idBoard,
-		},
+	// Opt-in rather than always-on: the values ride along on this same request,
+	// but joining them to their names costs a second call for the board's
+	// definitions, and get_card is a hot path. v1.17.0.
+	const card = await client.getCard(input.cardId, { customFieldItems: input.customFields });
+	const detail: CardDetail = {
+		...summariseCard(card),
+		boardId: card.idBoard,
 	};
+	if (input.customFields) {
+		const defs = await customFieldDefs(client, card.idBoard);
+		detail.customFields = joinCustomFieldItems(card.customFieldItems ?? [], defs, card.id);
+	}
+	return { card: detail };
 }
 
 /** search_cards — fuzzy name match across a board (or all boards if board omitted). */
@@ -2136,6 +2162,77 @@ export async function get_action_display(
 
 const CUSTOM_FIELD_TYPES = new Set(["checkbox", "date", "list", "number", "text"] as const);
 
+/** Trello object IDs are 24 lowercase hex chars. Anything else is a name. */
+const TRELLO_ID_RE = /^[0-9a-f]{24}$/;
+
+/**
+ * Fetch a board's custom-field definitions, turning the two "you can't do that
+ * yet" cases into actionable errors instead of an empty list or a raw Trello
+ * 4xx. Trello returns [] both when the Power-Up is off and when it's on but no
+ * fields exist — only list_board_plugins can tell those apart, so we check it
+ * on the empty path. v1.17.0.
+ */
+async function customFieldDefs(
+	client: TrelloClient,
+	boardId: string,
+): Promise<TrelloCustomField[]> {
+	const fields = await client.listCustomFields(boardId);
+	if (fields.length > 0) return fields;
+	const plugins = await client.listBoardPlugins(boardId);
+	const enabled = plugins.some((p) => p.idPlugin === PLUGIN_ALIASES["custom-fields"]);
+	if (!enabled) {
+		throw new GuardError(
+			`The Custom Fields Power-Up is not enabled on board ${boardId}. ` +
+				`Run enable_board_plugin({ board: "${boardId}", plugin: "custom-fields" }) first.`,
+		);
+	}
+	return fields;
+}
+
+/**
+ * Resolve a custom field by ID or by name (case-insensitive). Every tool that
+ * takes a `customFieldId` accepts a name too — matching how boards, lists and
+ * plugins already resolve. Returns the full definition so callers get `type`
+ * and `options` without a second fetch. v1.17.0.
+ */
+async function resolveCustomField(
+	client: TrelloClient,
+	boardId: string,
+	key: string,
+): Promise<TrelloCustomField> {
+	const fields = await customFieldDefs(client, boardId);
+	if (TRELLO_ID_RE.test(key)) {
+		const byId = fields.find((f) => f.id === key);
+		if (byId) return byId;
+		throw new GuardError(
+			`No custom field with ID "${key}" on board ${boardId}. ` +
+				`Available: ${fields.map((f) => `${f.name} (${f.id})`).join(", ") || "none"}.`,
+		);
+	}
+	const wanted = key.trim().toLowerCase();
+	const matches = fields.filter((f) => f.name.trim().toLowerCase() === wanted);
+	if (matches.length === 1) return matches[0];
+	if (matches.length > 1) {
+		throw new GuardError(
+			`Custom-field name "${key}" is ambiguous on board ${boardId} — ` +
+				`${matches.length} fields share it. Pass the ID instead: ${matches.map((f) => f.id).join(", ")}.`,
+		);
+	}
+	throw new GuardError(
+		`No custom field named "${key}" on board ${boardId}. ` +
+			`Available: ${fields.map((f) => f.name).join(", ") || "none"}.`,
+	);
+}
+
+/** The `value` key a caller must use for each field type. */
+const VALUE_KEY_FOR_TYPE = {
+	checkbox: "checked",
+	date: "date",
+	number: "number",
+	text: "text",
+	list: "listOptionId",
+} as const;
+
 /** list_custom_fields — field definitions on a board. */
 export async function list_custom_fields(
 	client: TrelloClient,
@@ -2147,7 +2244,7 @@ export async function list_custom_fields(
 	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
 	const [board, fields] = await Promise.all([
 		client.getBoard(boardId),
-		client.listCustomFields(boardId),
+		customFieldDefs(client, boardId),
 	]);
 	return { board: summariseBoard(board), customFields: fields };
 }
@@ -2174,6 +2271,9 @@ export async function create_custom_field(
 		);
 	}
 	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	// Surfaces "Power-Up not enabled" as an actionable error rather than the
+	// opaque Trello 4xx that createCustomField would otherwise throw.
+	await customFieldDefs(client, boardId);
 	const created = await client.createCustomField({
 		boardId,
 		name: input.name,
@@ -2184,11 +2284,16 @@ export async function create_custom_field(
 	return { customField: created };
 }
 
-/** update_custom_field — rename / reposition / toggle display on card front. */
+/**
+ * update_custom_field — rename / reposition / toggle display on card front.
+ * `customFieldId` accepts a field name as well as an ID; `board` scopes the
+ * name lookup (default board when omitted).
+ */
 export async function update_custom_field(
 	client: TrelloClient,
 	input: {
 		customFieldId: string;
+		board?: string;
 		name?: string;
 		pos?: "top" | "bottom" | number;
 		displayCardFront?: boolean;
@@ -2201,7 +2306,9 @@ export async function update_custom_field(
 	) {
 		throw new GuardError("Pass at least one of `name`, `pos`, or `displayCardFront`.");
 	}
-	const updated = await client.updateCustomField(input.customFieldId, {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const field = await resolveCustomField(client, boardId, input.customFieldId);
+	const updated = await client.updateCustomField(field.id, {
 		name: input.name,
 		pos: input.pos,
 		displayCardFront: input.displayCardFront,
@@ -2209,21 +2316,47 @@ export async function update_custom_field(
 	return { customField: updated };
 }
 
-/** delete_custom_field — remove the field definition (and every card's value for it). */
+/**
+ * delete_custom_field — remove the field definition (and every card's value for
+ * it). Destructive and irreversible: pass `confirm: true` to go through with it.
+ * The rest of this server has no hard-delete for cards at all; this is the one
+ * place a caller can destroy data across every card at once. v1.17.0.
+ */
 export async function delete_custom_field(
 	client: TrelloClient,
-	input: { customFieldId: string },
-): Promise<{ ok: true }> {
-	await client.deleteCustomField(input.customFieldId);
-	return { ok: true };
+	input: { customFieldId: string; board?: string; confirm?: boolean },
+): Promise<{ ok: true; deleted: { id: string; name: string; type: string } }> {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const field = await resolveCustomField(client, boardId, input.customFieldId);
+	if (input.confirm !== true) {
+		throw new GuardError(
+			`Refused: deleting custom field "${field.name}" (${field.id}) also erases its value on ` +
+				`every card on board ${boardId}, and cannot be undone. Re-run with confirm: true.`,
+		);
+	}
+	await client.deleteCustomField(field.id);
+	return { ok: true, deleted: { id: field.id, name: field.name, type: field.type } };
 }
 
 /** add_custom_field_option — for list-type fields. `color` is a Trello palette token. */
 export async function add_custom_field_option(
 	client: TrelloClient,
-	input: { customFieldId: string; value: string; color?: string; pos?: "top" | "bottom" | number },
+	input: {
+		customFieldId: string;
+		board?: string;
+		value: string;
+		color?: string;
+		pos?: "top" | "bottom" | number;
+	},
 ): Promise<{ option: { id: string; value: string; color?: string; pos: number } }> {
-	const opt = await client.addCustomFieldOption(input.customFieldId, {
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const field = await resolveCustomField(client, boardId, input.customFieldId);
+	if (field.type !== "list") {
+		throw new GuardError(
+			`Custom field "${field.name}" is type "${field.type}" — only LIST-type fields have options.`,
+		);
+	}
+	const opt = await client.addCustomFieldOption(field.id, {
 		value: input.value,
 		color: input.color,
 		pos: input.pos,
@@ -2238,69 +2371,175 @@ export async function add_custom_field_option(
 	};
 }
 
-/** delete_custom_field_option — remove one option from a list-type field. */
+/**
+ * delete_custom_field_option — remove one option from a list-type field.
+ * `optionId` accepts the option's label as well as its ID.
+ */
 export async function delete_custom_field_option(
 	client: TrelloClient,
-	input: { customFieldId: string; optionId: string },
+	input: { customFieldId: string; optionId: string; board?: string },
 ): Promise<{ ok: true }> {
-	await client.deleteCustomFieldOption(input.customFieldId, input.optionId);
+	const boardId = resolveBoard(input.board ?? DEFAULT_BOARD);
+	const field = await resolveCustomField(client, boardId, input.customFieldId);
+	if (field.type !== "list") {
+		throw new GuardError(
+			`Custom field "${field.name}" is type "${field.type}" — only LIST-type fields have options.`,
+		);
+	}
+	const optionId = resolveFieldOption(field, input.optionId);
+	await client.deleteCustomFieldOption(field.id, optionId);
 	return { ok: true };
 }
 
 /**
- * list_card_custom_fields — a card's current custom-field values. Trello
- * returns `value.checked` as the string "true"/"false" and `value.number` as
- * a string. The tool layer parses both to their proper JS types so callers
- * don't accidentally treat "false" as truthy or sort numbers alphabetically.
- * v1.9.0 fix.
+ * Resolve a list-field option by ID or by its label text (case-insensitive).
+ * Also the guard that stops an option from another field being written to this
+ * one — Trello accepts a foreign idValue and stores an unresolvable reference.
+ */
+function resolveFieldOption(field: TrelloCustomField, key: string): string {
+	const options = field.options ?? [];
+	if (TRELLO_ID_RE.test(key)) {
+		if (options.some((o) => o.id === key)) return key;
+		throw new GuardError(
+			`Option "${key}" does not belong to custom field "${field.name}". ` +
+				`Its options are: ${describeOptions(options)}.`,
+		);
+	}
+	const wanted = key.trim().toLowerCase();
+	const matches = options.filter((o) => (o.value?.text ?? "").trim().toLowerCase() === wanted);
+	if (matches.length === 1) return matches[0].id;
+	if (matches.length > 1) {
+		throw new GuardError(
+			`Option label "${key}" is ambiguous on custom field "${field.name}" — ` +
+				`pass the ID instead: ${matches.map((o) => o.id).join(", ")}.`,
+		);
+	}
+	throw new GuardError(
+		`No option labelled "${key}" on custom field "${field.name}". ` +
+			`Its options are: ${describeOptions(options)}.`,
+	);
+}
+
+function describeOptions(options: { id: string; value: { text?: string } }[]): string {
+	if (options.length === 0) return "none";
+	return options.map((o) => `${o.value?.text ?? "(untitled)"} (${o.id})`).join(", ");
+}
+
+/**
+ * A card's value for one custom field, joined against the field definition.
+ *
+ * Trello returns `value.checked` as the string "true"/"false" and
+ * `value.number` as a string; both are parsed to proper JS types so callers
+ * don't treat "false" as truthy or sort numbers alphabetically (v1.9.0 fix).
+ *
+ * v1.17.0 adds the definition join: `name`, `type`, and — for list-type
+ * fields — `text` carrying the selected option's LABEL rather than only its
+ * opaque `idValue`. Fields the card has never had set are included with
+ * `value: null`, so "unset" is distinguishable from "no such field" (Trello
+ * simply omits unset fields from its own response).
  */
 interface ParsedCustomFieldItem {
-	id: string;
+	/** Item ID. Null for a field that has never been set on this card. */
+	id: string | null;
 	idCustomField: string;
+	/** Field name from the board definition. */
+	name: string;
+	type: "checkbox" | "date" | "list" | "number" | "text";
 	idModel: string;
 	modelType: string;
+	/** Selected option ID, list-type fields only. */
 	idValue?: string;
 	value: {
 		checked?: boolean;
 		date?: string;
 		number?: number;
+		/** Free text for text fields; the selected option's label for list fields. */
 		text?: string;
 	} | null;
+}
+
+/** Parse one raw item against its definition. */
+function parseCustomFieldItem(
+	it: TrelloCustomFieldItem,
+	field: TrelloCustomField,
+): ParsedCustomFieldItem {
+	const parsed: ParsedCustomFieldItem = {
+		id: it.id,
+		idCustomField: it.idCustomField,
+		name: field.name,
+		type: field.type,
+		idModel: it.idModel,
+		modelType: it.modelType,
+		idValue: it.idValue,
+		value: null,
+	};
+	if (it.value) {
+		parsed.value = {};
+		if (typeof it.value.checked === "string") {
+			parsed.value.checked = it.value.checked === "true";
+		}
+		if (typeof it.value.date === "string") {
+			parsed.value.date = it.value.date;
+		}
+		if (typeof it.value.number === "string") {
+			const n = Number(it.value.number);
+			if (Number.isFinite(n)) parsed.value.number = n;
+		}
+		if (typeof it.value.text === "string") {
+			parsed.value.text = it.value.text;
+		}
+	}
+	// List-type fields carry their data as an option reference, not a value —
+	// resolve it to the label so callers never have to join by hand.
+	if (it.idValue) {
+		const opt = field.options?.find((o) => o.id === it.idValue);
+		if (opt?.value?.text !== undefined) {
+			parsed.value = { ...(parsed.value ?? {}), text: opt.value.text };
+		}
+	}
+	return parsed;
+}
+
+/**
+ * Join a card's raw custom-field items against the board's definitions,
+ * emitting every defined field in board order (unset ones with `value: null`).
+ * Items whose definition is missing — a field deleted mid-flight — are dropped
+ * rather than surfaced with a bogus name.
+ */
+function joinCustomFieldItems(
+	raw: TrelloCustomFieldItem[],
+	defs: TrelloCustomField[],
+	cardId: string,
+): ParsedCustomFieldItem[] {
+	const byField = new Map(raw.map((it) => [it.idCustomField, it]));
+	return [...defs]
+		.sort((a, b) => a.pos - b.pos)
+		.map((field) => {
+			const it = byField.get(field.id);
+			if (it) return parseCustomFieldItem(it, field);
+			return {
+				id: null,
+				idCustomField: field.id,
+				name: field.name,
+				type: field.type,
+				idModel: cardId,
+				modelType: "card",
+				value: null,
+			} satisfies ParsedCustomFieldItem;
+		});
 }
 
 export async function list_card_custom_fields(
 	client: TrelloClient,
 	input: { cardId: string },
 ): Promise<{ cardId: string; items: ParsedCustomFieldItem[] }> {
-	const raw = await client.listCardCustomFieldItems(input.cardId);
-	const items: ParsedCustomFieldItem[] = raw.map((it: TrelloCustomFieldItem) => {
-		const parsed: ParsedCustomFieldItem = {
-			id: it.id,
-			idCustomField: it.idCustomField,
-			idModel: it.idModel,
-			modelType: it.modelType,
-			idValue: it.idValue,
-			value: null,
-		};
-		if (it.value) {
-			parsed.value = {};
-			if (typeof it.value.checked === "string") {
-				parsed.value.checked = it.value.checked === "true";
-			}
-			if (typeof it.value.date === "string") {
-				parsed.value.date = it.value.date;
-			}
-			if (typeof it.value.number === "string") {
-				const n = Number(it.value.number);
-				if (Number.isFinite(n)) parsed.value.number = n;
-			}
-			if (typeof it.value.text === "string") {
-				parsed.value.text = it.value.text;
-			}
-		}
-		return parsed;
-	});
-	return { cardId: input.cardId, items };
+	// The values ride along on the card fetch (customFieldItems=true), which
+	// also gives us the board ID for the definitions — two calls total, and the
+	// join is what makes the output usable without a manual lookup.
+	const card = await client.getCard(input.cardId, { customFieldItems: true });
+	const defs = await customFieldDefs(client, card.idBoard);
+	const raw = card.customFieldItems ?? (await client.listCardCustomFieldItems(input.cardId));
+	return { cardId: input.cardId, items: joinCustomFieldItems(raw, defs, input.cardId) };
 }
 
 /**
@@ -2329,35 +2568,55 @@ export async function set_card_custom_field(
 			| null;
 	},
 ): Promise<{ item: TrelloCustomFieldItem | null }> {
-	await assertCardWritable(client, input.cardId);
+	const card = await assertCardWritable(client, input.cardId);
+	// Resolving the field also gets us its type, so the value can be checked
+	// against the definition before we spend a write. Sending {text} to a
+	// number field otherwise yields an opaque Trello 400 or a silent no-op.
+	const field = await resolveCustomField(client, card.idBoard, input.customFieldId);
 
 	let body: Record<string, unknown> = {};
 	if (input.value === null) {
 		body = {};
 	} else if ("checked" in input.value) {
+		assertFieldType(field, "checkbox");
 		body = { value: { checked: input.value.checked ? "true" : "false" } };
 	} else if ("date" in input.value) {
+		assertFieldType(field, "date");
 		if (Number.isNaN(Date.parse(input.value.date))) {
 			throw new GuardError(`Invalid ISO 8601 date: "${input.value.date}".`);
 		}
 		body = { value: { date: input.value.date } };
 	} else if ("number" in input.value) {
+		assertFieldType(field, "number");
 		if (!Number.isFinite(input.value.number)) {
 			throw new GuardError(`Invalid number: ${input.value.number}.`);
 		}
 		body = { value: { number: String(input.value.number) } };
 	} else if ("text" in input.value) {
+		assertFieldType(field, "text");
 		body = { value: { text: input.value.text } };
 	} else if ("listOptionId" in input.value) {
-		body = { idValue: input.value.listOptionId };
+		assertFieldType(field, "list");
+		// Accepts the option's label too, and refuses an option belonging to a
+		// different field — Trello would store that reference unresolvable.
+		body = { idValue: resolveFieldOption(field, input.value.listOptionId) };
 	} else {
 		throw new GuardError(
 			"`value` must have exactly one of: checked, date, number, text, listOptionId — or be null.",
 		);
 	}
 
-	const item = await client.setCardCustomFieldItem(input.cardId, input.customFieldId, body);
+	const item = await client.setCardCustomFieldItem(input.cardId, field.id, body);
 	return { item };
+}
+
+/** Refuse a value whose shape doesn't match the field's declared type. */
+function assertFieldType(field: TrelloCustomField, expected: TrelloCustomField["type"]): void {
+	if (field.type === expected) return;
+	throw new GuardError(
+		`Custom field "${field.name}" (${field.id}) is type "${field.type}", not "${expected}". ` +
+			`Pass value as { ${VALUE_KEY_FOR_TYPE[field.type]}: ... }.`,
+	);
 }
 
 // ---- Plugins / Power-Ups ----

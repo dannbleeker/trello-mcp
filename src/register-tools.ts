@@ -146,6 +146,31 @@ function err(e: unknown) {
 	return { content: [{ type: "text" as const, text: `Internal error: ${msg}` }], isError: true };
 }
 
+/**
+ * Every custom-field tool takes a field by ID *or* by name, matching how
+ * boards / lists / plugins already resolve. Names are looked up on the `board`
+ * param (default board when omitted); set_card_custom_field infers the board
+ * from the card instead. v1.17.0.
+ */
+const CUSTOM_FIELD_REF = z
+	.string()
+	.min(1)
+	.describe("Custom-field ID, or its name (case-insensitive) — see list_custom_fields.");
+
+/** Trello's fixed option palette. An enum fails here instead of at Trello. */
+const CUSTOM_FIELD_COLORS = z.enum([
+	"green",
+	"yellow",
+	"orange",
+	"red",
+	"purple",
+	"blue",
+	"sky",
+	"lime",
+	"pink",
+	"black",
+]);
+
 /** Wrap a tool handler with auth check + uniform error mapping. */
 function guarded<TIn>(
 	login: string,
@@ -207,9 +232,15 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 
 	server.tool(
 		"get_card",
-		"Get full details (including description) for one card by its 24-char Trello ID.",
-		{ cardId: z.string().describe("Trello card ID.") },
-		guarded(login, async (i: { cardId: string }) => get_card(client, i)),
+		"Get full details (including description) for one card by its 24-char Trello ID. Pass customFields: true to include the card's custom-field values, named and typed.",
+		{
+			cardId: z.string().describe("Trello card ID."),
+			customFields: z
+				.boolean()
+				.optional()
+				.describe("Include custom-field values (one extra API call). Default false."),
+		},
+		guarded(login, async (i: { cardId: string; customFields?: boolean }) => get_card(client, i)),
 	);
 
 	server.tool(
@@ -1100,7 +1131,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 
 	server.tool(
 		"list_custom_fields",
-		"Custom-field DEFINITIONS on a board (Power-Up). Requires the Custom Fields Power-Up enabled — see list_board_plugins / enable_board_plugin(\"custom-fields\").",
+		"Custom-field DEFINITIONS on a board (Power-Up). Errors with an actionable message if the Custom Fields Power-Up is not enabled on the board.",
 		{ board: z.string().optional().describe("Board alias or ID. Default: dann-to-do.") },
 		guarded(login, async (i: { board?: string }) => list_custom_fields(client, i)),
 	);
@@ -1126,73 +1157,87 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"update_custom_field",
 		"Rename / reposition / toggle display-on-card-front for a custom-field definition.",
 		{
-			customFieldId: z.string(),
+			customFieldId: CUSTOM_FIELD_REF,
+			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
 			name: z.string().min(1).optional(),
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 			displayCardFront: z.boolean().optional(),
 		},
 		guarded(
 			login,
-			async (i: { customFieldId: string; name?: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
+			async (i: { customFieldId: string; board?: string; name?: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
 				update_custom_field(client, i),
 		),
 	);
 
 	server.tool(
 		"delete_custom_field",
-		"Delete a custom-field definition (destructive: removes every card's value for it).",
-		{ customFieldId: z.string() },
-		guarded(login, async (i: { customFieldId: string }) => delete_custom_field(client, i)),
+		"Delete a custom-field definition. DESTRUCTIVE and irreversible: it also erases that field's value on every card on the board. Requires confirm: true.",
+		{
+			customFieldId: CUSTOM_FIELD_REF,
+			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			confirm: z
+				.boolean()
+				.optional()
+				.describe("Must be true. Without it the call is refused with a description of what would be lost."),
+		},
+		guarded(login, async (i: { customFieldId: string; board?: string; confirm?: boolean }) =>
+			delete_custom_field(client, i),
+		),
 	);
 
 	server.tool(
 		"add_custom_field_option",
-		"Add an option to a LIST-type custom field. `color` is a Trello palette token (red / orange / yellow / green / blue / purple / pink / sky / lime / black / null).",
+		"Add an option to a LIST-type custom field. Refused if the field is not list-type.",
 		{
-			customFieldId: z.string(),
+			customFieldId: CUSTOM_FIELD_REF,
+			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
 			value: z.string().min(1).describe("Option label text."),
-			color: z.string().optional(),
+			color: CUSTOM_FIELD_COLORS.optional().describe("Trello palette token."),
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
 		guarded(
 			login,
-			async (i: { customFieldId: string; value: string; color?: string; pos?: "top" | "bottom" | number }) =>
+			async (i: { customFieldId: string; board?: string; value: string; color?: string; pos?: "top" | "bottom" | number }) =>
 				add_custom_field_option(client, i),
 		),
 	);
 
 	server.tool(
 		"delete_custom_field_option",
-		"Remove an option from a LIST-type custom field. `optionId` comes from list_custom_fields.",
+		"Remove an option from a LIST-type custom field. `optionId` accepts the option's ID or its label text.",
 		{
-			customFieldId: z.string(),
-			optionId: z.string(),
+			customFieldId: CUSTOM_FIELD_REF,
+			board: z.string().optional().describe("Board alias or ID for the name lookup. Default: dann-to-do."),
+			optionId: z.string().describe("Option ID, or the option's label text."),
 		},
-		guarded(login, async (i: { customFieldId: string; optionId: string }) =>
+		guarded(login, async (i: { customFieldId: string; optionId: string; board?: string }) =>
 			delete_custom_field_option(client, i),
 		),
 	);
 
 	server.tool(
 		"list_card_custom_fields",
-		"A card's current custom-field values (typed by the field definition).",
+		"A card's custom-field values, joined against the board's definitions: each row carries `name` and `type`, list-type rows resolve to the option's label, and fields that have never been set are returned with value: null.",
 		{ cardId: z.string() },
 		guarded(login, async (i: { cardId: string }) => list_card_custom_fields(client, i)),
 	);
 
 	server.tool(
 		"set_card_custom_field",
-		"Set a custom-field value on a card. `value` is one of: { checked: bool } | { date: ISO } | { number } | { text } | { listOptionId } | null (to clear). Only one field key must be present.",
+		"Set a custom-field value on a card. `value` is one of: { checked: bool } | { date: ISO } | { number } | { text } | { listOptionId } | null (to clear). Only one key may be present, and it must match the field's declared type — a mismatch is refused with the correct key named. `listOptionId` accepts an option label as well as an ID.",
 		{
 			cardId: z.string(),
-			customFieldId: z.string(),
+			customFieldId: CUSTOM_FIELD_REF,
+			// .strict() so a two-key value ({ text, number }) is rejected outright.
+			// Non-strict objects silently drop the extra key and write the wrong one.
 			value: z
 				.union([
-					z.object({ checked: z.boolean() }),
-					z.object({ date: z.string() }),
-					z.object({ number: z.number() }),
-					z.object({ text: z.string() }),
-					z.object({ listOptionId: z.string() }),
+					z.object({ checked: z.boolean() }).strict(),
+					z.object({ date: z.string() }).strict(),
+					z.object({ number: z.number() }).strict(),
+					z.object({ text: z.string() }).strict(),
+					z.object({ listOptionId: z.string() }).strict(),
 					z.null(),
 				])
 				.describe("Typed value; null clears the field."),

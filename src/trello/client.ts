@@ -10,6 +10,14 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.17.0 (2026-07-27) — updateCustomField now goes through retryableFetch. It
+ *                         hand-builds its URL (to keep the literal slash in
+ *                         Trello's `display/cardFront` key) and used to
+ *                         hand-roll fetch() as well, silently opting out of the
+ *                         429/5xx backoff every other call gets. getCard takes
+ *                         { customFieldItems } to piggyback a card's
+ *                         custom-field values onto the same request; TrelloCard
+ *                         models the resulting field.
  *   1.13.0 (2026-07-10) — retryableFetch no longer retries 5xx on non-idempotent
  *                         methods (POST): a gateway 5xx can arrive after Trello
  *                         committed the write, so a retry duplicated the side
@@ -170,6 +178,8 @@ export interface TrelloCard {
 	cover?: Partial<TrelloCardCover>;
 	/** Present only on fetches that pass pluginData=true (see listArchivedCardsWithPluginData). */
 	pluginData?: TrelloPluginData[];
+	/** Present only on fetches that pass customFieldItems=true (see getCard). */
+	customFieldItems?: TrelloCustomFieldItem[];
 	/** Present on archived-card fetches. */
 	dateClosed?: string | null;
 }
@@ -725,10 +735,17 @@ export class TrelloClient {
 		return cards;
 	}
 
-	async getCard(cardId: string): Promise<TrelloCard> {
-		const data = await this.request("GET", `/cards/${cardId}`, {
+	/**
+	 * `customFieldItems` piggybacks the card's custom-field values onto the same
+	 * request — no extra round trip. Trello omits items for fields that have
+	 * never been set, so an absent field means "unset", not "undefined field".
+	 */
+	async getCard(cardId: string, opts: { customFieldItems?: boolean } = {}): Promise<TrelloCard> {
+		const params: Record<string, string | number | boolean | undefined> = {
 			fields: CARD_FIELDS,
-		});
+		};
+		if (opts.customFieldItems) params.customFieldItems = true;
+		const data = await this.request("GET", `/cards/${cardId}`, params);
 		return data as TrelloCard;
 	}
 
@@ -1385,14 +1402,13 @@ export class TrelloClient {
 				? `&display/cardFront=${input.displayCardFront ? "true" : "false"}`
 				: "";
 		const url = this.url(`/customFields/${customFieldId}`, params) + displaySuffix;
-		const resp = await fetch(url, {
+		// Can't go through request() (it rebuilds the URL and would re-encode the
+		// slash), but retryableFetch takes a pre-built URL — so 429 / transient-5xx
+		// backoff still applies here, same as every other call. v1.17.0 fix.
+		const resp = await this.retryableFetch(url, () => ({
 			method: "PUT",
 			headers: { Accept: "application/json" },
-		});
-		if (!resp.ok) {
-			const body = await resp.text();
-			throw new TrelloError(resp.status, body);
-		}
+		}));
 		const ct = resp.headers.get("content-type") ?? "";
 		const data = ct.includes("application/json") ? await resp.json() : null;
 		return data as TrelloCustomField;

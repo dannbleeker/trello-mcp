@@ -120,3 +120,75 @@ describe("TrelloClient.request (via a public method that exercises the code path
 		expect(urlObj.searchParams.get("token")).toBe("test-token");
 	});
 });
+
+// updateCustomField is the one method that can't route through request() — it
+// hand-builds the URL so Trello's `display/cardFront` key keeps its literal
+// slash (URLSearchParams would emit %2F and Trello would drop the key). Until
+// v1.17.0 it hand-rolled fetch() too, and silently lost the retry loop that
+// every other call gets. These pin both halves: the slash survives, AND the
+// call still backs off on 429 / transient 5xx.
+describe("TrelloClient.updateCustomField", () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+	const client = new TrelloClient("test-key", "test-token");
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+		vi.useRealTimers();
+	});
+
+	it("sends display/cardFront with a literal slash, not %2F", async () => {
+		fetchSpy.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+		await client.updateCustomField("cf1", { displayCardFront: true });
+		const [url] = fetchSpy.mock.calls[0];
+		expect(url as string).toContain("display/cardFront=true");
+		expect(url as string).not.toContain("display%2FcardFront");
+	});
+
+	it("retries on 429 instead of throwing (v1.17.0 fix)", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("rate limited", 429, { "Retry-After": "1" }))
+			.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		await vi.advanceTimersByTimeAsync(1_500);
+		const updated = await promise;
+
+		expect(updated).toMatchObject({ id: "cf1" });
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("retries a transient 500 — PUT is idempotent", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 500))
+			.mockResolvedValueOnce(jsonResponse({ id: "cf1", name: "Effort" }));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		await vi.advanceTimersByTimeAsync(5_000);
+		await promise;
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("still throws TrelloError once retries are exhausted", async () => {
+		vi.useFakeTimers();
+		fetchSpy
+			.mockResolvedValueOnce(textResponse("boom", 503))
+			.mockResolvedValueOnce(textResponse("boom", 503))
+			.mockResolvedValueOnce(textResponse("boom", 503));
+
+		const promise = client.updateCustomField("cf1", { name: "Effort" });
+		const settle = promise.catch((e) => e);
+		await vi.advanceTimersByTimeAsync(10_000);
+		const err = await settle;
+
+		expect(err).toBeInstanceOf(TrelloError);
+		expect((err as TrelloError).status).toBe(503);
+		expect(fetchSpy).toHaveBeenCalledTimes(3);
+	});
+});

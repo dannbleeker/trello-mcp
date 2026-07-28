@@ -25,6 +25,15 @@
  *              becomes visible within a minute, without a reconnect.
  *
  * Change log:
+ *   1.1.0 (2026-07-28) — Bug-hunt fixes. A board URL now canonicalises to the
+ *                        24-char ID instead of resolving to the short link
+ *                        (callers COMPARE the result against card.idBoard and
+ *                        pass it to /search, where a short link matches nothing
+ *                        and 400s). boardLists caches archived lists too, so
+ *                        reopening a list by name is possible and no longer
+ *                        depends on cache age. New assertListOnBoard: an alias
+ *                        or ID given alongside an explicit `board` is checked
+ *                        against it rather than silently winning.
  *   1.0.0 (2026-07-27) — Initial (v1.19.0 multi-workspace support).
  */
 
@@ -116,7 +125,15 @@ export async function memberWorkspaces(
 	return orgs;
 }
 
-/** Open lists on a board. Cached per board. */
+/**
+ * Every list on a board, archived ones included. Cached per board.
+ *
+ * The cache deliberately holds the unfiltered set: resolution drops archived
+ * lists, but `archive_list({ closed: false })` has to find one *because* it is
+ * archived. Caching the filtered set made reopening a list by name impossible
+ * — and, worse, made it work or not depending on how warm the cache was.
+ * v1.19.2.
+ */
 export async function boardLists(
 	client: TrelloClient,
 	boardId: string,
@@ -128,9 +145,20 @@ export async function boardLists(
 		const hit = fresh(cache.lists.get(boardId), now);
 		if (hit) return hit;
 	}
-	const lists = (await client.listListsOnBoard(boardId)).filter((l) => !l.closed);
+	const lists = await client.listListsOnBoard(boardId);
 	cache.lists.set(boardId, { at: now, value: lists });
 	return lists;
+}
+
+/** Resolution candidates on a board: open lists, or every list when the caller
+ * is specifically after an archived one (reopening). */
+async function listCandidates(
+	client: TrelloClient,
+	boardId: string,
+	includeArchived: boolean,
+): Promise<TrelloList[]> {
+	const lists = await boardLists(client, boardId);
+	return includeArchived ? lists : lists.filter((l) => !l.closed);
 }
 
 /**
@@ -266,12 +294,38 @@ export async function resolveWorkspaceRef(
 }
 
 /**
+ * Turn a board short link (from a pasted URL) into the canonical 24-char ID.
+ *
+ * Returning the short link itself is *almost* right — Trello accepts one
+ * wherever a board ID goes — but resolveBoardRef's result is not always handed
+ * straight back to Trello. `list_my_cards_assigned` compares it to a card's
+ * `idBoard` (a short link matches nothing, so the filter silently returned zero
+ * cards), `weekly_review_pack` compares it to the default board's ID (so the
+ * dann-to-do URL was refused as "not dann-to-do"), and Trello's own /search
+ * rejects a short link in `idBoards` with 400 Invalid objectId. So it is
+ * canonicalised once, here.
+ *
+ * Costs nothing for a board the member belongs to: their board list is already
+ * cached and carries the short link inside each `url`. v1.19.2.
+ */
+async function canonicaliseShortLink(client: TrelloClient, shortLink: string): Promise<string> {
+	const boards = await memberBoards(client);
+	const hit = boards.find((b) => boardShortLinkFromUrl(b.url) === shortLink);
+	if (hit) return hit.id;
+	// A board the member isn't on (public, or shared by link). Trello resolves
+	// the short link for us; a bad one 404s here rather than silently going on
+	// to produce an empty result set downstream.
+	const board = await client.getBoard(shortLink);
+	return board.id;
+}
+
+/**
  * Resolve a board reference to a 24-char board ID.
  *
  *   undefined / ""     → DEFAULT_BOARD (unchanged behavior)
  *   alias              → BOARD_ALIASES lookup
  *   24-char hex        → passed through untouched
- *   trello.com/b/… URL → the short link (Trello accepts it as an ID)
+ *   trello.com/b/… URL → short link, canonicalised to the 24-char ID
  *   anything else      → matched against board names the member can see,
  *                        optionally narrowed by `workspace`
  */
@@ -303,7 +357,7 @@ export async function resolveBoardRef(
 	if (isTrelloId(trimmed)) return trimmed;
 
 	const shortLink = boardShortLinkFromUrl(trimmed);
-	if (shortLink) return shortLink;
+	if (shortLink) return canonicaliseShortLink(client, shortLink);
 
 	const all = await memberBoards(client);
 	const scoped = workspace ? all.filter((b) => b.idOrganization === workspace.id) : all;
@@ -324,6 +378,39 @@ export async function resolveBoardRef(
 }
 
 /**
+ * Refuse when an explicit `board` and a list given by alias or ID disagree.
+ *
+ * An alias short-circuits name matching, so `create_card({ board: "TECH Retail
+ * Decision Board", list: "inbox" })` used to put the card on dann-to-do —
+ * silently, because "inbox" is an alias and the board argument was never
+ * consulted. Passing a board is the caller asserting where the list lives, and
+ * an assertion that can be wrong should be checked: one getList, and only when
+ * both arguments were supplied. v1.19.2.
+ */
+async function assertListOnBoard(
+	client: TrelloClient,
+	listId: string,
+	opts: { board?: string; workspace?: string },
+	ref: string,
+): Promise<void> {
+	const boardId = await resolveBoardRef(client, opts.board, { workspace: opts.workspace });
+	let list: TrelloList;
+	try {
+		list = await client.getList(listId);
+	} catch {
+		// Can't read the list — let the tool's own call produce the real error
+		// rather than inventing one here.
+		return;
+	}
+	if (list.idBoard === boardId) return;
+	const orgs = await orgsById(client);
+	const actual = (await memberBoards(client)).find((b) => b.id === list.idBoard);
+	throw new GuardError(
+		`List "${ref}" is on ${actual ? boardLabel(actual, orgs) : `board ${list.idBoard}`}, not on the board you named. Drop \`board\`, or pass a list that is on it.`,
+	);
+}
+
+/**
  * Resolve a list reference to a 24-char list ID.
  *
  *   alias        → LIST_ALIASES lookup
@@ -335,21 +422,38 @@ export async function resolveBoardRef(
  *
  * A name that matches lists on two boards is an error naming both — the
  * connector never picks a board for you.
+ *
+ * `includeArchived` widens name matching to archived lists. Only reopening
+ * wants that; every other caller would be able to write to a list that isn't
+ * on the board any more.
+ *
+ * When `board` is given AND the ref was an alias or a raw ID, the two are
+ * checked against each other rather than letting the alias win silently — see
+ * assertListOnBoard.
  */
 export async function resolveListRef(
 	client: TrelloClient,
 	ref: string,
-	opts: { board?: string; workspace?: string } = {},
+	opts: { board?: string; workspace?: string; includeArchived?: boolean } = {},
 ): Promise<string> {
 	const trimmed = (ref ?? "").trim();
 	if (!trimmed) throw new GuardError("list must be a non-empty string.");
-	if (trimmed in LIST_ALIASES) return resolveList(trimmed);
-	if (isTrelloId(trimmed)) return trimmed;
+	const hasBoard = opts.board !== undefined && opts.board.trim() !== "";
+
+	if (trimmed in LIST_ALIASES) {
+		const id = resolveList(trimmed);
+		if (hasBoard) await assertListOnBoard(client, id, opts, trimmed);
+		return id;
+	}
+	if (isTrelloId(trimmed)) {
+		if (hasBoard) await assertListOnBoard(client, trimmed, opts, trimmed);
+		return trimmed;
+	}
 
 	// Board context given: resolve within that board only.
-	if (opts.board !== undefined && opts.board.trim() !== "") {
+	if (hasBoard) {
 		const boardId = await resolveBoardRef(client, opts.board, { workspace: opts.workspace });
-		const lists = await boardLists(client, boardId);
+		const lists = await listCandidates(client, boardId, opts.includeArchived ?? false);
 		const hits = matchByName(lists, (l) => l.name, trimmed);
 		if (hits.length === 1) return hits[0].id;
 		if (hits.length > 1) {
@@ -372,7 +476,10 @@ export async function resolveListRef(
 	const perBoard = await Promise.all(
 		boards.map(async (board) => {
 			try {
-				return { board, lists: await boardLists(client, board.id) };
+				return {
+					board,
+					lists: await listCandidates(client, board.id, opts.includeArchived ?? false),
+				};
 			} catch {
 				// A board we can see but can't read lists on must not fail the
 				// whole resolution — it just contributes no candidates.

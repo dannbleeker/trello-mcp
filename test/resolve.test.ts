@@ -14,11 +14,13 @@ import {
 	resolveWorkspaceRef,
 } from "../src/trello/resolve";
 import {
+	archive_list,
 	create_card,
 	list_boards,
 	list_cards,
 	list_my_cards_assigned,
 	list_workspaces,
+	move_list,
 	search_cards,
 	search_cards_advanced,
 } from "../src/trello/tools";
@@ -205,9 +207,34 @@ describe("workspace / board / list resolution", () => {
 			expect(await resolveBoardRef(client, "tech retail")).toBe(NEW_BOARD);
 		});
 
-		it("resolves a pasted trello.com/b/… URL to its short link", async () => {
+		// v1.19.2 REGRESSION: this used to return the short link itself. Trello
+		// accepts one wherever an ID goes, but resolveBoardRef's result is also
+		// COMPARED against card.idBoard and passed to /search's idBoards, where a
+		// short link matches nothing and 400s respectively.
+		it("canonicalises a pasted trello.com/b/… URL to the 24-char board ID", async () => {
 			expect(await resolveBoardRef(client, "https://trello.com/b/xKeUkW8V/tech-retail-decision-board")).toBe(
-				"xKeUkW8V",
+				NEW_BOARD,
+			);
+		});
+
+		it("canonicalises from the cached board list, with no extra API call", async () => {
+			await memberBoards(client); // warm
+			const before = paths.length;
+			await resolveBoardRef(client, "https://trello.com/b/xKeUkW8V/x");
+			expect(paths.length).toBe(before);
+		});
+
+		it("falls back to fetching a board the member isn't on", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+				const p = new URL(String(input)).pathname;
+				if (p === "/1/members/me/boards") return json(BOARDS);
+				if (p === "/1/members/me/organizations") return json(WORKSPACES);
+				if (p === "/1/boards/pUb1icBd")
+					return json({ id: "6c00000000000000000000ff", name: "Public", url: "u", closed: false });
+				return json({});
+			});
+			expect(await resolveBoardRef(client, "https://trello.com/b/pUb1icBd/public")).toBe(
+				"6c00000000000000000000ff",
 			);
 		});
 
@@ -345,6 +372,69 @@ describe("workspace / board / list resolution", () => {
 			);
 		});
 
+		// v1.19.2 REGRESSION: archived lists were filtered out before caching, so
+		// archive_list({closed: false}) could not find one by name at all — and
+		// appeared to work only while a pre-archive cache entry was still warm.
+		it("finds an archived list when the caller is reopening one", async () => {
+			expect(
+				await resolveListRef(client, "Archived list", { board: NEW_BOARD, includeArchived: true }),
+			).toBe("6a6711ec7a817f9958a6ea17");
+		});
+
+		it("finds an archived list by name with no board hint too", async () => {
+			expect(await resolveListRef(client, "Archived list", { includeArchived: true })).toBe(
+				"6a6711ec7a817f9958a6ea17",
+			);
+		});
+
+		// v1.19.2 REGRESSION: an alias short-circuited resolution, so an explicit
+		// `board` naming a DIFFERENT board was ignored and the write silently
+		// landed on the alias's board.
+		it("refuses an alias that lives on a board other than the one named", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+				const p = new URL(String(input)).pathname;
+				if (p === "/1/members/me/boards") return json(BOARDS);
+				if (p === "/1/members/me/organizations") return json(WORKSPACES);
+				if (p === `/1/lists/${LIST_ALIASES.inbox}`)
+					return json({ id: LIST_ALIASES.inbox, name: "Inbox", idBoard: DANN_TODO, closed: false });
+				return json({});
+			});
+			await expect(
+				resolveListRef(client, "inbox", { board: "TECH Retail Decision Board" }),
+			).rejects.toThrow(/is on "Dann to-do"/);
+		});
+
+		it("allows an alias when the named board is the one it is on", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+				const p = new URL(String(input)).pathname;
+				if (p === "/1/members/me/boards") return json(BOARDS);
+				if (p === "/1/members/me/organizations") return json(WORKSPACES);
+				if (p === `/1/lists/${LIST_ALIASES.inbox}`)
+					return json({ id: LIST_ALIASES.inbox, name: "Inbox", idBoard: DANN_TODO, closed: false });
+				return json({});
+			});
+			expect(await resolveListRef(client, "inbox", { board: "dann-to-do" })).toBe(LIST_ALIASES.inbox);
+		});
+
+		it("applies the same check to a raw list ID", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+				const p = new URL(String(input)).pathname;
+				if (p === "/1/members/me/boards") return json(BOARDS);
+				if (p === "/1/members/me/organizations") return json(WORKSPACES);
+				if (p === "/1/lists/6a6711f3cce0b71b2a5b427a")
+					return json({ id: "6a6711f3cce0b71b2a5b427a", name: "Doing", idBoard: NEW_BOARD, closed: false });
+				return json({});
+			});
+			await expect(
+				resolveListRef(client, "6a6711f3cce0b71b2a5b427a", { board: "zoo" }),
+			).rejects.toThrow(/not on the board you named/);
+		});
+
+		it("costs nothing extra when no board is named", async () => {
+			await resolveListRef(client, "inbox");
+			expect(paths).toEqual([]);
+		});
+
 		it("names the board's lists when the name is wrong", async () => {
 			await expect(resolveListRef(client, "Nope", { board: NEW_BOARD })).rejects.toThrow(/"Doing"/);
 		});
@@ -389,6 +479,52 @@ describe("workspace / board / list resolution", () => {
 			await boardLists(client, ZOO);
 			expect(paths.filter((p) => p === `/1/boards/${NEW_BOARD}/lists`)).toHaveLength(2);
 			expect(paths.filter((p) => p === `/1/boards/${ZOO}/lists`)).toHaveLength(1);
+		});
+
+		// v1.19.2 REGRESSION: archive_list never invalidated, so a just-archived
+		// list stayed a resolution candidate for up to a minute — meaning the
+		// SAME call succeeded or failed depending on cache age.
+		it("archive_list drops the board's cached lists", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = new URL(String(input));
+				paths.push(url.pathname);
+				if (url.pathname === "/1/members/me/boards") return json(BOARDS);
+				if (url.pathname === "/1/members/me/organizations") return json(WORKSPACES);
+				const lm = url.pathname.match(/^\/1\/boards\/([^/]+)\/lists$/);
+				if (lm) return json(LISTS[lm[1]] ?? []);
+				if (url.pathname === "/1/lists/6a6711dece01a8a02643448c" && init?.method === "PUT")
+					return json({ id: "6a6711dece01a8a02643448c", name: "Backlog", idBoard: NEW_BOARD, closed: true });
+				return json({});
+			});
+			await boardLists(client, NEW_BOARD); // warm
+			await archive_list(client, { list: "Backlog", board: NEW_BOARD });
+			await boardLists(client, NEW_BOARD);
+			expect(paths.filter((p) => p === `/1/boards/${NEW_BOARD}/lists`).length).toBeGreaterThanOrEqual(2);
+		});
+
+		// v1.19.2 REGRESSION: only the DESTINATION board was invalidated, leaving
+		// the list resolvable by name on the board it had just left.
+		it("a cross-board move_list drops every board's cached lists", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = new URL(String(input));
+				paths.push(url.pathname);
+				if (url.pathname === "/1/members/me/boards") return json(BOARDS);
+				if (url.pathname === "/1/members/me/organizations") return json(WORKSPACES);
+				const lm = url.pathname.match(/^\/1\/boards\/([^/]+)\/lists$/);
+				if (lm) return json(LISTS[lm[1]] ?? []);
+				if (url.pathname === "/1/lists/6400000000000000000000e1" && init?.method === "PUT")
+					return json({ id: "6400000000000000000000e1", name: "Backlog", idBoard: NEW_BOARD, closed: false });
+				if (url.pathname === "/1/lists/6400000000000000000000e1")
+					return json({ id: "6400000000000000000000e1", name: "Backlog", idBoard: ZOO, closed: false });
+				return json({});
+			});
+			await boardLists(client, ZOO); // warm the SOURCE board
+			await move_list(client, {
+				list: "6400000000000000000000e1",
+				targetBoard: "TECH Retail Decision Board",
+			});
+			await boardLists(client, ZOO);
+			expect(paths.filter((p) => p === `/1/boards/${ZOO}/lists`).length).toBeGreaterThanOrEqual(2);
 		});
 
 		it("caches are per client, so one session can't serve another stale data", async () => {
@@ -583,6 +719,38 @@ describe("workspace / board / list resolution", () => {
 			await expect(create_card(client, { list: "Done", name: "x" })).rejects.toThrow(
 				/ambiguous across boards/,
 			);
+		});
+
+		// v1.19.2 REGRESSION: board-as-URL resolved to a short link, which never
+		// equals a card's idBoard — so this filter silently returned NOTHING.
+		// Silent, not an error: the worst shape the bug had.
+		it("list_my_cards_assigned filters correctly when the board is given as a URL", async () => {
+			fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/1/members/me/boards") return json(BOARDS);
+				if (url.pathname === "/1/members/me/organizations") return json(WORKSPACES);
+				if (url.pathname === "/1/members/me") return json({ id: "m1", username: "dann" });
+				if (url.pathname === "/1/members/me/cards")
+					return json([
+						{ id: "c1", name: "on the new board", idBoard: NEW_BOARD, idList: "l1", labels: [], closed: false, dateLastActivity: "2026-07-01T00:00:00Z" },
+						{ id: "c2", name: "elsewhere", idBoard: DANN_TODO, idList: "l2", labels: [], closed: false, dateLastActivity: "2026-07-01T00:00:00Z" },
+					]);
+				return json([]);
+			});
+			const { cards } = await list_my_cards_assigned(client, {
+				board: "https://trello.com/b/xKeUkW8V/tech-retail-decision-board",
+			});
+			expect(cards.map((c) => c.id)).toEqual(["c1"]);
+		});
+
+		// v1.19.2 REGRESSION: Trello rejects a short link in idBoards with
+		// 400 "Invalid objectId".
+		it("search_cards sends a 24-char id to idBoards when given a board URL", async () => {
+			await search_cards(client, {
+				query: "x",
+				board: "https://trello.com/b/xKeUkW8V/tech-retail-decision-board",
+			});
+			expect(lastQuery().get("idBoards")).toBe(NEW_BOARD);
 		});
 
 		it("list_my_cards_assigned filters to the boards of one workspace", async () => {

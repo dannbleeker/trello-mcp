@@ -4,6 +4,52 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.2] — 2026-07-28
+
+Bug-hunt pass over the v1.19.0 multi-workspace code, verified against the live
+account. Four defects, three of them confirmed by reproducing them through the
+deployed connector rather than by reading.
+
+### Fixed
+- **A board given as a URL resolved to a short link, not a board ID.** Trello
+  accepts a short link wherever an ID goes, so this looked safe — but
+  `resolveBoardRef`'s result is not always handed straight back to Trello. Three
+  live reproductions:
+    - `list_my_cards_assigned({ board: "<url>" })` compares the result to each
+      card's `idBoard` and so matched **nothing**, returning an empty card list
+      with no error. A silent wrong answer, the worst shape of the four.
+    - `weekly_review_pack({ board: "<dann-to-do url>" })` compares it to the
+      default board's ID and refused the board as "not dann-to-do".
+    - `search_cards({ board: "<url>" })` → Trello `400 Invalid objectId`;
+      `/search` will not take a short link in `idBoards`.
+  Short links are now canonicalised to the 24-char ID — for free when the board
+  is one of the member's (their cached board list carries the short link in each
+  `url`), and via one board fetch otherwise.
+- **An archived list could not be reopened by name.** Resolution candidates were
+  filtered to open lists *before* caching, so `archive_list({ closed: false })`
+  could only ever be given a raw list ID. The cache now holds every list and
+  filtering happens at the point of use, with reopening the one caller that opts
+  into seeing archived ones.
+- **Archiving or moving a list left the list cache stale.** `archive_list` never
+  invalidated at all, and `move_list` invalidated only the *destination* board.
+  Consequences: a just-archived list stayed a resolution candidate for up to a
+  minute — so the identical call succeeded or failed purely on cache age, which
+  is how the reopen bug above stayed hidden — and after a cross-board move the
+  list was still resolvable by name on the board it had left, so a `create_card`
+  scoped to that board would have landed on the new one.
+- **A list alias silently overrode an explicit `board`.** Aliases short-circuit
+  name matching, so `create_card({ board: "TECH Retail Decision Board", list:
+  "inbox" })` created the card on dann-to-do without a word. Passing a board is
+  the caller asserting where the list lives; when both are given, the assertion
+  is now checked (one `getList`, only in that case) and a mismatch is refused
+  naming the board the list is actually on. Same check for a raw list ID.
+
+### Notes
+- Tests 265 → 277. Each fix carries a regression test named for the defect,
+  including the two that failed *silently* — an empty result set and a write to
+  the wrong board are exactly what a test suite should not have to be lucky to
+  catch.
+
 ## [1.19.1] — 2026-07-28
 
 Found by verifying v1.19.0 against the live account after deploy.

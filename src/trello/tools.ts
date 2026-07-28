@@ -37,6 +37,11 @@
  *                             batch_move_cards
  *
  * Change log:
+ *   1.19.2 (2026-07-28) — archive_list can reopen a list by name (opts into
+ *                         archived candidates) and invalidates the list cache,
+ *                         which it never did; move_list invalidates the SOURCE
+ *                         board too on a cross-board move, not just the
+ *                         destination.
  *   1.19.0 (2026-07-27) — Multi-workspace. Every `board` argument resolves via
  *                         resolveBoardRef (alias / ID / URL / name, any
  *                         workspace) and every `list` via resolveListRef, with
@@ -1851,10 +1856,20 @@ export async function archive_list(
 	client: TrelloClient,
 	input: { list: string; closed?: boolean; board?: string },
 ): Promise<{ list: ListSummary }> {
-	const listId = await resolveListRef(client, input.list, { board: input.board });
+	// Reopening has to be able to find an ARCHIVED list by name — resolution
+	// drops archived lists for every other caller, which made `closed: false`
+	// resolvable only by raw ID (and, worse, resolvable by name or not
+	// depending on how warm the list cache was). v1.19.2.
+	const reopening = input.closed === false;
+	const listId = await resolveListRef(client, input.list, {
+		board: input.board,
+		includeArchived: reopening,
+	});
 	assertWritable(listId);
 	assertNotReadOnly(listId, "source");
 	const updated = await client.updateList(listId, { closed: input.closed ?? true });
+	// Archiving/reopening changes which lists are resolution candidates.
+	invalidateLists(client, updated.idBoard);
 	return { list: summariseList(updated) };
 }
 
@@ -1890,7 +1905,13 @@ export async function move_list(
 		pos: input.position,
 		idBoard: targetBoardId,
 	});
-	invalidateLists(client, updated.idBoard);
+	// A cross-board move invalidates the SOURCE board's cache as well as the
+	// destination's. Invalidating only the destination left the list resolvable
+	// by name on the board it just left — and a create_card scoped to that
+	// board would then land on the new one. The source id isn't in hand, so
+	// drop the whole list cache; it refills lazily. v1.19.2.
+	if (targetBoardId) invalidateLists(client);
+	else invalidateLists(client, updated.idBoard);
 	return { list: summariseList(updated) };
 }
 

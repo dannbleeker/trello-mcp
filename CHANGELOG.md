@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.1] — 2026-07-28
+
+Found by verifying v1.19.0 against the live account after deploy.
+
+### Fixed
+- **Three tool schemas contradicted the feature they shipped with.** On
+  `list_cards`, `list_cards_due` and `snooze_read` the `board` parameter still
+  described itself as "used only if `list` is omitted". Since v1.19.0 that is
+  wrong: `board` is also what disambiguates a `list` given by *name*, which is
+  the documented fix for the "list `Backlog` exists on three boards" error. A
+  caller reading the schema would never pass both — precisely the combination it
+  needs. Their `list` parameters also still said "alias or ID", not mentioning
+  that names now work. Descriptions only; no behavior change.
+
 ## [1.19.0] — 2026-07-27
 
 Multi-workspace support. A second Trello workspace was added to the account and

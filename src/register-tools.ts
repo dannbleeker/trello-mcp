@@ -11,6 +11,14 @@
  *              byte-identical to the pre-split code — only the file moved.
  *
  * Change log:
+ *   1.1.1 (2026-07-28) — Post-deploy verification fix: on list_cards,
+ *                        list_cards_due and snooze_read the `board` param
+ *                        still described itself as "used only if `list` is
+ *                        omitted", which is wrong since 1.19.0 — it is also
+ *                        what disambiguates a `list` NAME. A caller reading the
+ *                        schema would never pass both, which is exactly the
+ *                        disambiguation path. The `list` params also didn't
+ *                        say they accept names.
  *   1.1.0 (2026-07-27) — v1.19.0 multi-workspace: list_workspaces registered,
  *                        shared boardRef / boardHint / workspaceRef schemas
  *                        replace the 26 hand-written "Board alias or ID"
@@ -286,8 +294,13 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_cards",
 		"List cards on a list (if `list` is given) or on a board. Optional filters: `label` (by name), `staleDays` (only cards untouched for N+ days). `list`/`board` accept aliases, names, or raw IDs — any workspace.",
 		{
-			list: z.string().optional().describe("List alias (e.g. \"inbox\", \"@computer\") or ID."),
-			board: boardRef("Used only if `list` is omitted."),
+			list: z
+				.string()
+				.optional()
+				.describe(
+					"List — alias (e.g. \"inbox\", \"@computer\"), name, or ID. A name is resolved on `board` when given, otherwise across every board you can see.",
+				),
+			board: boardRef("Scopes the read when `list` is omitted, and disambiguates a `list` name when it is not."),
 			label: z.string().optional().describe("Filter to cards carrying this label name."),
 			staleDays: z.number().int().positive().optional().describe("Filter to cards untouched for at least this many days."),
 			customFields: z
@@ -529,7 +542,10 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"List cards filtered by a due-date scope. `scope` is one of \"today\", \"overdue\", \"next_seven_days\". Optionally narrow to one list and/or label. Each card includes `snoozed` and `wakeUp` (computed from due - dueReminder).",
 		{
 			scope: z.enum(["today", "overdue", "next_seven_days"]).describe("Due-date filter."),
-			list: z.string().optional().describe("List alias or ID. Narrows scope to one list."),
+			list: z
+				.string()
+				.optional()
+				.describe("List — alias, name, or ID. Narrows scope to one list. A name is resolved on `board` when given, otherwise across every board you can see."),
 			label: z.string().optional().describe("Filter to this label name (case-insensitive)."),
 			board: boardRef(),
 		},
@@ -703,7 +719,12 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"snooze_read",
 		"Cards whose `dueReminder` is set (non-null and not -1), sorted by computed wake-up time. NOTE: `dueReminder` is the minutes-before-due reminder offset, not a hide field — for actual Snooze Power-Up state (hidden cards with wake times) use list_snoozed_cards instead. Scope to one list or one board.",
 		{
-			list: z.string().optional().describe("List alias or ID. If given, board is ignored."),
+			list: z
+				.string()
+				.optional()
+				.describe(
+					"List — alias, name, or ID. If given, the read is scoped to it rather than to `board`. A name is resolved on `board` when given, otherwise across every board you can see.",
+				),
 			board: boardRef(),
 			label: z.string().optional().describe("Filter to this label name."),
 		},

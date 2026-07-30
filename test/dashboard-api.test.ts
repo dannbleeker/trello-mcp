@@ -118,23 +118,61 @@ describe("session gate", () => {
 	});
 });
 
+/** The board's lists as /api/cards now returns them (v1.20.0). */
+const BOARD_LISTS = [
+	{ closed: false, id: COMPUTER_ID, idBoard: BOARD_ID, name: "@Computer (WIP limit 7)" },
+	{ closed: false, id: HOME_ID, idBoard: BOARD_ID, name: "@Home (WIP limit 5)" },
+	{ closed: false, id: INBOX_ID, idBoard: BOARD_ID, name: "Inbox" },
+];
+
 describe("GET /api/cards", () => {
 	it("returns { cards } from the default board when ?board is omitted", async () => {
 		const cookie = await sessionFor("dannbleeker");
 		const fetchSpy = mockTrello([
 			{ body: [trelloCard()], method: "GET", path: `/1/boards/${BOARD_ID}/cards` },
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
 		]);
 		const res = await DashboardApi.request("/api/cards", { headers: { Cookie: cookie } }, ENV);
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		expect(body.cards).toHaveLength(1);
 		expect(body.cards[0]).toMatchObject({ id: "cccccccccccccccccccccccc", idList: COMPUTER_ID, url: "https://trello.com/c/abc123" });
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).toHaveBeenCalledTimes(2); // cards + lists
 	});
 
-	it("accepts an explicit board id (the page passes the raw id)", async () => {
+	it("returns the board's lists so the page can derive its layout", async () => {
+		// The page reads contexts, their WIP limits and the Inbox off this —
+		// it used to hardcode all of it, so a board change never reached it.
 		const cookie = await sessionFor("dannbleeker");
-		mockTrello([{ body: [], method: "GET", path: `/1/boards/${BOARD_ID}/cards` }]);
+		mockTrello([
+			{ body: [], method: "GET", path: `/1/boards/${BOARD_ID}/cards` },
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
+		]);
+		const res = await DashboardApi.request("/api/cards", { headers: { Cookie: cookie } }, ENV);
+		const body = await res.json();
+		expect(body.lists).toHaveLength(3);
+		expect(body.lists[0]).toMatchObject({ id: COMPUTER_ID, name: "@Computer (WIP limit 7)" });
+	});
+
+	it("still returns lists alongside customFields when ?customFields=1", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		mockTrello([
+			{ body: [], method: "GET", path: `/1/boards/${BOARD_ID}/cards` },
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
+			{ body: [{ id: "f1", name: "Priority", type: "list" }], method: "GET", path: `/1/boards/${BOARD_ID}/customFields` },
+		]);
+		const res = await DashboardApi.request("/api/cards?customFields=1", { headers: { Cookie: cookie } }, ENV);
+		const body = await res.json();
+		expect(body.lists).toHaveLength(3);
+		expect(body.customFields).toHaveLength(1);
+	});
+
+	it("accepts an explicit board id (the page passes ?board= straight through)", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		mockTrello([
+			{ body: [], method: "GET", path: `/1/boards/${BOARD_ID}/cards` },
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
+		]);
 		const res = await DashboardApi.request(
 			`/api/cards?board=${BOARD_ID}`,
 			{ headers: { Cookie: cookie } },
@@ -154,11 +192,22 @@ describe("GET /api/cards", () => {
 		const cookie = await sessionFor("dannbleeker");
 		mockTrello([
 			{ body: "secret upstream detail", method: "GET", path: `/1/boards/${BOARD_ID}/cards`, status: 404 },
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
 		]);
 		const res = await DashboardApi.request("/api/cards", { headers: { Cookie: cookie } }, ENV);
 		expect(res.status).toBe(404);
 		const body = await res.json();
 		expect(body.error).not.toContain("secret upstream detail");
+	});
+
+	it("a failed lists fetch fails the request — the page has no columns without it", async () => {
+		const cookie = await sessionFor("dannbleeker");
+		mockTrello([
+			{ body: [trelloCard()], method: "GET", path: `/1/boards/${BOARD_ID}/cards` },
+			{ body: "nope", method: "GET", path: `/1/boards/${BOARD_ID}/lists`, status: 404 },
+		]);
+		const res = await DashboardApi.request("/api/cards", { headers: { Cookie: cookie } }, ENV);
+		expect(res.status).toBe(404);
 	});
 });
 

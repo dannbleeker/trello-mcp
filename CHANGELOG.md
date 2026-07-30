@@ -4,6 +4,57 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] — 2026-07-30
+
+Three findings from reading the live board against the GTD practice the
+dashboard is supposed to serve. All three are the same shape as the v1.19.3
+label bug: the board moved on, and code that hardcoded a snapshot of it didn't.
+
+### Added
+- **Big rocks show how long they've been untouched, stalest first.** The zone's
+  own subtitle is *"don't let firefighting bury these"*, and it had no way to
+  tell a rock touched yesterday from one last touched in June 2025 — no due
+  date, no actions, just a title. On the live board three of five rocks had
+  gone 5, 7 and 13 months without a touch, and all three were the personal
+  ones. Each rock now carries an `untouched N months` badge — neutral under a
+  month, amber past 30 days, red past 90 — and the zone is sorted stalest
+  first, inverting the Trello ordering that buries them at the bottom.
+- **`could-ssf` list alias, and the digest's Friday horizons now include
+  Could-do (SSF).** SSF has been its own sphere for a while — own label, own
+  Could-do list — but the list had no alias, so it was unreachable by name from
+  the tools and absent from the one weekly view that exists to show horizons.
+  Cards parked there were invisible on the day they were meant to be reviewed.
+
+### Changed
+- **The dashboard derives its layout from the board instead of hardcoding it.**
+  `page.html` carried the board ID, the five context list IDs and the WIP
+  limits `7/5/5` as literals, duplicating information Trello already holds —
+  the list names literally say `(WIP limit 7)`, and the tools layer already
+  parses exactly that for its guard warnings. A limit changed in Trello made
+  the dashboard quietly lie; a context list added or retired never arrived.
+  `GET /api/cards` now returns the board's `lists` alongside the cards, and the
+  page reads its layout off them on every load.
+
+  **What shows is unchanged.** Deriving the layout deliberately does not mean
+  showing every list: only lists whose name starts with `@` become contexts
+  (the board's own convention), plus four roles matched by name (Inbox,
+  Waiting for…, Done-do, Rolling Big Rocks). Could-do (\*), Someday maybe,
+  Repeater Cards, Butler and Behind the scenes stay off the dashboard exactly
+  as before — with a test that fails if any of them ever leaks in.
+- **The page honours its own `?board=`.** It hardcoded the board ID, so the
+  `?board=` support added to the API in v1.19.0 was unreachable from the
+  browser. `/dashboard?board=<alias|name|id|url>` now works, and a role or
+  context absent from that board degrades to an empty zone rather than an
+  error.
+
+### Notes
+- Tests 299 → 319.
+- Two things this does *not* fix, both needing a change in Trello rather than
+  in code: Could-do (SSF) has none of the Butler rules its three sibling lists
+  have (auto-apply the sphere label on arrival, strip "Please Clarify and
+  Organize", move to Done-do on due-complete), and one Butler rule still
+  targets `@Office (WIP limit 5)`, a list that no longer exists on the board.
+
 ## [1.19.3] — 2026-07-30
 
 ### Added

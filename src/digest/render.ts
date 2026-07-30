@@ -341,6 +341,7 @@ export function renderDigest(
 			{ id: LIST_ALIASES["could-personal"], name: "Could-do (Personal)" },
 			{ id: LIST_ALIASES["could-bestseller"], name: "Could-do (BESTSELLER)" },
 			{ id: LIST_ALIASES["could-dbp-invest"], name: "Could-do (DBP Invest)" },
+			{ id: LIST_ALIASES["could-ssf"], name: "Could-do (SSF)" },
 			{ id: LIST_ALIASES.someday, name: "Someday maybe" },
 		].map((h) => ({ ...h, count: inList(h.id).length }));
 

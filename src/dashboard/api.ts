@@ -16,6 +16,11 @@
  *              plain Node without resolving the page.html Text-module import.
  *
  * Change log:
+ *   1.20.0 (2026-07-30) — GET /api/cards also returns the board's `lists`. The page
+ *                         used to hardcode the board ID, the five context list IDs
+ *                         and their WIP limits, so a list added or a limit changed
+ *                         in Trello never reached the dashboard. Fetched alongside
+ *                         the cards, not after them.
  *   1.1.0 (2026-07-10) — /api/done now also moves the card to Done-do (deterministic
  *                        for no-due-date cards where Butler's trigger never fires);
  *                        Trello 4xx keep their status class (404/422) instead of
@@ -159,8 +164,16 @@ api.get("/api/cards", async (c) => {
 	);
 
 	try {
-		const cards = await client.listCardsOnBoard(boardId, { customFieldItems: wantFields });
-		if (!wantFields) return c.json({ cards });
+		// `lists` ships with every response (v1.20.0): the page derives its whole
+		// layout from it — which lists are contexts, their WIP limits, which one
+		// is the Inbox — instead of hardcoding IDs and limits that go stale the
+		// moment the board changes. Not optional, because without it the page has
+		// no columns to render; a failure here is as fatal as the card fetch.
+		const [cards, lists] = await Promise.all([
+			client.listCardsOnBoard(boardId, { customFieldItems: wantFields }),
+			client.listListsOnBoard(boardId),
+		]);
+		if (!wantFields) return c.json({ cards, lists });
 		// A board without the Power-Up must not break the board view — fall back
 		// to no definitions and the page simply renders nothing.
 		let customFields: unknown[] = [];
@@ -169,7 +182,7 @@ api.get("/api/cards", async (c) => {
 		} catch {
 			customFields = [];
 		}
-		return c.json({ cards, customFields });
+		return c.json({ cards, customFields, lists });
 	} catch (e) {
 		return errorResponse(c, e);
 	}

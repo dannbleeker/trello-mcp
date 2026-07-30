@@ -10,6 +10,10 @@
  *              an alias; tools resolve aliases at call time.
  *
  * Change log:
+ *   1.20.0 (2026-07-30) — could-ssf alias. The list has existed on the board since
+ *                         SSF became its own sphere; without an alias it was
+ *                         unreachable by name from the tools and invisible to the
+ *                         digest's Friday horizons.
  *   1.19.0 (2026-07-27) — BOARD_FIELDS / ORGANIZATION_FIELDS for workspace-aware
  *                         fetches; isTrelloId + boardShortLinkFromUrl, used by
  *                         resolve.ts to tell an ID or a pasted board URL from a
@@ -60,6 +64,7 @@ export const LIST_ALIASES = {
 	"could-personal": "58cbce46897a91f2c0886b8f",
 	"could-bestseller": "59b8ca79df1c9569a358625e",
 	"could-dbp-invest": "5f969fac1ed84324457951f9",
+	"could-ssf": "6a5c9936448028b176d35b1e",
 	someday: "5b615cbea2df595751abefd7",
 
 	// Zoo Leadership Meeting — meeting-flow lists

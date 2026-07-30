@@ -106,6 +106,12 @@ body {
 /* Custom-field values: deliberately quieter than the label badges — they are
    data ABOUT the card, not a flag on it, so they must not outrank "overdue". */
 .badge.cfield { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
+/* Big-rock age. A rock nobody has touched in months is the exact failure this
+   zone exists to prevent, so past a quarter it gets the same red as an overdue
+   card; a month is a nudge, not an alarm. */
+.badge.age { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
+.badge.age.drifting { background:#fef4e6; color:#8a5a00; border-color:#f5dcb3; }
+.badge.age.buried { background:#fdecea; color:#c0392b; border-color:#f5c6c0; }
 .card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
 .btn {
   font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
@@ -206,6 +212,9 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   .badge.dueto { background: #e5e7eb; color: #15171a; }
   .badge.bestseller { background: #e5e7eb; color: #15171a; }
   .badge.cfield { background: #23262b; color: #9aa3ad; border-color: #33373d; }
+  .badge.age { background: #23262b; color: #9aa3ad; border-color: #33373d; }
+  .badge.age.drifting { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
+  .badge.age.buried { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
   #toast { background: #e5e7eb; color: #15171a; }
   .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
   .loading, .empty { color: #9aa3ad; }
@@ -221,35 +230,72 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 <script>
 // Data layer talks to the same-origin Worker API (see src/dashboard/handler.ts).
 // Auth is a GitHub-OAuth session cookie; a 401 bounces the browser to /app/login.
-const BOARD_ID = "58cbce31043f1a89cfc6b42c";
-const CTX = [
-  { id:"59be51ab95ff1052eac74429", name:"@Computer", wip:7 },
-  { id:"59be516a18d71ddd80868e9d", name:"@Home",     wip:5 },
-  { id:"5ab55bba5941a0a65bbd2256", name:"@Phone",    wip:5 },
-  { id:"59be519ca665c8b77ff07ffb", name:"@Errands",  wip:null },
-  { id:"5db58e03ec3c6561ad9b2875", name:"@Lene",     wip:null },
+// ---- Board layout, read off the board itself (v1.20.0) ----
+// This used to be a hardcoded board ID, five context list IDs and their WIP
+// limits. A list added in Trello never appeared here, and a WIP limit changed
+// in Trello made the dashboard quietly lie. /api/cards now returns the board's
+// lists and the layout is derived from them on every load.
+//
+// Deriving the layout must NOT become "show every list". Exactly two things
+// qualify, and nothing else is rendered:
+//   * contexts — lists whose name starts with "@" (the board's own convention),
+//     in board order, WIP parsed from the "(WIP limit N)" suffix that the tools
+//     layer already reads for its guard warnings;
+//   * the four named roles below.
+// So Could-do (*), Someday maybe, Repeater Cards, Butler and Behind the scenes
+// stay off the dashboard exactly as they were — but a renamed WIP limit, or a
+// context list added or retired, now travels on its own.
+const ROLES = [
+  { key:"inbox",    match:/^inbox$/i,             label:"Inbox" },
+  { key:"waiting",  match:/^waiting for/i,        label:"Waiting for…" },
+  { key:"done",     match:/^done-do$/i,           label:"Done-do" },
+  { key:"bigrocks", match:/^rolling big rocks$/i, label:"Rolling Big Rocks" },
 ];
-const WAITING  = { id:"59b4453266a62986fd16872e", name:"Waiting for…" };
-const INBOX    = { id:"59bd69c743b67aa0d621b3a9", name:"Inbox" };
-const BIGROCKS = { id:"5b6189409662065780670709", name:"Rolling Big Rocks" };
-const DONE     = { id:"63d7fdc0b310c11585d34c3e", name:"Done-do" };
-// lists offered in the per-card "Move" dropdown (Done is the ✓ button; big rocks excluded)
-const MOVE_TARGETS = [...CTX, WAITING];
-// lists shown in the count overview panel
-const OVERVIEW = [
-  ...CTX,
-  WAITING,
-  INBOX,
-];
+
+// The dashboard follows its own ?board= (alias, name, raw ID or Trello URL —
+// the same reference syntax the tools take). Absent, the server picks the
+// default board, so the page no longer needs to know which board that is.
+const BOARD_PARAM = new URLSearchParams(location.search || "").get("board");
+
+let CTX = [];
+// A role missing from this board resolves to a null id. cardsIn(null) is empty,
+// so its zone renders as "clear" instead of throwing.
+let INBOX    = { id:null, name:"Inbox" };
+let WAITING  = { id:null, name:"Waiting for…" };
+let DONE     = { id:null, name:"Done-do" };
+let BIGROCKS = { id:null, name:"Rolling Big Rocks" };
+let MOVE_TARGETS = [];
+let OVERVIEW = [];
+let LIST_NAMES = {};
+
+function wipFromName(n){ const m = /\(WIP limit (\d+)\)/i.exec(n||""); return m ? Number(m[1]) : null; }
+/** "@Computer (WIP limit 7)" -> "@Computer" — the limit is shown as a count, not in the title. */
+function listLabel(n){ return (n||"").replace(/\s*\(WIP limit \d+\)\s*/i, "").trim(); }
+
+function configureFromLists(lists){
+  const open = (lists||[]).filter(l => l && !l.closed);
+  CTX = open
+    .filter(l => listLabel(l.name).startsWith("@"))
+    .map(l => ({ id:l.id, name:listLabel(l.name), wip:wipFromName(l.name) }));
+  const byKey = {};
+  ROLES.forEach(r => {
+    const hit = open.find(l => r.match.test(listLabel(l.name)));
+    byKey[r.key] = { id: hit ? hit.id : null, name: r.label };
+  });
+  INBOX = byKey.inbox; WAITING = byKey.waiting; DONE = byKey.done; BIGROCKS = byKey.bigrocks;
+  // Done is the ✓ button rather than a move target, and big rocks are read-only
+  // server-side — move_card refuses them either way. Unresolved roles drop out.
+  MOVE_TARGETS = CTX.concat([WAITING]).filter(l => l.id);
+  OVERVIEW = CTX.concat([WAITING, INBOX]).filter(l => l.id);
+  LIST_NAMES = {};
+  CTX.concat([WAITING, INBOX, BIGROCKS, DONE]).forEach(l => { if (l.id) LIST_NAMES[l.id] = l.name; });
+}
 
 let CARDS = [];
 let CUSTOM_FIELDS = [];    // board's custom-field definitions, by id (v1.18.0)
 let SNOOZED = null;        // null = not loaded yet; [] = loaded, none
 let SNOOZE_OPEN = false;
 let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
-
-const LIST_NAMES = {};
-[...CTX, WAITING, INBOX, BIGROCKS, DONE].forEach(l => { LIST_NAMES[l.id] = l.name; });
 
 function esc(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -266,11 +312,14 @@ async function api(path, opts){
 // idList; normalise defensively so the rest of the dashboard is unchanged.
 let LAST_LOAD = 0;
 async function loadCards(){
-  const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID) + "&customFields=1");
+  const res = await api("/api/cards?customFields=1" + (BOARD_PARAM ? "&board=" + encodeURIComponent(BOARD_PARAM) : ""));
   let arr = Array.isArray(res) ? res : (res && Array.isArray(res.cards)) ? res.cards : [];
   // Definitions arrive alongside the cards. A board with the Power-Up off (or
   // no fields defined) yields [], and every custom-field branch below no-ops.
   CUSTOM_FIELDS = (res && Array.isArray(res.customFields)) ? res.customFields : [];
+  // Re-derived on every load, not just the first: a list renamed or a WIP limit
+  // changed in Trello shows up on the next refresh without a redeploy.
+  if (res && Array.isArray(res.lists)) configureFromLists(res.lists);
   LAST_LOAD = Date.now();
   return arr.map(c => ({ ...c, idList: (c.listId != null ? c.listId : c.idList) }));
 }
@@ -377,8 +426,29 @@ function dueBadge(c){
   return "";
 }
 
-function badgesHtml(c){
+/** Milliseconds of a card's last activity; unknown sorts last, not stalest. */
+function activityMs(c){ const t = Date.parse((c && c.dateLastActivity) || ""); return isNaN(t) ? Infinity : t; }
+
+// How long since anything happened on a card, coarsely. Shown on big rocks and
+// nowhere else: a rock carries no due date and no actions, so without this a
+// project last touched 13 months ago looks exactly like one touched yesterday
+// — which is precisely how "don't let firefighting bury these" fails silently.
+// v1.20.0.
+function ageBadge(c){
+  const t = activityMs(c);
+  if (t === Infinity) return "";
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days < 1) return '<span class="badge age">touched today</span>';
+  const txt = days < 14 ? days + (days === 1 ? " day" : " days")
+            : days < 60 ? Math.floor(days/7) + " weeks"
+            : Math.floor(days/30) + " months";
+  const cls = days >= 90 ? "age buried" : days >= 30 ? "age drifting" : "age";
+  return '<span class="badge '+cls+'">untouched '+txt+'</span>';
+}
+
+function badgesHtml(c, opts){
   let h = dueBadge(c);
+  if (opts && opts.age) h += ageBadge(c);
   h += labelBadges(c);
   h += customFieldBadges(c);
   return h ? '<div class="badges">'+h+'</div>' : "";
@@ -418,7 +488,7 @@ function cardHtml(c, opts){
   return '<div class="card" data-card="'+c.id+'">'
     + '<div class="ttl">'+link+'</div>'
     + descSnippet(c)
-    + badgesHtml(c)
+    + badgesHtml(c, opts)
     + actions
     + '</div>';
 }
@@ -454,7 +524,9 @@ function render(){
 
   const inboxCards = cardsIn(INBOX.id);
   const waitingCards = cardsIn(WAITING.id);
-  const rockCards = cardsIn(BIGROCKS.id);
+  // Stalest first. A buried rock drifts to the bottom of the Trello list, which
+  // is the one place it will never be noticed — so the dashboard inverts that.
+  const rockCards = cardsIn(BIGROCKS.id).slice().sort((a,b) => activityMs(a) - activityMs(b));
   const ctxCounts = CTX.map(l => ({ l, n: cardsIn(l.id).length }));
   const totalNext = ctxCounts.reduce((s,x)=>s+x.n, 0);
 
@@ -522,7 +594,10 @@ function render(){
   const chips = [["all","All"]].concat(FILTER_LABELS.map(f=>[f.key,f.label]), [["personal","Personal"]])
     .map(([k,lbl]) => '<span class="chip'+(FILTER===k?' active':'')+'" onclick="setFilter(\''+k+'\')">'+esc(lbl)+'<span class="chip-n">'+tagCount[k]+'</span></span>').join("");
 
-  let ctxCols = CTX.map(l => {
+  // Only reachable via ?board= pointing at a board that doesn't use the
+  // "@context" convention. Say so rather than rendering an empty grid.
+  let ctxCols = CTX.length ? "" : '<div class="empty">no @context lists on this board</div>';
+  ctxCols += CTX.map(l => {
     const all = cardsIn(l.id);
     const shown = all.filter(passesFilter);
     const over = l.wip != null && all.length > l.wip;
@@ -542,7 +617,7 @@ function render(){
 
   // ---- Zone 4: big rocks ----
   let rocksCol = rockCards.length
-    ? '<div class="cols">' + rockCards.map(c=>cardHtml(c,{noActions:true})).join("") + '</div>'
+    ? '<div class="cols">' + rockCards.map(c=>cardHtml(c,{noActions:true, age:true})).join("") + '</div>'
     : '<div class="empty">no big rocks listed</div>';
 
   document.getElementById("content").innerHTML =

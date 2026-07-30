@@ -13,6 +13,9 @@ const PAGE = readFileSync(new URL("../src/dashboard/page.html", import.meta.url)
 
 type Label = { id: string; name: string; color: string };
 
+type Role = { id: string | null; name: string };
+type Ctx = { id: string; name: string; wip: number | null };
+
 type Page = {
 	labelBadges: (c: { labels: unknown[] }) => string;
 	labelHue: (c: string) => string;
@@ -20,6 +23,19 @@ type Page = {
 	isPersonal: (c: { labels: unknown[] }) => boolean;
 	setFilter: (k: string) => void;
 	FILTER_LABELS: { key: string; label: string }[];
+	configureFromLists: (lists: unknown[]) => void;
+	layout: () => {
+		CTX: Ctx[];
+		INBOX: Role;
+		WAITING: Role;
+		DONE: Role;
+		BIGROCKS: Role;
+		MOVE_TARGETS: Role[];
+		OVERVIEW: Role[];
+		LIST_NAMES: Record<string, string>;
+	};
+	ageBadge: (c: { dateLastActivity?: string }) => string;
+	activityMs: (c: { dateLastActivity?: string }) => number;
 };
 
 function loadPageScript(): Page {
@@ -35,12 +51,19 @@ function loadPageScript(): Page {
 		return {
 			labelBadges: labelBadges, labelHue: labelHue, passesFilter: passesFilter,
 			isPersonal: isPersonal, setFilter: setFilter, FILTER_LABELS: FILTER_LABELS,
+			configureFromLists: configureFromLists, ageBadge: ageBadge, activityMs: activityMs,
+			// CTX and friends are reassigned by configureFromLists, so hand back a
+			// getter rather than the values captured at load time.
+			layout: function(){ return { CTX, INBOX, WAITING, DONE, BIGROCKS, MOVE_TARGETS, OVERVIEW, LIST_NAMES }; },
 		};`,
 	);
-	return factory(document, () => Promise.reject(new Error("no network in tests")), { href: "" });
+	return factory(document, () => Promise.reject(new Error("no network in tests")), { href: "", search: "" });
 }
 
-const { labelBadges, labelHue, passesFilter, isPersonal, setFilter, FILTER_LABELS } = loadPageScript();
+const {
+	labelBadges, labelHue, passesFilter, isPersonal, setFilter, FILTER_LABELS,
+	configureFromLists, layout, ageBadge, activityMs,
+} = loadPageScript();
 
 /** Badge text between the pill's own tags, in render order. */
 function badgeTexts(html: string): string[] {
@@ -161,6 +184,160 @@ describe("dashboard filter chips", () => {
 		expect([bestseller, invest, ssf, both, plain].every(passesFilter)).toBe(true);
 		setFilter("all");
 	});
+
+	it("every chip is reachable — each has a filter branch that selects something", () => {
+		// Drift guard: a chip whose key has no branch in passesFilter() renders
+		// as a dead control that silently shows the whole board.
+		const cards = [bestseller, invest, ssf, plain];
+		for (const key of ["bestseller", "invest", "ssf", "personal"]) {
+			setFilter(key);
+			const shown = cards.filter(passesFilter);
+			expect(shown).toHaveLength(1); // selective, not a pass-through
+		}
+		setFilter("all");
+	});
+});
+
+describe("dashboard layout derived from the board's lists", () => {
+	// The real board, as /api/cards returns it — including every list the
+	// dashboard must keep NOT showing.
+	const BOARD = [
+		{ id: "l-computer", name: "@Computer (WIP limit 7)", closed: false },
+		{ id: "l-home", name: "@Home (WIP limit 5)", closed: false },
+		{ id: "l-phone", name: "@Phone (WIP limit 5)", closed: false },
+		{ id: "l-errands", name: "@Errands", closed: false },
+		{ id: "l-lene", name: "@Lene", closed: false },
+		{ id: "l-waiting", name: "Waiting for...", closed: false },
+		{ id: "l-done", name: "Done-do", closed: false },
+		{ id: "l-inbox", name: "Inbox", closed: false },
+		{ id: "l-could-personal", name: "Could-do (Personal)", closed: false },
+		{ id: "l-could-invest", name: "Could-do (DBP Invest)", closed: false },
+		{ id: "l-could-ssf", name: "Could-do (SSF)", closed: false },
+		{ id: "l-could-bs", name: "Could-do (BESTSELLER)", closed: false },
+		{ id: "l-rocks", name: "Rolling Big Rocks", closed: false },
+		{ id: "l-someday", name: "Someday maybe", closed: false },
+		{ id: "l-repeater", name: "Repeater Cards", closed: false },
+		{ id: "l-butler", name: "Butler", closed: false },
+		{ id: "l-behind", name: "Behind the scenes", closed: false },
+	];
+
+	it("derives the same five contexts the page used to hardcode, in board order", () => {
+		configureFromLists(BOARD);
+		expect(layout().CTX.map((l) => l.name)).toEqual(["@Computer", "@Home", "@Phone", "@Errands", "@Lene"]);
+	});
+
+	it("reads WIP limits off the list name instead of a hardcoded number", () => {
+		configureFromLists(BOARD);
+		expect(layout().CTX.map((l) => l.wip)).toEqual([7, 5, 5, null, null]);
+	});
+
+	it("a WIP limit changed in Trello reaches the dashboard with no redeploy", () => {
+		configureFromLists([{ id: "l-computer", name: "@Computer (WIP limit 12)", closed: false }]);
+		expect(layout().CTX[0]).toMatchObject({ name: "@Computer", wip: 12 });
+	});
+
+	it("keeps every currently-excluded list excluded", () => {
+		// The whole risk of deriving the layout is that it turns into "show
+		// everything". These lists must stay off the dashboard.
+		configureFromLists(BOARD);
+		const { CTX, OVERVIEW, MOVE_TARGETS, LIST_NAMES } = layout();
+		const shown = new Set([
+			...CTX.map((l) => l.id),
+			...OVERVIEW.map((l) => l.id),
+			...MOVE_TARGETS.map((l) => l.id),
+			...Object.keys(LIST_NAMES),
+		]);
+		for (const id of [
+			"l-could-personal", "l-could-invest", "l-could-ssf", "l-could-bs",
+			"l-someday", "l-repeater", "l-butler", "l-behind",
+		]) {
+			expect(shown.has(id)).toBe(false);
+		}
+	});
+
+	it("resolves the four named roles, tolerating the board's '...' spelling", () => {
+		configureFromLists(BOARD);
+		const { INBOX, WAITING, DONE, BIGROCKS } = layout();
+		expect(INBOX.id).toBe("l-inbox");
+		expect(WAITING.id).toBe("l-waiting"); // board says "Waiting for...", page shows "Waiting for…"
+		expect(DONE.id).toBe("l-done");
+		expect(BIGROCKS.id).toBe("l-rocks");
+	});
+
+	it("Done and Rolling Big Rocks are not move targets", () => {
+		// ✓ Done owns the Done move; big rocks are read-only server-side.
+		configureFromLists(BOARD);
+		const ids = layout().MOVE_TARGETS.map((l) => l.id);
+		expect(ids).toEqual(["l-computer", "l-home", "l-phone", "l-errands", "l-lene", "l-waiting"]);
+	});
+
+	it("skips archived lists", () => {
+		configureFromLists([...BOARD, { id: "l-office", name: "@Office (WIP limit 5)", closed: true }]);
+		expect(layout().CTX.map((l) => l.id)).not.toContain("l-office");
+	});
+
+	it("a retired role list resolves to a null id rather than throwing", () => {
+		// cardsIn(null) is empty, so the zone renders as clear.
+		configureFromLists([{ id: "l-computer", name: "@Computer", closed: false }]);
+		const { INBOX, WAITING, OVERVIEW } = layout();
+		expect(INBOX.id).toBeNull();
+		expect(WAITING.id).toBeNull();
+		expect(OVERVIEW.map((l) => l.id)).toEqual(["l-computer"]); // no phantom columns
+	});
+
+	it("a board with no @contexts yields none rather than inventing them", () => {
+		configureFromLists([{ id: "z1", name: "Backlog", closed: false }, { id: "z2", name: "Discussion", closed: false }]);
+		expect(layout().CTX).toEqual([]);
+	});
+
+	it("tolerates a missing or malformed lists payload", () => {
+		expect(() => configureFromLists([])).not.toThrow();
+		expect(() => configureFromLists(undefined as unknown as unknown[])).not.toThrow();
+		expect(() => configureFromLists([null, { name: null }] as unknown[])).not.toThrow();
+		configureFromLists(BOARD); // restore for any later test
+	});
+});
+
+describe("big-rock age badge", () => {
+	const daysAgo = (n: number) => ({ dateLastActivity: new Date(Date.now() - n * 86400000).toISOString() });
+
+	it("names the rot: months untouched, in red past a quarter", () => {
+		// The live board has rocks last touched 5, 7 and 13 months ago.
+		const h = ageBadge(daysAgo(400));
+		expect(h).toContain("untouched 13 months");
+		expect(h).toContain("age buried");
+	});
+
+	it("flags a month of drift more gently than a quarter", () => {
+		expect(ageBadge(daysAgo(35))).toContain("age drifting");
+		expect(ageBadge(daysAgo(35))).not.toContain("buried");
+		expect(ageBadge(daysAgo(100))).toContain("age buried");
+	});
+
+	it("stays quiet for a rock touched recently", () => {
+		expect(ageBadge(daysAgo(3))).toContain("untouched 3 days");
+		expect(ageBadge(daysAgo(3))).not.toMatch(/drifting|buried/);
+		expect(ageBadge(daysAgo(0))).toContain("touched today");
+	});
+
+	it("scales the unit: days, then weeks, then months", () => {
+		expect(ageBadge(daysAgo(1))).toContain("1 day");
+		expect(ageBadge(daysAgo(20))).toContain("2 weeks");
+		expect(ageBadge(daysAgo(90))).toContain("3 months");
+	});
+
+	it("renders nothing, and sorts last, when the card has no activity date", () => {
+		expect(ageBadge({})).toBe("");
+		expect(activityMs({})).toBe(Infinity);
+		expect(activityMs({ dateLastActivity: "not-a-date" })).toBe(Infinity);
+	});
+});
+
+describe("filter chip drift guard", () => {
+	const bestseller = { labels: [label("BESTSELLER", "black")] };
+	const invest = { labels: [label("DBP Invest", "blue")] };
+	const ssf = { labels: [label("SSF", "green")] };
+	const plain = { labels: [] };
 
 	it("every chip is reachable — each has a filter branch that selects something", () => {
 		// Drift guard: a chip whose key has no branch in passesFilter() renders

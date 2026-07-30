@@ -349,17 +349,21 @@ describe("dashboard layout derived from the board's lists", () => {
 describe("card age badge", () => {
 	const daysAgo = (n: number) => ({ dateLastActivity: new Date(Date.now() - n * 86400000).toISOString() });
 
-	it("names the rot: months untouched, in red past a quarter", () => {
+	it("names the rot: months untouched, in red", () => {
 		// The live board has rocks last touched 5, 7 and 13 months ago.
 		const h = ageBadge(daysAgo(400), "rock");
 		expect(h).toContain("untouched 13 months");
 		expect(h).toContain("age buried");
 	});
 
-	it("flags a month of rock drift more gently than a quarter", () => {
-		expect(ageBadge(daysAgo(35), "rock")).toContain("age drifting");
-		expect(ageBadge(daysAgo(35), "rock")).not.toContain("buried");
-		expect(ageBadge(daysAgo(100), "rock")).toContain("age buried");
+	it("grades big rocks by the quarter — they are quarterly goals", () => {
+		// Rolling a rock over is fine; not looking at it for a whole quarter is
+		// the amber, and a month past that is the alarm.
+		expect(ageBadge(daysAgo(60), "rock")).not.toMatch(/drifting|buried/);
+		expect(ageBadge(daysAgo(89), "rock")).not.toMatch(/drifting|buried/);
+		expect(ageBadge(daysAgo(90), "rock")).toContain("age drifting");
+		expect(ageBadge(daysAgo(119), "rock")).toContain("age drifting");
+		expect(ageBadge(daysAgo(120), "rock")).toContain("age buried");
 	});
 
 	it("big rocks always show their age — it is the zone's only signal", () => {
@@ -382,18 +386,24 @@ describe("card age badge", () => {
 		expect(ageBadge(daysAgo(30), "next")).toContain("age buried");
 	});
 
-	it("waiting-for and inbox run on the 7-day fuse the weekly review already uses", () => {
-		for (const kind of ["waiting", "inbox"]) {
-			expect(ageBadge(daysAgo(6), kind)).toBe("");
-			expect(ageBadge(daysAgo(7), kind)).toContain("age drifting");
-			expect(ageBadge(daysAgo(21), kind)).toContain("age buried");
-		}
+	it("waiting-for wants a chase after ten days", () => {
+		expect(ageBadge(daysAgo(9), "waiting")).toBe("");
+		expect(ageBadge(daysAgo(10), "waiting")).toContain("age drifting");
+		expect(ageBadge(daysAgo(21), "waiting")).toContain("age buried");
 	});
 
-	it("a next action and a big rock of the same age are graded differently", () => {
-		// 30 days is rot for a next action, only drift for a project.
+	it("an inbox item uncaptured for a week means Get Clear isn't happening", () => {
+		expect(ageBadge(daysAgo(6), "inbox")).toBe("");
+		expect(ageBadge(daysAgo(7), "inbox")).toContain("age drifting");
+		expect(ageBadge(daysAgo(21), "inbox")).toContain("age buried");
+	});
+
+	it("the same age is graded very differently by zone", () => {
+		// 30 days: rot for a next action, a chase long overdue for a waiting-for
+		// item, and unremarkable for a quarterly goal.
 		expect(ageBadge(daysAgo(30), "next")).toContain("buried");
-		expect(ageBadge(daysAgo(30), "rock")).toContain("drifting");
+		expect(ageBadge(daysAgo(30), "waiting")).toContain("buried");
+		expect(ageBadge(daysAgo(30), "rock")).not.toMatch(/drifting|buried/);
 	});
 
 	it("scales the unit: days, then weeks, then months", () => {

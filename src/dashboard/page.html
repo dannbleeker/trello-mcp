@@ -488,11 +488,11 @@ function activityMs(c){ const t = Date.parse((c && c.dateLastActivity) || ""); r
 // weekly review already runs on.
 //
 // Zones rot at different speeds, so a single threshold can't serve them:
-//   rock    — a project is touched occasionally by nature, so its age is ALWAYS
-//             shown (it is the zone's only signal) and only alarms at a quarter.
-//   waiting — the shortest fuse on the board: something delegated and silent for
-//             a week wants a chase. Matches the 7-day staleness the weekly
-//             review already applies to this list.
+//   rock    — big rocks are quarterly goals. Rolling one over is fine, but it
+//             should be looked at every quarter at the very least, so 90 days
+//             is the amber and a month past that is the alarm. Their age is
+//             ALWAYS shown, whatever it is: it is the zone's only signal.
+//   waiting — delegated and silent for ten days wants a chase.
 //   inbox   — an item sitting uncaptured for a week means Get Clear isn't
 //             happening; three weeks means the inbox has become storage.
 //   next    — a next action surviving one weekly review untouched is normal.
@@ -500,10 +500,10 @@ function activityMs(c){ const t = Date.parse((c && c.dateLastActivity) || ""); r
 // Everywhere but big rocks the badge stays invisible until it has something to
 // say, so a healthy board shows none of these at all. v1.20.0.
 const AGE_RULES = {
-  rock:    { always:true,  drift:30, bury:90 },
-  waiting: { always:false, drift:7,  bury:21 },
-  inbox:   { always:false, drift:7,  bury:21 },
-  next:    { always:false, drift:14, bury:30 },
+  rock:    { always:true,  drift:90, bury:120 },
+  waiting: { always:false, drift:10, bury:21  },
+  inbox:   { always:false, drift:7,  bury:21  },
+  next:    { always:false, drift:14, bury:30  },
 };
 
 function ageBadge(c, kind){

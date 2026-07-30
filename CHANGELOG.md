@@ -18,15 +18,18 @@ board moved on, and code that hardcoded a snapshot of it didn't.
 
   | Zone | Always shown | Amber | Red |
   |---|---|---|---|
-  | Rolling Big Rocks | yes | 30 days | 90 days |
-  | Waiting for… | no | 7 days | 21 days |
+  | Rolling Big Rocks | yes | 90 days | 120 days |
+  | Waiting for… | no | 10 days | 21 days |
   | Inbox | no | 7 days | 21 days |
   | Next actions | no | 14 days | 30 days |
 
   Outside big rocks the badge stays invisible until it has something to say, so
-  a healthy board shows none of them. Waiting-for and Inbox share the 7-day
-  fuse the weekly review already applies; a next action surviving one weekly
-  review untouched is normal, surviving four is rot. The due-date machinery is
+  a healthy board shows none of them. Big rocks are quarterly goals — rolling
+  one over is fine, but it should be looked at every quarter at the very least,
+  so the amber is a full quarter and the alarm a month past it. A next action
+  surviving one weekly review untouched is normal; surviving four is rot. The
+  same 30 days is therefore red for a next action, red for a waiting-for item,
+  and unremarkable for a big rock. The due-date machinery is
   left alone — it already self-hides (`dueBadge` returns `""`, the digest's
   overdue section is behind `if (overdue.length || dueToday.length)`), so it
   costs nothing today and is correct the moment a due date is set.

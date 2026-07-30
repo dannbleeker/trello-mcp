@@ -86,6 +86,23 @@ body {
 .badge.bestseller { background:#1c2024; color:#fff; }
 .badge.invest { background:#2563eb; color:#fff; }
 .badge.clarify { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
+/* Every OTHER board label renders from its own Trello colour, so a label added
+   in Trello appears here without a code change (the three above keep their
+   hand-tuned look). Trello's palette also has _light / _dark variants of each
+   hue; they collapse onto the base hue — a 10px pill can't carry three shades
+   of green and stay legible. Solid fills, so no dark-mode override is needed:
+   the contrast lives inside the pill, not against the card. */
+.badge.lbl-green  { background:#4bce97; color:#164b35; }
+.badge.lbl-yellow { background:#f5cd47; color:#533f04; }
+.badge.lbl-orange { background:#fea362; color:#702e00; }
+.badge.lbl-red    { background:#f87168; color:#5d1f1a; }
+.badge.lbl-purple { background:#9f8fef; color:#352c63; }
+.badge.lbl-blue   { background:#579dff; color:#09326c; }
+.badge.lbl-sky    { background:#6cc3e0; color:#164555; }
+.badge.lbl-lime   { background:#94c748; color:#37471f; }
+.badge.lbl-pink   { background:#e774bb; color:#50253f; }
+.badge.lbl-black  { background:#8590a2; color:#091e42; }
+.badge.lbl-none   { background:#dcdfe4; color:#44546f; }
 /* Custom-field values: deliberately quieter than the label badges — they are
    data ABOUT the card, not a flag on it, so they must not outrank "overdue". */
 .badge.cfield { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
@@ -312,7 +329,37 @@ function toast(msg, action){
 function cardsIn(listId){ return CARDS.filter(c => c.idList === listId && !isDivider(c)); }
 function isDivider(c){ return /^-+$/.test((c.name||"").trim()); }
 function hasLabel(c, n){ return (c.labels||[]).some(l => (typeof l === "string" ? l : l.name) === n); }
-function labelNames(c){ return (c.labels||[]).map(l => typeof l === "string" ? l : l.name); }
+
+// Labels that keep a hand-tuned badge; `text` shortens a name that would
+// otherwise dominate the row. Everything NOT listed here still renders — from
+// its Trello colour — which is the point: the dashboard used to hardcode these
+// three and silently drop every other label a card carried.
+const LABEL_STYLES = {
+  "BESTSELLER":                  { cls:"bestseller" },
+  "DBP Invest":                  { cls:"invest" },
+  "Please Clarify and Organize": { cls:"clarify", text:"clarify" },
+};
+const LABEL_HUES = ["green","yellow","orange","red","purple","blue","sky","lime","pink","black"];
+
+// "green_dark" / "green_light" → "green"; unknown or absent colour → "none".
+function labelHue(color){
+  const base = String(color||"").split("_")[0];
+  return LABEL_HUES.indexOf(base) >= 0 ? base : "none";
+}
+
+// Every label on the card, in the order Trello returns them (board order).
+function labelBadges(c){
+  return (c.labels||[]).map(l => {
+    const name  = typeof l === "string" ? l : (l.name || "");
+    const color = typeof l === "string" ? "" : (l.color || "");
+    const hand  = LABEL_STYLES[name];
+    if (hand) return '<span class="badge '+hand.cls+'">'+esc(hand.text || name)+'</span>';
+    // Trello allows a colour with no name. Render the pill anyway (titled with
+    // the colour) instead of dropping the label off the card entirely.
+    return '<span class="badge lbl-'+labelHue(color)+'" title="'+esc(name || color || "label")+'">'
+      + esc(name || "·") + '</span>';
+  }).join("");
+}
 
 // Overdue / due-today badge from the browser's local day (same signal as the
 // digest's due section, now visible on the live board too). v1.16.0.
@@ -332,9 +379,7 @@ function dueBadge(c){
 
 function badgesHtml(c){
   let h = dueBadge(c);
-  if (hasLabel(c,"BESTSELLER")) h += '<span class="badge bestseller">BESTSELLER</span>';
-  if (hasLabel(c,"DBP Invest")) h += '<span class="badge invest">DBP Invest</span>';
-  if (hasLabel(c,"Please Clarify and Organize")) h += '<span class="badge clarify">clarify</span>';
+  h += labelBadges(c);
   h += customFieldBadges(c);
   return h ? '<div class="badges">'+h+'</div>' : "";
 }

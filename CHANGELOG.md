@@ -4,6 +4,40 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.3] — 2026-07-30
+
+### Fixed
+- **The dashboard showed only one label per card, and never showed some labels
+  at all.** `badgesHtml()` on both the dashboard and the digest email didn't
+  render a card's labels — it tested for three specific *names* (`BESTSELLER`,
+  `DBP Invest`, `Please Clarify and Organize`) and emitted a hardcoded badge for
+  each hit. Every other label was dropped silently. On the live board that means
+  `SSF` — added after the dashboard was written — has never appeared on any of
+  the four cards carrying it, and a card labelled `BESTSELLER` + `SSF` looked
+  like it had one label.
+
+  Both surfaces now render **every** label on the card, in the order Trello
+  returns them, coloured from the label's own Trello palette colour. A label
+  added on the board appears without a code change. The `_light` / `_dark`
+  palette variants collapse onto their base hue — a 10px pill can't carry three
+  shades of green and stay legible — and a label with no colour, or a colour
+  outside the palette, gets a neutral pill instead of vanishing. Trello also
+  allows a label with a colour and no name; that renders as a colour swatch
+  (titled with the colour) rather than being dropped.
+
+  The three original labels keep their hand-tuned badge, including the
+  `Please Clarify and Organize` → `clarify` shortening, so nothing that was
+  already on screen changes appearance.
+
+### Notes
+- The label filter chips (All / BESTSELLER / DBP Invest / Personal) are
+  unchanged — this was a rendering fix. `SSF` cards still count as "Personal"
+  there, since that chip means "neither BESTSELLER nor DBP Invest".
+- Tests 277 → 293. New `test/dashboard-labels.test.ts` evaluates page.html's
+  real label functions in a stub DOM rather than re-implementing them, so the
+  dashboard's rendering is covered for the first time; `test/digest.test.ts`
+  gets the matching cases for the email. All 16 fail against the old code.
+
 ## [1.19.2] — 2026-07-28
 
 Bug-hunt pass over the v1.19.0 multi-workspace code, verified against the live

@@ -423,12 +423,26 @@ function cardHtml(c, opts){
     + '</div>';
 }
 
+// The label chips above "Next actions", in display order. `key` is what gets
+// persisted to localStorage, so renaming one silently resets that browser's
+// filter to All — add rather than rename. "Personal" is the residual (a card
+// in none of these spheres) and "All" is everything, so both are derived from
+// this list rather than spelled out: adding a chip here narrows Personal by
+// the same stroke. A card in two spheres counts under both, as it always has.
+const FILTER_LABELS = [
+  { key:"bestseller", label:"BESTSELLER" },
+  { key:"invest",     label:"DBP Invest" },
+  { key:"ssf",        label:"SSF" },
+];
+function isPersonal(c){ return FILTER_LABELS.every(f => !hasLabel(c, f.label)); }
+
 function passesFilter(c){
   if (FILTER === "all") return true;
-  if (FILTER === "bestseller") return hasLabel(c,"BESTSELLER");
-  if (FILTER === "invest") return hasLabel(c,"DBP Invest");
-  if (FILTER === "personal") return !hasLabel(c,"BESTSELLER") && !hasLabel(c,"DBP Invest");
-  return true;
+  if (FILTER === "personal") return isPersonal(c);
+  const f = FILTER_LABELS.find(f => f.key === FILTER);
+  // Unknown key (a filter persisted by an older build) falls back to showing
+  // everything rather than an unexplained empty board.
+  return f ? hasLabel(c, f.label) : true;
 }
 
 function render(){
@@ -503,14 +517,10 @@ function render(){
 
   // ---- Zone 2: next actions (with per-tag counts across context lists) ----
   const nextCards = CTX.reduce((a,l)=>a.concat(cardsIn(l.id)), []);
-  const tagCount = {
-    all: nextCards.length,
-    bestseller: nextCards.filter(c=>hasLabel(c,"BESTSELLER")).length,
-    invest: nextCards.filter(c=>hasLabel(c,"DBP Invest")).length,
-    personal: nextCards.filter(c=>!hasLabel(c,"BESTSELLER") && !hasLabel(c,"DBP Invest")).length,
-  };
-  const chips = [["all","All"],["bestseller","BESTSELLER"],["invest","DBP Invest"],["personal","Personal"]]
-    .map(([k,lbl]) => '<span class="chip'+(FILTER===k?' active':'')+'" onclick="setFilter(\''+k+'\')">'+lbl+'<span class="chip-n">'+tagCount[k]+'</span></span>').join("");
+  const tagCount = { all: nextCards.length, personal: nextCards.filter(isPersonal).length };
+  FILTER_LABELS.forEach(f => { tagCount[f.key] = nextCards.filter(c=>hasLabel(c,f.label)).length; });
+  const chips = [["all","All"]].concat(FILTER_LABELS.map(f=>[f.key,f.label]), [["personal","Personal"]])
+    .map(([k,lbl]) => '<span class="chip'+(FILTER===k?' active':'')+'" onclick="setFilter(\''+k+'\')">'+esc(lbl)+'<span class="chip-n">'+tagCount[k]+'</span></span>').join("");
 
   let ctxCols = CTX.map(l => {
     const all = cardsIn(l.id);

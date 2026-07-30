@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.19.3] — 2026-07-30
 
+### Added
+- **An `SSF` filter chip on the dashboard**, between `DBP Invest` and
+  `Personal`. `Personal` is the residual — a card in none of the labelled
+  spheres — so it now excludes SSF cards rather than absorbing them; on the
+  live board that moves four cards out of a bucket that never described them.
+  The three chip definitions live in one `FILTER_LABELS` list that the counts,
+  the chip row and `passesFilter()` all derive from, so the next chip is one
+  line and can't drift out of sync with the residual.
+
 ### Fixed
 - **The dashboard showed only one label per card, and never showed some labels
   at all.** `badgesHtml()` on both the dashboard and the digest email didn't
@@ -30,13 +39,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already on screen changes appearance.
 
 ### Notes
-- The label filter chips (All / BESTSELLER / DBP Invest / Personal) are
-  unchanged — this was a rendering fix. `SSF` cards still count as "Personal"
-  there, since that chip means "neither BESTSELLER nor DBP Invest".
-- Tests 277 → 293. New `test/dashboard-labels.test.ts` evaluates page.html's
-  real label functions in a stub DOM rather than re-implementing them, so the
-  dashboard's rendering is covered for the first time; `test/digest.test.ts`
-  gets the matching cases for the email. All 16 fail against the old code.
+- Tests 277 → 299. New `test/dashboard-labels.test.ts` evaluates page.html's
+  real label and filter functions in a stub DOM rather than re-implementing
+  them, so the dashboard's rendering is covered for the first time;
+  `test/digest.test.ts` gets the matching cases for the email. The 16 label
+  tests all fail against the old code.
+- The digest email has no filter chips, and its "Could-do (Personal)" bucket is
+  a Trello *list*, not a label residual — so the chip change is dashboard-only.
 
 ## [1.19.2] — 2026-07-28
 

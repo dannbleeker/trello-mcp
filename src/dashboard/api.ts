@@ -39,7 +39,7 @@ import { TrelloClient, TrelloError } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD } from "../trello/constants";
 import { resolveBoardRef } from "../trello/resolve";
 import { GuardError } from "../trello/guards";
-import { create_card, list_snoozed_cards, move_card, set_due_complete, wake_card } from "../trello/tools";
+import { create_card, list_snoozed_cards, move_card, set_due_complete, wake_card, weekly_review_pack } from "../trello/tools";
 import { verifySessionCookie } from "./session";
 
 /** The subset of Worker bindings the dashboard needs. Matches names in wrangler secrets/vars. */
@@ -224,6 +224,18 @@ api.post("/api/done", async (c) => {
 		await set_due_complete(client, { cardId, complete: true });
 		const { warning } = await move_card(client, { cardId, list: DONE_LIST_ALIAS });
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
+	} catch (e) {
+		return errorResponse(c, e);
+	}
+});
+
+api.get("/api/review", async (c) => {
+	// Backs the dashboard's weekly-review panel. Reuses the MCP tool rather than
+	// re-deriving the buckets, so the panel, the digest's Friday block and a
+	// review run through Claude all read the same numbers. Fetched lazily by the
+	// page (only when the panel is open) — it is a second full board read.
+	try {
+		return c.json(await weekly_review_pack(trello(c.env), {}));
 	} catch (e) {
 		return errorResponse(c, e);
 	}

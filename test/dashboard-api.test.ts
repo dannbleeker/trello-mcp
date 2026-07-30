@@ -211,6 +211,34 @@ describe("GET /api/cards", () => {
 	});
 });
 
+describe("GET /api/review", () => {
+	it("returns the weekly-review pack, with Could-do (SSF) among the horizons", async () => {
+		// The horizon bucket used to list Personal / BESTSELLER / DBP Invest /
+		// Someday only, so an entire sphere was missing from the one view built
+		// to show horizons.
+		const cookie = await sessionFor("dannbleeker");
+		mockTrello([
+			{ body: { id: BOARD_ID, name: "Dann to-do", url: "https://trello.com/b/x" }, method: "GET", path: `/1/boards/${BOARD_ID}` },
+			{
+				body: [
+					trelloCard({ id: "s1", idList: LIST_ALIASES["could-ssf"], name: "Rekruttering" }),
+					trelloCard({ id: "p1", idList: LIST_ALIASES["could-personal"], name: "Butterfly" }),
+				],
+				method: "GET",
+				path: `/1/boards/${BOARD_ID}/cards`,
+			},
+		]);
+		const res = await DashboardApi.request("/api/review", { headers: { Cookie: cookie } }, ENV);
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(Object.keys(body.could_do)).toEqual([
+			"could-personal", "could-bestseller", "could-dbp-invest", "could-ssf", "someday",
+		]);
+		expect(body.could_do["could-ssf"]).toBe(1);
+		expect(body.could_do["could-personal"]).toBe(1);
+	});
+});
+
 describe("POST /api/move", () => {
 	it("400 when cardId or list is missing/empty", async () => {
 		const cookie = await sessionFor("dannbleeker");

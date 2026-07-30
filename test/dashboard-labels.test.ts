@@ -7,7 +7,7 @@
 // init() straight down its error path and keeps evaluation side-effect-free.
 
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 const PAGE = readFileSync(new URL("../src/dashboard/page.html", import.meta.url), "utf8");
 
@@ -34,35 +34,83 @@ type Page = {
 		OVERVIEW: Role[];
 		LIST_NAMES: Record<string, string>;
 	};
-	ageBadge: (c: { dateLastActivity?: string }) => string;
+	ageBadge: (c: { dateLastActivity?: string }, kind: string) => string;
 	activityMs: (c: { dateLastActivity?: string }) => number;
+	queueRead: () => string[];
+	queueWrite: (q: string[]) => void;
+	flushCaptureQueue: () => Promise<number>;
+	onCapture: () => Promise<void>;
+	setOnline: (v: boolean) => void;
+	setCaptureInput: (v: string) => void;
+	captureCalls: () => string[];
+	failCaptures: (v: boolean) => void;
 };
 
 function loadPageScript(): Page {
 	const start = PAGE.indexOf("<script>") + "<script>".length;
 	const script = PAGE.slice(start, PAGE.lastIndexOf("</script>"));
-	const el = () => ({ innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} });
+
+	// A stub DOM just rich enough for the page's top-level code to run. The
+	// capture input is a single shared node so a test can set its value and
+	// call the page's real onCapture().
+	const capInput = { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
+	const el = (id?: string) =>
+		id === "capInput" ? capInput : { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
 	const document = { addEventListener() {}, getElementById: el, querySelectorAll: () => [], activeElement: null };
+	const window = { addEventListener() {} };
+	const store = new Map<string, string>();
+	const localStorage = {
+		getItem: (k: string) => (store.has(k) ? store.get(k) : null),
+		setItem: (k: string, v: string) => void store.set(k, v),
+	};
+	const navigator = { onLine: true };
+
+	// Records every /api/capture body so a test can assert what actually went
+	// out; `fail` simulates the network being down mid-flush.
+	const captureCalls: string[] = [];
+	let fail = false;
+	const fetchStub = (url: string, opts?: { body?: string }) => {
+		if (String(url).startsWith("/api/capture")) {
+			if (fail) return Promise.reject(new TypeError("offline"));
+			captureCalls.push(JSON.parse(opts?.body ?? "{}").name);
+			return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ card: {} }) });
+		}
+		return Promise.reject(new Error("no network in tests"));
+	};
+
 	const factory = new Function(
 		"document",
 		"fetch",
 		"location",
+		"window",
+		"localStorage",
+		"navigator",
 		`${script}
 		return {
 			labelBadges: labelBadges, labelHue: labelHue, passesFilter: passesFilter,
 			isPersonal: isPersonal, setFilter: setFilter, FILTER_LABELS: FILTER_LABELS,
 			configureFromLists: configureFromLists, ageBadge: ageBadge, activityMs: activityMs,
+			queueRead: queueRead, queueWrite: queueWrite,
+			flushCaptureQueue: flushCaptureQueue, onCapture: onCapture,
 			// CTX and friends are reassigned by configureFromLists, so hand back a
 			// getter rather than the values captured at load time.
 			layout: function(){ return { CTX, INBOX, WAITING, DONE, BIGROCKS, MOVE_TARGETS, OVERVIEW, LIST_NAMES }; },
 		};`,
 	);
-	return factory(document, () => Promise.reject(new Error("no network in tests")), { href: "", search: "" });
+	const page = factory(document, fetchStub, { href: "", search: "" }, window, localStorage, navigator);
+	return Object.assign(page, {
+		setOnline: (v: boolean) => { navigator.onLine = v; },
+		setCaptureInput: (v: string) => { capInput.value = v; },
+		captureCalls: () => captureCalls.slice(),
+		failCaptures: (v: boolean) => { fail = v; },
+	});
 }
 
 const {
 	labelBadges, labelHue, passesFilter, isPersonal, setFilter, FILTER_LABELS,
 	configureFromLists, layout, ageBadge, activityMs,
+	queueRead, queueWrite, flushCaptureQueue, onCapture,
+	setOnline, setCaptureInput, captureCalls, failCaptures,
 } = loadPageScript();
 
 /** Badge text between the pill's own tags, in render order. */
@@ -298,38 +346,118 @@ describe("dashboard layout derived from the board's lists", () => {
 	});
 });
 
-describe("big-rock age badge", () => {
+describe("card age badge", () => {
 	const daysAgo = (n: number) => ({ dateLastActivity: new Date(Date.now() - n * 86400000).toISOString() });
 
 	it("names the rot: months untouched, in red past a quarter", () => {
 		// The live board has rocks last touched 5, 7 and 13 months ago.
-		const h = ageBadge(daysAgo(400));
+		const h = ageBadge(daysAgo(400), "rock");
 		expect(h).toContain("untouched 13 months");
 		expect(h).toContain("age buried");
 	});
 
-	it("flags a month of drift more gently than a quarter", () => {
-		expect(ageBadge(daysAgo(35))).toContain("age drifting");
-		expect(ageBadge(daysAgo(35))).not.toContain("buried");
-		expect(ageBadge(daysAgo(100))).toContain("age buried");
+	it("flags a month of rock drift more gently than a quarter", () => {
+		expect(ageBadge(daysAgo(35), "rock")).toContain("age drifting");
+		expect(ageBadge(daysAgo(35), "rock")).not.toContain("buried");
+		expect(ageBadge(daysAgo(100), "rock")).toContain("age buried");
 	});
 
-	it("stays quiet for a rock touched recently", () => {
-		expect(ageBadge(daysAgo(3))).toContain("untouched 3 days");
-		expect(ageBadge(daysAgo(3))).not.toMatch(/drifting|buried/);
-		expect(ageBadge(daysAgo(0))).toContain("touched today");
+	it("big rocks always show their age — it is the zone's only signal", () => {
+		expect(ageBadge(daysAgo(3), "rock")).toContain("untouched 3 days");
+		expect(ageBadge(daysAgo(3), "rock")).not.toMatch(/drifting|buried/);
+		expect(ageBadge(daysAgo(0), "rock")).toContain("touched today");
+	});
+
+	it("every other zone stays silent until it has something to say", () => {
+		// A healthy board shows no age badges at all outside big rocks.
+		for (const kind of ["next", "waiting", "inbox"]) {
+			expect(ageBadge(daysAgo(0), kind)).toBe("");
+			expect(ageBadge(daysAgo(6), kind)).toBe("");
+		}
+	});
+
+	it("next actions tolerate one weekly review, not four", () => {
+		expect(ageBadge(daysAgo(13), "next")).toBe(""); // still within a review cycle
+		expect(ageBadge(daysAgo(14), "next")).toContain("age drifting");
+		expect(ageBadge(daysAgo(30), "next")).toContain("age buried");
+	});
+
+	it("waiting-for and inbox run on the 7-day fuse the weekly review already uses", () => {
+		for (const kind of ["waiting", "inbox"]) {
+			expect(ageBadge(daysAgo(6), kind)).toBe("");
+			expect(ageBadge(daysAgo(7), kind)).toContain("age drifting");
+			expect(ageBadge(daysAgo(21), kind)).toContain("age buried");
+		}
+	});
+
+	it("a next action and a big rock of the same age are graded differently", () => {
+		// 30 days is rot for a next action, only drift for a project.
+		expect(ageBadge(daysAgo(30), "next")).toContain("buried");
+		expect(ageBadge(daysAgo(30), "rock")).toContain("drifting");
 	});
 
 	it("scales the unit: days, then weeks, then months", () => {
-		expect(ageBadge(daysAgo(1))).toContain("1 day");
-		expect(ageBadge(daysAgo(20))).toContain("2 weeks");
-		expect(ageBadge(daysAgo(90))).toContain("3 months");
+		expect(ageBadge(daysAgo(1), "rock")).toContain("1 day");
+		expect(ageBadge(daysAgo(20), "rock")).toContain("2 weeks");
+		expect(ageBadge(daysAgo(90), "rock")).toContain("3 months");
 	});
 
-	it("renders nothing, and sorts last, when the card has no activity date", () => {
-		expect(ageBadge({})).toBe("");
+	it("renders nothing for an unknown zone, or a card with no activity date", () => {
+		expect(ageBadge(daysAgo(400), "not-a-zone")).toBe("");
+		expect(ageBadge({}, "rock")).toBe("");
 		expect(activityMs({})).toBe(Infinity);
 		expect(activityMs({ dateLastActivity: "not-a-date" })).toBe(Infinity);
+	});
+});
+
+describe("offline capture queue", () => {
+	beforeEach(() => {
+		queueWrite([]);
+		setOnline(true);
+		failCaptures(false);
+		setCaptureInput("");
+	});
+
+	it("queues a capture made while offline instead of losing the thought", async () => {
+		setOnline(false);
+		failCaptures(true);
+		setCaptureInput("idea from the plane");
+		await onCapture();
+		expect(queueRead()).toEqual(["idea from the plane"]);
+	});
+
+	it("does NOT queue a failure that happened while online", async () => {
+		// The request may have reached Trello; re-sending would create a silent
+		// duplicate, and /api/capture has no idempotency key to prevent it.
+		setOnline(true);
+		failCaptures(true);
+		setCaptureInput("might have landed");
+		await onCapture();
+		expect(queueRead()).toEqual([]);
+	});
+
+	it("flushes oldest-first when the network returns", async () => {
+		queueWrite(["first", "second", "third"]);
+		const before = captureCalls().length;
+		expect(await flushCaptureQueue()).toBe(3);
+		expect(captureCalls().slice(before)).toEqual(["first", "second", "third"]);
+		expect(queueRead()).toEqual([]);
+	});
+
+	it("stops at the first failure and keeps the rest of the queue intact", async () => {
+		queueWrite(["kept-a", "kept-b"]);
+		failCaptures(true);
+		expect(await flushCaptureQueue()).toBe(0);
+		expect(queueRead()).toEqual(["kept-a", "kept-b"]);
+	});
+
+	it("is a no-op on an empty queue", async () => {
+		expect(await flushCaptureQueue()).toBe(0);
+	});
+
+	it("survives unreadable queue storage", () => {
+		queueWrite("not json" as unknown as string[]);
+		expect(() => queueRead()).not.toThrow();
 	});
 });
 

@@ -4,6 +4,106 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] — 2026-07-30
+
+Findings from reading the live board against the GTD practice the dashboard is
+supposed to serve. Several are the same shape as the v1.19.3 label bug: the
+board moved on, and code that hardcoded a snapshot of it didn't.
+
+### Added
+- **Cards show how long they've gone untouched, on a per-zone fuse.** No card
+  on the board carries a due date, so the due badge never fires — staleness is
+  the signal Dann actually manages by, and the one his weekly review already
+  runs on. Zones rot at different speeds, so one threshold can't serve them:
+
+  | Zone | Always shown | Amber | Red |
+  |---|---|---|---|
+  | Rolling Big Rocks | yes | 90 days | 120 days |
+  | Waiting for… | no | 10 days | 21 days |
+  | Inbox | no | 7 days | 21 days |
+  | Next actions | no | 14 days | 30 days |
+
+  Outside big rocks the badge stays invisible until it has something to say, so
+  a healthy board shows none of them. Big rocks are quarterly goals — rolling
+  one over is fine, but it should be looked at every quarter at the very least,
+  so the amber is a full quarter and the alarm a month past it. A next action
+  surviving one weekly review untouched is normal; surviving four is rot. The
+  same 30 days is therefore red for a next action, red for a waiting-for item,
+  and unremarkable for a big rock. The due-date machinery is
+  left alone — it already self-hides (`dueBadge` returns `""`, the digest's
+  overdue section is behind `if (overdue.length || dueToday.length)`), so it
+  costs nothing today and is correct the moment a due date is set.
+- **A weekly-review panel on the dashboard.** Shows only what the daily board
+  deliberately hides: the Could-do horizon counts and the waiting-for items
+  that have gone stale. Backed by the existing `weekly_review_pack` tool via a
+  new `GET /api/review`, so the panel, the digest's Friday block and a review
+  run through Claude all read the same numbers. Opens itself on Fridays, stays
+  a one-line strip the rest of the week, and is fetched lazily — it is a second
+  full board read. Counts only, read-only: parking a card in a horizon stays a
+  Trello action.
+- **Touch targets sized for the phone.** Dann travels ~30% and drives this as
+  an installed PWA, where ✓ Done and Move were 11px text with 3px of padding.
+  Under `pointer: coarse` the controls are now ~44px tall — gated on pointer
+  type rather than a width breakpoint, so a narrow desktop window keeps the
+  compact layout. The capture input goes to 16px, which is not cosmetic: iOS
+  Safari auto-zooms the page on focusing any input below 16px.
+- **An offline capture queue.** Capture is the one thing done from a phone in a
+  hotel or on a plane, and that is exactly where the network isn't; a dropped
+  POST used to leave an error toast that had to be noticed before the tab
+  closed. Captures made while offline are queued in `localStorage`, shown under
+  the capture box, and flushed oldest-first when the connection returns.
+  Queued **only** when the browser knows it is offline — a request that failed
+  while online may still have reached Trello, and `/api/capture` has no
+  idempotency key, so re-sending would create a silent duplicate. That path is
+  left exactly as it was.
+- **Big rocks sorted stalest first.** The zone's
+  own subtitle is *"don't let firefighting bury these"*, and it had no way to
+  tell a rock touched yesterday from one last touched in June 2025 — no due
+  date, no actions, just a title. On the live board three of five rocks had
+  gone 5, 7 and 13 months without a touch, and all three were the personal
+  ones. The zone is now sorted stalest first, inverting the Trello ordering
+  that buries a forgotten rock at the bottom of the list.
+- **`could-ssf` list alias; Could-do (SSF) added to the digest's Friday
+  horizons and to `weekly_review_pack`.** SSF has been its own sphere for a
+  while — own label, own Could-do list — but the list had no alias, so it was
+  unreachable by name from the tools and missing from *both* horizon buckets:
+  the digest's Friday block and the review pack the weekly review reads. Cards
+  parked there were invisible on the day they were meant to be reviewed.
+
+### Changed
+- **The dashboard derives its layout from the board instead of hardcoding it.**
+  `page.html` carried the board ID, the five context list IDs and the WIP
+  limits `7/5/5` as literals, duplicating information Trello already holds —
+  the list names literally say `(WIP limit 7)`, and the tools layer already
+  parses exactly that for its guard warnings. A limit changed in Trello made
+  the dashboard quietly lie; a context list added or retired never arrived.
+  `GET /api/cards` now returns the board's `lists` alongside the cards, and the
+  page reads its layout off them on every load.
+
+  **What shows is unchanged.** Deriving the layout deliberately does not mean
+  showing every list: only lists whose name starts with `@` become contexts
+  (the board's own convention), plus four roles matched by name (Inbox,
+  Waiting for…, Done-do, Rolling Big Rocks). Could-do (\*), Someday maybe,
+  Repeater Cards, Butler and Behind the scenes stay off the dashboard exactly
+  as before — with a test that fails if any of them ever leaks in.
+- **The page honours its own `?board=`.** It hardcoded the board ID, so the
+  `?board=` support added to the API in v1.19.0 was unreachable from the
+  browser. `/dashboard?board=<alias|name|id|url>` now works, and a role or
+  context absent from that board degrades to an empty zone rather than an
+  error.
+
+### Notes
+- Tests 299 → 330.
+- Deliberately **not** done, and not oversights: deferring a card to a Could-do
+  list from the dashboard (that decision should cost something, so it stays a
+  Trello action), separating Repeater-spawned routine from real work in the
+  context counts (by design), and a `Frontline Tech` label (FT work stays under
+  BESTSELLER for now).
+- The Butler side of the SSF gap was fixed on the board itself, outside this
+  repo: Could-do (SSF) now has all four rules its sibling lists have, and three
+  rules naming lists that no longer exist (`@Office (WIP limit 5)`, `ERFA`, and
+  a two-dot `Waiting for..`) were archived.
+
 ## [1.19.3] — 2026-07-30
 
 ### Added

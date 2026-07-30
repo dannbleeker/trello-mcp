@@ -106,6 +106,12 @@ body {
 /* Custom-field values: deliberately quieter than the label badges — they are
    data ABOUT the card, not a flag on it, so they must not outrank "overdue". */
 .badge.cfield { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
+/* Big-rock age. A rock nobody has touched in months is the exact failure this
+   zone exists to prevent, so past a quarter it gets the same red as an overdue
+   card; a month is a nudge, not an alarm. */
+.badge.age { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
+.badge.age.drifting { background:#fef4e6; color:#8a5a00; border-color:#f5dcb3; }
+.badge.age.buried { background:#fdecea; color:#c0392b; border-color:#f5c6c0; }
 .card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
 .btn {
   font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
@@ -136,6 +142,15 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   padding: 12px 14px 14px; margin: 18px 0 6px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
 }
 .ov-panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin-bottom: 10px; }
+.ov-panel-title small { font-weight: 500; text-transform: none; letter-spacing: 0; color: #9aa3ad; }
+.ov-panel-title.click { cursor: pointer; user-select: none; }
+.ov-panel-title.click:hover { color: #1c2024; }
+.rev-sub { font-size: 12px; font-weight: 600; color: #4b5563; margin: 12px 0 8px; }
+/* Collapsed, the panel is just its own title — don't reserve body space. */
+.ov-panel.collapsed { padding-bottom: 12px; }
+.ov-panel.collapsed .ov-panel-title { margin-bottom: 0; }
+/* A horizon holding nothing is information too — dimmed, not hidden. */
+.wip.zero { opacity: .5; }
 .overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
 .ov {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -176,6 +191,31 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 .badge.duover { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
 .badge.dueto  { background:#1c2024; color:#fff; }
 
+/* ---- touch devices (v1.20.0) ----
+   Dann travels ~30% and drives this from a phone as an installed PWA, where
+   the desktop sizes are genuinely hard to hit: ✓ Done and Move are 11px with
+   3px of padding. Gated on `pointer: coarse` rather than a width breakpoint,
+   so a narrow desktop window keeps the compact layout and a large tablet
+   still gets the big targets. The 16px on the capture input is not cosmetic —
+   iOS Safari auto-zooms the page on focusing any input below 16px, which on
+   the one screen Dann uses to capture a thought is actively hostile. */
+@media (pointer: coarse) {
+  /* ~44px tall, the smallest reliable touch target. */
+  .btn { font-size: 14px; padding: 13px 16px; }
+  select.mv { font-size: 14px; padding: 12px 10px; max-width: 150px; }
+  .chip { font-size: 14px; padding: 12px 16px; }
+  .card { padding: 12px; }
+  .card-actions { gap: 10px; margin-top: 10px; }
+  .capture input { font-size: 16px; padding: 12px 14px; }
+  .capture button { font-size: 15px; padding: 12px 20px; }
+  .stat.click, .ov-panel-title.click { padding: 4px 0; }
+}
+
+/* Captures held back while offline — shown under the capture box so a queued
+   thought is never silently invisible. */
+.cap-queued { font-size: 11.5px; color: #8a5a00; background: #fef4e6; border: 1px solid #f5dcb3;
+  border-radius: 8px; padding: 6px 10px; margin: -2px 0 8px; }
+
 /* ---- dark mode (v1.16.0) ---- */
 @media (prefers-color-scheme: dark) {
   body { background: #15171a; color: #e5e7eb; }
@@ -206,6 +246,12 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   .badge.dueto { background: #e5e7eb; color: #15171a; }
   .badge.bestseller { background: #e5e7eb; color: #15171a; }
   .badge.cfield { background: #23262b; color: #9aa3ad; border-color: #33373d; }
+  .badge.age { background: #23262b; color: #9aa3ad; border-color: #33373d; }
+  .badge.age.drifting { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
+  .badge.age.buried { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
+  .ov-panel-title.click:hover { color: #e5e7eb; }
+  .rev-sub { color: #d1d5db; }
+  .cap-queued { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
   #toast { background: #e5e7eb; color: #15171a; }
   .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
   .loading, .empty { color: #9aa3ad; }
@@ -221,35 +267,89 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 <script>
 // Data layer talks to the same-origin Worker API (see src/dashboard/handler.ts).
 // Auth is a GitHub-OAuth session cookie; a 401 bounces the browser to /app/login.
-const BOARD_ID = "58cbce31043f1a89cfc6b42c";
-const CTX = [
-  { id:"59be51ab95ff1052eac74429", name:"@Computer", wip:7 },
-  { id:"59be516a18d71ddd80868e9d", name:"@Home",     wip:5 },
-  { id:"5ab55bba5941a0a65bbd2256", name:"@Phone",    wip:5 },
-  { id:"59be519ca665c8b77ff07ffb", name:"@Errands",  wip:null },
-  { id:"5db58e03ec3c6561ad9b2875", name:"@Lene",     wip:null },
+// ---- Board layout, read off the board itself (v1.20.0) ----
+// This used to be a hardcoded board ID, five context list IDs and their WIP
+// limits. A list added in Trello never appeared here, and a WIP limit changed
+// in Trello made the dashboard quietly lie. /api/cards now returns the board's
+// lists and the layout is derived from them on every load.
+//
+// Deriving the layout must NOT become "show every list". Exactly two things
+// qualify, and nothing else is rendered:
+//   * contexts — lists whose name starts with "@" (the board's own convention),
+//     in board order, WIP parsed from the "(WIP limit N)" suffix that the tools
+//     layer already reads for its guard warnings;
+//   * the four named roles below.
+// So Could-do (*), Someday maybe, Repeater Cards, Butler and Behind the scenes
+// stay off the dashboard exactly as they were — but a renamed WIP limit, or a
+// context list added or retired, now travels on its own.
+const ROLES = [
+  { key:"inbox",    match:/^inbox$/i,             label:"Inbox" },
+  { key:"waiting",  match:/^waiting for/i,        label:"Waiting for…" },
+  { key:"done",     match:/^done-do$/i,           label:"Done-do" },
+  { key:"bigrocks", match:/^rolling big rocks$/i, label:"Rolling Big Rocks" },
 ];
-const WAITING  = { id:"59b4453266a62986fd16872e", name:"Waiting for…" };
-const INBOX    = { id:"59bd69c743b67aa0d621b3a9", name:"Inbox" };
-const BIGROCKS = { id:"5b6189409662065780670709", name:"Rolling Big Rocks" };
-const DONE     = { id:"63d7fdc0b310c11585d34c3e", name:"Done-do" };
-// lists offered in the per-card "Move" dropdown (Done is the ✓ button; big rocks excluded)
-const MOVE_TARGETS = [...CTX, WAITING];
-// lists shown in the count overview panel
-const OVERVIEW = [
-  ...CTX,
-  WAITING,
-  INBOX,
-];
+
+// The dashboard follows its own ?board= (alias, name, raw ID or Trello URL —
+// the same reference syntax the tools take). Absent, the server picks the
+// default board, so the page no longer needs to know which board that is.
+const BOARD_PARAM = new URLSearchParams(location.search || "").get("board");
+
+let CTX = [];
+// A role missing from this board resolves to a null id. cardsIn(null) is empty,
+// so its zone renders as "clear" instead of throwing.
+let INBOX    = { id:null, name:"Inbox" };
+let WAITING  = { id:null, name:"Waiting for…" };
+let DONE     = { id:null, name:"Done-do" };
+let BIGROCKS = { id:null, name:"Rolling Big Rocks" };
+let MOVE_TARGETS = [];
+let OVERVIEW = [];
+let LIST_NAMES = {};
+
+function wipFromName(n){ const m = /\(WIP limit (\d+)\)/i.exec(n||""); return m ? Number(m[1]) : null; }
+/** "@Computer (WIP limit 7)" -> "@Computer" — the limit is shown as a count, not in the title. */
+function listLabel(n){ return (n||"").replace(/\s*\(WIP limit \d+\)\s*/i, "").trim(); }
+
+function configureFromLists(lists){
+  const open = (lists||[]).filter(l => l && !l.closed);
+  CTX = open
+    .filter(l => listLabel(l.name).startsWith("@"))
+    .map(l => ({ id:l.id, name:listLabel(l.name), wip:wipFromName(l.name) }));
+  const byKey = {};
+  ROLES.forEach(r => {
+    const hit = open.find(l => r.match.test(listLabel(l.name)));
+    byKey[r.key] = { id: hit ? hit.id : null, name: r.label };
+  });
+  INBOX = byKey.inbox; WAITING = byKey.waiting; DONE = byKey.done; BIGROCKS = byKey.bigrocks;
+  // Done is the ✓ button rather than a move target, and big rocks are read-only
+  // server-side — move_card refuses them either way. Unresolved roles drop out.
+  MOVE_TARGETS = CTX.concat([WAITING]).filter(l => l.id);
+  OVERVIEW = CTX.concat([WAITING, INBOX]).filter(l => l.id);
+  LIST_NAMES = {};
+  CTX.concat([WAITING, INBOX, BIGROCKS, DONE]).forEach(l => { if (l.id) LIST_NAMES[l.id] = l.name; });
+}
 
 let CARDS = [];
 let CUSTOM_FIELDS = [];    // board's custom-field definitions, by id (v1.18.0)
 let SNOOZED = null;        // null = not loaded yet; [] = loaded, none
 let SNOOZE_OPEN = false;
-let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
+let REVIEW = null;         // weekly_review_pack payload; null = not loaded
+// The weekly review is a Friday practice, so the panel opens itself on Fridays
+// and stays a one-line strip the rest of the week — available when Dann is
+// travelling and reviews on a different day, invisible when he isn't.
+let REVIEW_OPEN = new Date().getDay() === 5;
+const DAY_NAME = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
 
-const LIST_NAMES = {};
-[...CTX, WAITING, INBOX, BIGROCKS, DONE].forEach(l => { LIST_NAMES[l.id] = l.name; });
+// Horizon aliases as weekly_review_pack returns them → their board names. An
+// alias with no entry falls back to itself, so a Could-do list added later
+// still shows up (with a uglier label) rather than disappearing.
+const HORIZON_NAMES = {
+  "could-personal":   "Could-do (Personal)",
+  "could-bestseller": "Could-do (BESTSELLER)",
+  "could-dbp-invest": "Could-do (DBP Invest)",
+  "could-ssf":        "Could-do (SSF)",
+  "someday":          "Someday maybe",
+};
+let FILTER = (function(){ try { return localStorage.getItem("dann_dash_filter") || "all"; } catch(e){ return "all"; } })();
 
 function esc(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -266,11 +366,14 @@ async function api(path, opts){
 // idList; normalise defensively so the rest of the dashboard is unchanged.
 let LAST_LOAD = 0;
 async function loadCards(){
-  const res = await api("/api/cards?board=" + encodeURIComponent(BOARD_ID) + "&customFields=1");
+  const res = await api("/api/cards?customFields=1" + (BOARD_PARAM ? "&board=" + encodeURIComponent(BOARD_PARAM) : ""));
   let arr = Array.isArray(res) ? res : (res && Array.isArray(res.cards)) ? res.cards : [];
   // Definitions arrive alongside the cards. A board with the Power-Up off (or
   // no fields defined) yields [], and every custom-field branch below no-ops.
   CUSTOM_FIELDS = (res && Array.isArray(res.customFields)) ? res.customFields : [];
+  // Re-derived on every load, not just the first: a list renamed or a WIP limit
+  // changed in Trello shows up on the next refresh without a redeploy.
+  if (res && Array.isArray(res.lists)) configureFromLists(res.lists);
   LAST_LOAD = Date.now();
   return arr.map(c => ({ ...c, idList: (c.listId != null ? c.listId : c.idList) }));
 }
@@ -377,8 +480,50 @@ function dueBadge(c){
   return "";
 }
 
-function badgesHtml(c){
+/** Milliseconds of a card's last activity; unknown sorts last, not stalest. */
+function activityMs(c){ const t = Date.parse((c && c.dateLastActivity) || ""); return isNaN(t) ? Infinity : t; }
+
+// How long since anything happened on a card. No card on this board carries a
+// due date — staleness is the signal Dann actually manages by, and the one his
+// weekly review already runs on.
+//
+// Zones rot at different speeds, so a single threshold can't serve them:
+//   rock    — big rocks are quarterly goals. Rolling one over is fine, but it
+//             should be looked at every quarter at the very least, so 90 days
+//             is the amber and a month past that is the alarm. Their age is
+//             ALWAYS shown, whatever it is: it is the zone's only signal.
+//   waiting — delegated and silent for ten days wants a chase.
+//   inbox   — an item sitting uncaptured for a week means Get Clear isn't
+//             happening; three weeks means the inbox has become storage.
+//   next    — a next action surviving one weekly review untouched is normal.
+//             Surviving four is rot, not a backlog.
+// Everywhere but big rocks the badge stays invisible until it has something to
+// say, so a healthy board shows none of these at all. v1.20.0.
+const AGE_RULES = {
+  rock:    { always:true,  drift:90, bury:120 },
+  waiting: { always:false, drift:10, bury:21  },
+  inbox:   { always:false, drift:7,  bury:21  },
+  next:    { always:false, drift:14, bury:30  },
+};
+
+function ageBadge(c, kind){
+  const rule = AGE_RULES[kind];
+  if (!rule) return "";
+  const t = activityMs(c);
+  if (t === Infinity) return "";
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days < rule.drift && !rule.always) return "";
+  if (days < 1) return '<span class="badge age">touched today</span>';
+  const txt = days < 14 ? days + (days === 1 ? " day" : " days")
+            : days < 60 ? Math.floor(days/7) + " weeks"
+            : Math.floor(days/30) + " months";
+  const cls = days >= rule.bury ? "age buried" : days >= rule.drift ? "age drifting" : "age";
+  return '<span class="badge '+cls+'">untouched '+txt+'</span>';
+}
+
+function badgesHtml(c, opts){
   let h = dueBadge(c);
+  if (opts && opts.age) h += ageBadge(c, opts.age);
   h += labelBadges(c);
   h += customFieldBadges(c);
   return h ? '<div class="badges">'+h+'</div>' : "";
@@ -418,7 +563,7 @@ function cardHtml(c, opts){
   return '<div class="card" data-card="'+c.id+'">'
     + '<div class="ttl">'+link+'</div>'
     + descSnippet(c)
-    + badgesHtml(c)
+    + badgesHtml(c, opts)
     + actions
     + '</div>';
 }
@@ -454,7 +599,9 @@ function render(){
 
   const inboxCards = cardsIn(INBOX.id);
   const waitingCards = cardsIn(WAITING.id);
-  const rockCards = cardsIn(BIGROCKS.id);
+  // Stalest first. A buried rock drifts to the bottom of the Trello list, which
+  // is the one place it will never be noticed — so the dashboard inverts that.
+  const rockCards = cardsIn(BIGROCKS.id).slice().sort((a,b) => activityMs(a) - activityMs(b));
   const ctxCounts = CTX.map(l => ({ l, n: cardsIn(l.id).length }));
   const totalNext = ctxCounts.reduce((s,x)=>s+x.n, 0);
 
@@ -500,10 +647,44 @@ function render(){
       + '<span class="count">'+(SNOOZED ? SNOOZED.length : '…')+'</span></div>'+rows+'</div>';
   }
 
+  // ---- Weekly review panel ----
+  // Shows only what the daily board deliberately hides: the Could-do horizons
+  // (which are not dashboard zones) and the waiting items that have gone stale.
+  // Counts only, read-only — parking a card in a horizon stays a Trello action.
+  let reviewPanel = '<div class="ov-panel rev'+(REVIEW_OPEN?'':' collapsed')+'"><div class="ov-panel-title click" onclick="toggleReview()">'
+    + 'Weekly review <small>' + (REVIEW_OPEN ? 'horizons &amp; stale waiting ▴' : 'it’s ' + DAY_NAME + ' — open to check horizons ▾') + '</small></div>';
+  if (REVIEW_OPEN){
+    if (REVIEW === null){
+      reviewPanel += '<div class="empty">loading…</div>';
+    } else if (REVIEW.error){
+      reviewPanel += '<div class="empty">couldn’t load the review pack: ' + esc(REVIEW.error) + '</div>';
+    } else {
+      const horizons = REVIEW.could_do || {};
+      const hz = Object.keys(horizons).map(k =>
+        '<span class="wip '+(horizons[k] ? 'none' : 'zero')+'"><b>'+esc(HORIZON_NAMES[k] || k)+'</b> '+horizons[k]+'</span>').join("");
+      reviewPanel += '<div class="wip-row">'+(hz || '<span class="empty">no horizon lists</span>')+'</div>';
+      const stale = (REVIEW.waiting && REVIEW.waiting.stale) || [];
+      const staleDays = (REVIEW.waiting && REVIEW.waiting.staleDays) || 7;
+      reviewPanel += '<div class="rev-sub">Waiting-for untouched '+staleDays+'+ days ('+stale.length+')</div>';
+      reviewPanel += stale.length
+        ? '<div class="cols">' + stale.map(s => {
+            const link = (s.url && /^https?:\/\//i.test(s.url))
+              ? '<a href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.name)+'</a>' : esc(s.name);
+            const days = Math.floor((Date.now() - Date.parse(s.updated || "")) / 86400000);
+            return '<div class="card"><div class="ttl">'+link+'</div>'
+              + '<div class="badges"><span class="badge age drifting">stale '+(isNaN(days)?'?':days)+' days — chase or drop?</span></div></div>';
+          }).join("") + '</div>'
+        : '<div class="empty">clean week — nothing pending too long</div>';
+    }
+  }
+  reviewPanel += '</div>';
+
   // ---- Quick capture ----
+  const queued = queueRead().length;
   let capture = '<div class="capture">'
     + '<input id="capInput" type="text" placeholder="Quick capture → Inbox…" onkeydown="if(event.key===\'Enter\')onCapture()">'
-    + '<button id="capBtn" onclick="onCapture()">Add</button></div>';
+    + '<button id="capBtn" onclick="onCapture()">Add</button></div>'
+    + (queued ? '<div class="cap-queued">'+queued+' capture'+(queued>1?'s':'')+' waiting to sync — they’ll go in when you’re back online</div>' : '');
 
   // ---- List overview panel (count per list) ----
   let overview = '<div class="ov-panel"><div class="ov-panel-title">Cards per list</div><div class="overview">'
@@ -522,12 +703,15 @@ function render(){
   const chips = [["all","All"]].concat(FILTER_LABELS.map(f=>[f.key,f.label]), [["personal","Personal"]])
     .map(([k,lbl]) => '<span class="chip'+(FILTER===k?' active':'')+'" onclick="setFilter(\''+k+'\')">'+esc(lbl)+'<span class="chip-n">'+tagCount[k]+'</span></span>').join("");
 
-  let ctxCols = CTX.map(l => {
+  // Only reachable via ?board= pointing at a board that doesn't use the
+  // "@context" convention. Say so rather than rendering an empty grid.
+  let ctxCols = CTX.length ? "" : '<div class="empty">no @context lists on this board</div>';
+  ctxCols += CTX.map(l => {
     const all = cardsIn(l.id);
     const shown = all.filter(passesFilter);
     const over = l.wip != null && all.length > l.wip;
     let body = shown.length
-      ? shown.map(c => cardHtml(c)).join("")
+      ? shown.map(c => cardHtml(c, {age:"next"})).join("")
       : '<div class="empty">'+(all.length ? "nothing matches filter" : "clear")+'</div>';
     return '<div class="col"><div class="col-head"><span class="name">'+esc(l.name)+'</span>'
       + '<span class="count'+(over?' over':'')+'">'+all.length+(l.wip!=null?'/'+l.wip:'')+'</span></div>'
@@ -536,13 +720,13 @@ function render(){
 
   // ---- Zone 3: needs attention ----
   let waitingCol = '<div class="col"><div class="col-head"><span class="name">Waiting for…</span><span class="count">'+waitingCards.length+'</span></div>'
-    + (waitingCards.length ? waitingCards.map(c=>cardHtml(c)).join("") : '<div class="empty">nothing pending on others</div>') + '</div>';
+    + (waitingCards.length ? waitingCards.map(c=>cardHtml(c, {age:"waiting"})).join("") : '<div class="empty">nothing pending on others</div>') + '</div>';
   let inboxCol = '<div class="col"><div class="col-head"><span class="name">Inbox — clarify</span><span class="count'+(inboxCards.length?' over':'')+'">'+inboxCards.length+'</span></div>'
-    + (inboxCards.length ? inboxCards.map(c=>cardHtml(c)).join("") : '<div class="empty">inbox zero 🎉</div>') + '</div>';
+    + (inboxCards.length ? inboxCards.map(c=>cardHtml(c, {age:"inbox"})).join("") : '<div class="empty">inbox zero 🎉</div>') + '</div>';
 
   // ---- Zone 4: big rocks ----
   let rocksCol = rockCards.length
-    ? '<div class="cols">' + rockCards.map(c=>cardHtml(c,{noActions:true})).join("") + '</div>'
+    ? '<div class="cols">' + rockCards.map(c=>cardHtml(c,{noActions:true, age:"rock"})).join("") + '</div>'
     : '<div class="empty">no big rocks listed</div>';
 
   document.getElementById("content").innerHTML =
@@ -550,6 +734,7 @@ function render(){
     + snoozePanel
     + capture
     + overview
+    + reviewPanel
     + '<div class="zone-title">Next actions <small>by context · filter to focus</small></div>'
     + '<div class="filters">'+chips+'</div>'
     + '<div class="cols">'+ctxCols+'</div>'
@@ -578,6 +763,24 @@ function fmtWake(iso){
 }
 
 function toggleSnooze(){ SNOOZE_OPEN = !SNOOZE_OPEN; render(); }
+
+function toggleReview(){
+  REVIEW_OPEN = !REVIEW_OPEN;
+  render();
+  if (REVIEW_OPEN && REVIEW === null) loadReview();
+}
+
+// Lazy: /api/review is a second full board read, so it only runs when the panel
+// is actually open. Failure leaves REVIEW null and the panel says so, rather
+// than showing zeros that read as "nothing parked anywhere".
+async function loadReview(){
+  try {
+    REVIEW = await api("/api/review");
+  } catch(e){
+    REVIEW = { error: e.message };
+  }
+  render();
+}
 
 // Fetched non-blocking after the board renders — the count fills in when ready.
 async function loadSnoozed(){
@@ -665,6 +868,53 @@ async function onMove(sel){
   }
 }
 
+// ---- Offline capture queue (v1.20.0) ----
+// Capture is the one thing Dann does from a phone in a hotel or on a plane,
+// and it is exactly where the network isn't. A dropped POST used to leave the
+// text in the box and an error toast — recoverable, but only if he noticed
+// before closing the tab.
+//
+// Queued ONLY when the browser knows it is offline. A request that failed
+// while online may still have reached Trello, and re-sending it would create a
+// duplicate card with nothing to detect it — /api/capture has no idempotency
+// key. A silent duplicate is worse than an error message, so the online-failure
+// path is left exactly as it was.
+const CAPTURE_QUEUE_KEY = "dann_dash_capture_queue";
+function queueRead(){ try { return JSON.parse(localStorage.getItem(CAPTURE_QUEUE_KEY) || "[]"); } catch(e){ return []; } }
+function queueWrite(q){ try { localStorage.setItem(CAPTURE_QUEUE_KEY, JSON.stringify(q)); } catch(e){} }
+
+let FLUSHING = false;
+// Drain oldest-first, stopping at the first failure: capture order is the order
+// the thoughts arrived, and a half-drained queue must keep the rest intact.
+async function flushCaptureQueue(){
+  if (FLUSHING || !queueRead().length) return 0;
+  FLUSHING = true;
+  let sent = 0;
+  try {
+    let q = queueRead();
+    while (q.length){
+      try {
+        await api("/api/capture", { method: "POST", body: JSON.stringify({ name: q[0] }) });
+      } catch(e){ break; }
+      q.shift(); queueWrite(q); sent++;
+    }
+  } finally { FLUSHING = false; }
+  return sent;
+}
+
+async function reloadAfterFlush(n){
+  toast(n === 1 ? "Synced 1 offline capture" : "Synced "+n+" offline captures");
+  try { CARDS = await loadCards(); } catch(e){}
+  render();
+}
+
+// Coming back online is the moment the queue can move; the visibilitychange
+// refresh below covers the case where the event never fires (tab restored on a
+// different network).
+window.addEventListener("online", () => {
+  flushCaptureQueue().then(n => { if (n) reloadAfterFlush(n); });
+});
+
 async function onCapture(){
   const input = document.getElementById("capInput");
   const btn = document.getElementById("capBtn");
@@ -676,6 +926,13 @@ async function onCapture(){
     created = await api("/api/capture", { method: "POST", body: JSON.stringify({ name: name }) });
   } catch(e){
     btn.disabled = false; input.disabled = false;
+    if (navigator.onLine === false){
+      const q = queueRead(); q.push(name); queueWrite(q);
+      input.value = "";
+      toast(q.length === 1 ? "Offline — saved, syncs when you’re back" : "Offline — "+q.length+" captures saved");
+      render();
+      return;
+    }
     toast("Couldn’t add: "+e.message);
     return;
   }
@@ -697,6 +954,8 @@ async function init(){
     CARDS = await loadCards();
     render();
     loadSnoozed(); // non-blocking; fills the Snoozed stat when ready
+    if (REVIEW_OPEN) loadReview(); // Fridays: the panel is open, so fill it
+    flushCaptureQueue().then(n => { if (n) reloadAfterFlush(n); });
   } catch(e){
     document.getElementById("content").innerHTML =
       '<div class="errbox">Couldn’t load your Trello board: '+esc(e.message)+'</div>';
@@ -708,6 +967,7 @@ init();
 // overnight tab acts on a stale board. Throttled to once per minute. v1.16.0.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && Date.now() - LAST_LOAD > 60000){
+    flushCaptureQueue().catch(()=>{});
     loadCards().then(cs => { CARDS = cs; render(); loadSnoozed(); }).catch(()=>{});
   }
 });

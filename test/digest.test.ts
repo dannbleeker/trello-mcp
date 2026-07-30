@@ -365,6 +365,23 @@ describe("v1.16.0 additions", () => {
 		expect(section).toContain("Could-do (Personal)");
 		expect(renderDigest(cards, saturday).html).not.toContain("Weekly review");
 	});
+
+	it("the Friday horizons cover every Could-do list, SSF included", () => {
+		// SSF became its own sphere — own label, own Could-do list — but the
+		// horizons listed only Personal / BESTSELLER / DBP Invest, so cards
+		// parked there were invisible on the one day Dann reviews horizons.
+		const friday = Date.parse("2026-07-10T10:00:00Z");
+		const html = renderDigest(
+			[card({ id: "s1", name: "RekrutteringProject", idList: LIST_ALIASES["could-ssf"] })],
+			friday,
+		).html;
+		const section = html.slice(html.indexOf("Weekly review"), html.indexOf("Cards per list"));
+		for (const h of ["Could-do (Personal)", "Could-do (BESTSELLER)", "Could-do (DBP Invest)", "Could-do (SSF)", "Someday maybe"]) {
+			expect(section).toContain(h);
+		}
+		// and the SSF horizon counts its card rather than reading zero
+		expect(/Could-do \(SSF\)<\/b> 1/.test(section)).toBe(true);
+	});
 });
 
 describe("v1.19.3 — every label on a card renders", () => {

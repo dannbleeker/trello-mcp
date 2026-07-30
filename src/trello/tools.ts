@@ -1696,7 +1696,10 @@ export async function delete_comment(
  * get the date-based buckets but the GTD-section breakdown is empty.
  */
 const WEEKLY_REVIEW_CONTEXT_LISTS = ["@computer", "@home", "@phone", "@errands", "@lene"] as const;
-const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "someday"] as const;
+// v1.20.0: could-ssf was missing. SSF has had its own label and its own
+// Could-do list for a while, so the horizon bucket the weekly review reads
+// silently omitted a whole sphere.
+const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "could-ssf", "someday"] as const;
 const WAITING_LIST_ALIAS = "waiting";
 const INBOX_LIST_ALIAS = "inbox";
 // Rolling Big Rocks id imported from constants.ts (v1.10.0: was previously

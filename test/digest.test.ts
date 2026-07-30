@@ -366,3 +366,110 @@ describe("v1.16.0 additions", () => {
 		expect(renderDigest(cards, saturday).html).not.toContain("Weekly review");
 	});
 });
+
+describe("v1.19.3 — every label on a card renders", () => {
+	/** Badge text between the pill's own tags, in render order. */
+	function badgeTexts(html: string): string[] {
+		const card = html.slice(html.indexOf("LabelCard"));
+		return [...card.matchAll(/<span style="display:inline-block;[^"]*">([^<]*)<\/span>/g)].map((m) => m[1]);
+	}
+
+	it("renders ALL of a card's labels, not just the three hardcoded names", () => {
+		// The bug: badgesHtml() tested for exactly BESTSELLER / DBP Invest /
+		// Please Clarify and Organize, so a card carrying anything else showed
+		// one badge (or none) while Trello showed several.
+		const { html } = renderDigest(
+			[
+				card({
+					name: "LabelCard",
+					labels: [
+						{ color: "black", id: "l1", name: "BESTSELLER" },
+						{ color: "green", id: "l2", name: "SSF" },
+						{ color: "purple", id: "l3", name: "Frontline Tech" },
+					],
+				}),
+			],
+			NOW_SUMMER,
+		);
+		expect(badgeTexts(html)).toEqual(["BESTSELLER", "SSF", "Frontline Tech"]);
+	});
+
+	it("colours an unknown label from its Trello hue", () => {
+		const { html } = renderDigest(
+			[card({ name: "LabelCard", labels: [{ color: "green", id: "l1", name: "SSF" }] })],
+			NOW_SUMMER,
+		);
+		expect(html).toContain("background:#4bce97;color:#164b35;");
+	});
+
+	it("collapses the _light / _dark palette variants onto their base hue", () => {
+		const { html } = renderDigest(
+			[
+				card({
+					name: "LabelCard",
+					labels: [
+						{ color: "green_dark", id: "l1", name: "Dark" },
+						{ color: "green_light", id: "l2", name: "Light" },
+					],
+				}),
+			],
+			NOW_SUMMER,
+		);
+		expect(html.match(/background:#4bce97;/g)).toHaveLength(2);
+	});
+
+	it("falls back to a neutral pill for a colourless or unrecognised label", () => {
+		const { html } = renderDigest(
+			[
+				card({
+					name: "LabelCard",
+					labels: [
+						{ color: "", id: "l1", name: "NoColour" },
+						{ color: "chartreuse", id: "l2", name: "NotAPaletteHue" },
+					],
+				}),
+			],
+			NOW_SUMMER,
+		);
+		expect(html.match(/background:#dcdfe4;/g)).toHaveLength(2);
+		expect(badgeTexts(html)).toEqual(["NoColour", "NotAPaletteHue"]);
+	});
+
+	it("keeps the hand-tuned look and short name for the three original labels", () => {
+		const { html } = renderDigest(
+			[
+				card({
+					name: "LabelCard",
+					labels: [
+						{ color: "black", id: "l1", name: "BESTSELLER" },
+						{ color: "blue", id: "l2", name: "DBP Invest" },
+						{ color: "red", id: "l3", name: "Please Clarify and Organize" },
+					],
+				}),
+			],
+			NOW_SUMMER,
+		);
+		expect(badgeTexts(html)).toEqual(["BESTSELLER", "DBP Invest", "clarify"]);
+		expect(html).toContain("background:#1c2024;color:#ffffff;");
+		expect(html).toContain("background:#2563eb;color:#ffffff;");
+		expect(html).toContain("background:#fdecea;color:#c0392b;");
+	});
+
+	it("renders a colour-only label rather than dropping it", () => {
+		const { html } = renderDigest(
+			[card({ name: "LabelCard", labels: [{ color: "sky", id: "l1", name: "" }] })],
+			NOW_SUMMER,
+		);
+		expect(html).toContain("background:#6cc3e0;color:#164555;");
+		expect(badgeTexts(html)).toEqual(["&middot;"]);
+	});
+
+	it("escapes a label name", () => {
+		const { html } = renderDigest(
+			[card({ name: "LabelCard", labels: [{ color: "red", id: "l1", name: '<img src=x onerror="alert(1)">' }] })],
+			NOW_SUMMER,
+		);
+		expect(html).not.toContain("<img src=x");
+		expect(html).toContain("&lt;img src=x");
+	});
+});

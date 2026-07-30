@@ -13,6 +13,9 @@
  *              tables/divs, no scripts, no external assets.
  *
  * Change log:
+ *   1.19.3 (2026-07-30) — Every label on a card renders, coloured from Trello's
+ *                         palette. badgesHtml() used to test for three label
+ *                         names and drop the rest.
  *   1.0.0 (2026-07-10) — Initial (v1.14.0 digest release).
  */
 
@@ -48,10 +51,6 @@ function esc(s: string): string {
 
 function isDivider(c: TrelloCard): boolean {
 	return /^-+$/.test((c.name || "").trim());
-}
-
-function hasLabel(c: TrelloCard, name: string): boolean {
-	return (c.labels || []).some((l) => l.name === name);
 }
 
 /** Markdown-ish desc → one readable line, ≤90 chars (same rules as the dashboard). */
@@ -146,12 +145,61 @@ function customFieldBadges(c: TrelloCard, defs: TrelloCustomField[]): string {
 	return h;
 }
 
-function badgesHtml(c: TrelloCard, customFields: TrelloCustomField[] = []): string {
+/**
+ * Trello's label palette → inline badge colours. The `_light` / `_dark`
+ * variants of each hue collapse onto the base hue: a 10px pill can't carry
+ * three shades of green and stay legible. Mirrors .badge.lbl-* in page.html.
+ */
+const LABEL_HUES: Record<string, string> = {
+	black: "background:#8590a2;color:#091e42;",
+	blue: "background:#579dff;color:#09326c;",
+	green: "background:#4bce97;color:#164b35;",
+	lime: "background:#94c748;color:#37471f;",
+	orange: "background:#fea362;color:#702e00;",
+	pink: "background:#e774bb;color:#50253f;",
+	purple: "background:#9f8fef;color:#352c63;",
+	red: "background:#f87168;color:#5d1f1a;",
+	sky: "background:#6cc3e0;color:#164555;",
+	yellow: "background:#f5cd47;color:#533f04;",
+};
+/** A label can carry a name with no colour at all. */
+const LABEL_NO_HUE = "background:#dcdfe4;color:#44546f;";
+
+/**
+ * Labels with a hand-tuned badge; `text` shortens a name that would otherwise
+ * dominate the row. Everything NOT listed here still renders, from its Trello
+ * colour — the digest used to hardcode these three and silently drop every
+ * other label a card carried.
+ */
+const LABEL_OVERRIDES: Record<string, { style: string; text?: string }> = {
+	BESTSELLER: { style: "background:#1c2024;color:#ffffff;" },
+	"DBP Invest": { style: "background:#2563eb;color:#ffffff;" },
+	"Please Clarify and Organize": {
+		style: "background:#fdecea;color:#c0392b;border:1px solid #f5c6c0;",
+		text: "clarify",
+	},
+};
+
+/** Every label on the card, in the order Trello returns them (board order). */
+function labelBadges(c: TrelloCard): string {
 	let h = "";
-	if (hasLabel(c, "BESTSELLER")) h += `<span style="${S.badge}background:#1c2024;color:#ffffff;">BESTSELLER</span>`;
-	if (hasLabel(c, "DBP Invest")) h += `<span style="${S.badge}background:#2563eb;color:#ffffff;">DBP Invest</span>`;
-	if (hasLabel(c, "Please Clarify and Organize")) h += `<span style="${S.badge}background:#fdecea;color:#c0392b;border:1px solid #f5c6c0;">clarify</span>`;
-	h += customFieldBadges(c, customFields);
+	for (const l of c.labels || []) {
+		const name = l.name || "";
+		const hand = LABEL_OVERRIDES[name];
+		if (hand) {
+			h += `<span style="${S.badge}${hand.style}">${esc(hand.text ?? name)}</span>`;
+			continue;
+		}
+		// Trello allows a colour with no name — render the pill anyway rather
+		// than dropping the label off the card entirely.
+		const hue = LABEL_HUES[String(l.color || "").split("_")[0]] ?? LABEL_NO_HUE;
+		h += `<span style="${S.badge}${hue}">${name ? esc(name) : "&middot;"}</span>`;
+	}
+	return h;
+}
+
+function badgesHtml(c: TrelloCard, customFields: TrelloCustomField[] = []): string {
+	const h = labelBadges(c) + customFieldBadges(c, customFields);
 	return h ? `<div style="margin-top:6px;">${h}</div>` : "";
 }
 

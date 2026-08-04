@@ -4,6 +4,40 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.2] — 2026-08-04
+
+Security. Both halves of a hole opened by v1.21.0, found by an adversarially
+verified bug hunt over the whole repo.
+
+### Security
+- **A refused tool call no longer writes anything persistent.** v1.21.0's
+  `guarded` recorded the denial *before* rejecting it, so a refusal cost a D1
+  row and an Analytics Engine data point. That matters because the MCP OAuth
+  flow did not check the allowlist at all: any GitHub account could complete
+  sign-in, hold a session, and convert requests into permanent rows. The
+  streamable-HTTP transport dispatches a JSON-RPC **array**, so a single POST
+  carrying N calls wrote N rows — the amplification was per-message, not
+  per-request. The allowlist check now runs first, and the denial is logged
+  once per session via a new `UsageRecorder.logOnly()` (Workers Logs: 3 days,
+  free) instead of persisted (D1: forever; AE: billable volume). The refusal
+  message and response shape are byte-identical.
+- **The OAuth callback refuses a non-allowlisted login instead of minting a
+  token for it.** `src/github-handler.ts` now 403s before
+  `completeAuthorization`, mirroring what the browser flow in
+  `src/dashboard/handler.ts` has done since v1.12.0. The comment in
+  `src/index.ts` claiming we "cannot reject earlier without forking the OAuth
+  handler" was wrong — `/callback` is our handler — and has been corrected.
+  Minting a token also stored that user's GitHub access token in `OAUTH_KV` as
+  a side effect; it no longer does.
+
+  Both halves ship together on purpose: the OAuth gate stops new tokens, the
+  guard fix protects against tokens already in KV, which nothing can revoke.
+
+### Added
+- `test/tool-guard.test.ts` (7 tests). Verified to FAIL against the pre-fix
+  code — 5 refused calls wrote 5 rows and all 102 tools wrote 102 — which is
+  the vulnerability reproduced rather than argued.
+
 ## [1.21.1] — 2026-08-04
 
 ### Security

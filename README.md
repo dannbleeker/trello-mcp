@@ -224,7 +224,7 @@ One real limitation: **`search_cards_advanced` can't filter on custom-field valu
 
 ## Access control
 
-Only one GitHub login (`dannbleeker`) can call any tool or open the dashboard — hard-coded in `src/allowlist.ts` (single source of truth for both surfaces). Any other authenticated GitHub user reaches the OAuth flow but every tool call returns a refusal message, and the dashboard answers 403.
+Only one GitHub login (`dannbleeker`) can call any tool or open the dashboard — hard-coded in `src/allowlist.ts` (single source of truth for both surfaces). Since v1.21.2 both surfaces reject at the same place: the OAuth callback answers **403 and issues no token**, so a non-allowlisted GitHub user never gets a working MCP session. Tool handlers still refuse per call as a second layer — a token minted before v1.21.2 stays valid in KV until it expires — and that refusal is now log-only, writing nothing to the usage store.
 
 **Session kill switch**: dashboard sessions live ~30 days in a signed cookie with no server-side session store. If a device is lost, rotate the signing key — `wrangler secret put COOKIE_ENCRYPTION_KEY` (new `openssl rand -hex 32`) — which instantly invalidates every session everywhere. The MCP connector re-authenticates via GitHub on its own.
 

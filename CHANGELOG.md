@@ -38,7 +38,13 @@ on every conversation.
   shipping that token to the Worker just to draw a panel is a credential this
   feature does not need.
 - **`docs/usage-tracking.md`** and `migrations/0001_usage_events.sql`.
-- 21 unit tests (`test/usage.test.ts`), including assertions on the Analytics
+- 32 unit tests (`test/usage.test.ts`, `test/dashboard-usage.test.ts`). The
+  panel tests exist because `page.html` had no execution coverage at all: the
+  panel was written and reviewed without anything ever running it, and a
+  ReferenceError in its render path would have surfaced only as a silently
+  missing section on the live dashboard. They also pin the page↔API field names
+  (`toolCalls`, `avgMs`, …), which are SQL aliases crossing a JSON boundary
+  where nothing type-checks them. Includes assertions on the Analytics
   Engine data-point shape. Those matter more than they look: miniflare's local
   `writeDataPoint` is an empty function and the real runtime *silently drops* a
   malformed point, so a schema mistake is invisible in local dev **and** in

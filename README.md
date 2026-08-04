@@ -354,7 +354,7 @@ src/
     resolve.ts              — workspace / board / list reference resolution + directory cache
     guards.ts               — server-side safety guards
     tools.ts                — 102 tool implementations (testable in plain Node)
-test/                       — vitest unit tests (352; no real Trello calls)
+test/                       — vitest unit tests (363; no real Trello calls)
 migrations/                 — D1 schema for the usage_events table
 docs/                       — usage-tracking.md, snooze-v2.md
 wrangler.jsonc              — Cloudflare Workers config

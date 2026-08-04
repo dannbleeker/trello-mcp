@@ -20,26 +20,30 @@
  */
 
 import type { TrelloCard, TrelloCustomField } from "../trello/client";
-import { DEFAULT_TIMEZONE, LIST_ALIASES, ROLLING_BIG_ROCKS_ID } from "../trello/constants";
-import { startOfDayMsInTz, type SnoozedCard } from "../trello/tools";
+import { CONTEXT_LIST_ALIASES, DEFAULT_TIMEZONE, LIST_ALIASES, ROLLING_BIG_ROCKS_ID } from "../trello/constants";
+import { dayWindowMsInTz, isDueReportable, type SnoozedCard } from "../trello/tools";
 
 /** The dashboard's zone layout, mirrored (ids from constants, WIP from list names). */
-const CONTEXTS = [
-	{ id: LIST_ALIASES["@computer"], name: "@Computer", wip: 7 as number | null },
-	{ id: LIST_ALIASES["@home"], name: "@Home", wip: 5 as number | null },
-	{ id: LIST_ALIASES["@phone"], name: "@Phone", wip: 5 as number | null },
-	{ id: LIST_ALIASES["@errands"], name: "@Errands", wip: null as number | null },
-	{ id: LIST_ALIASES["@lene"], name: "@Lene", wip: null as number | null },
-];
+// Order and ids come from CONTEXT_LIST_ALIASES (constants.ts) so adding a
+// context list cannot render a zone here whose cards silently stop counting as
+// due-reportable. Only the display name and WIP limit are local. v1.22.0.
+const CONTEXT_WIP: Record<string, number | null> = {
+	"@computer": 7,
+	"@errands": null,
+	"@home": 5,
+	"@lene": null,
+	"@phone": 5,
+};
+type ContextZone = { id: string; name: string; wip: number | null };
+const CONTEXTS: ContextZone[] = CONTEXT_LIST_ALIASES.map((alias) => ({
+	id: LIST_ALIASES[alias],
+	name: alias.replace(/^@(.)/, (_m, c: string) => `@${c.toUpperCase()}`),
+	wip: CONTEXT_WIP[alias] ?? null,
+}));
 const WAITING_ID = LIST_ALIASES.waiting;
 const INBOX_ID = LIST_ALIASES.inbox;
 
-/** Lists whose cards count as "actionable" for the due-date section. */
-const ACTIONABLE_LIST_IDS = new Set<string>([
-	...CONTEXTS.map((c) => c.id),
-	WAITING_ID,
-	INBOX_ID,
-]);
+
 
 const DASHBOARD_URL = "https://todo.bleeker-pedersen.dk";
 
@@ -265,11 +269,10 @@ export function renderDigest(
 	const totalNext = ctxCols.reduce((s, l) => s + l.cards.length, 0);
 
 	// Due buckets: actionable lists only (Done/Butler/etc. never nag).
-	const dayStart = startOfDayMsInTz(nowMs, tz);
-	const dayEnd = dayStart + 24 * 3600 * 1000;
-	const dueCards = open.filter(
-		(c) => c.due !== null && !c.dueComplete && ACTIONABLE_LIST_IDS.has(c.idList),
-	);
+	const { start: dayStart, end: dayEnd } = dayWindowMsInTz(nowMs, tz);
+	// Shared with weekly_review_pack since v1.22.0 — the two surfaces read the
+	// same board and used to disagree about what counts as due.
+	const dueCards = open.filter(isDueReportable);
 	const overdue = dueCards
 		.filter((c) => Date.parse(c.due as string) < dayStart)
 		.sort((a, b) => Date.parse(a.due as string) - Date.parse(b.due as string));

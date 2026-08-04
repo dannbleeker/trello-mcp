@@ -372,7 +372,7 @@ api.get("/api/usage", async (c) => {
 	const db = c.env.USAGE_DB;
 	if (!db) {
 		// Not an error: the binding is optional, and the panel renders a hint.
-		return c.json({ enabled: false, days: 0, totals: null, tools: [], endpoints: [], surfaces: [] });
+		return c.json({ enabled: false, days: 0, totals: null, tools: [], endpoints: [] });
 	}
 
 	const raw = Number(c.req.query("days") ?? 30);
@@ -399,23 +399,15 @@ api.get("/api/usage", async (c) => {
 			.all();
 
 	try {
-		const [tools, endpoints, surfaces, totals] = await Promise.all([
+		const [tools, endpoints, totals] = await Promise.all([
 			rollup("tool"),
 			rollup("http"),
-			db
-				.prepare(
-					`SELECT surface, kind, COUNT(*) AS calls
-					 FROM usage_events WHERE ts >= ?1
-					 GROUP BY surface, kind ORDER BY calls DESC`,
-				)
-				.bind(since)
-				.all(),
 			db
 				.prepare(
 					`SELECT SUM(CASE WHEN kind = 'tool' THEN 1 ELSE 0 END)                       AS toolCalls,
 					        SUM(CASE WHEN kind = 'http' THEN 1 ELSE 0 END)                       AS httpCalls,
 					        COUNT(DISTINCT CASE WHEN kind = 'tool' THEN name END)                AS distinctTools,
-					        SUM(CASE WHEN kind = 'http' AND status = 429 THEN 1 ELSE 0 END)      AS rateLimited,
+					        SUM(CASE WHEN kind = 'http' AND (status = 429 OR attempts > 1) THEN 1 ELSE 0 END) AS rateLimited,
 					        SUM(CASE WHEN outcome NOT IN ('ok') THEN 1 ELSE 0 END)               AS errors,
 					        MIN(ts)                                                              AS firstTs
 					 FROM usage_events WHERE ts >= ?1`,
@@ -429,7 +421,6 @@ api.get("/api/usage", async (c) => {
 			totals: totals.results?.[0] ?? null,
 			tools: tools.results ?? [],
 			endpoints: endpoints.results ?? [],
-			surfaces: surfaces.results ?? [],
 		});
 	} catch (e) {
 		// A missing table (binding deployed before the schema was applied) is the

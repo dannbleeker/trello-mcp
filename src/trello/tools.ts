@@ -193,6 +193,8 @@
  */
 
 import {
+	ACTIONABLE_LIST_IDS,
+	CONTEXT_LIST_ALIASES,
 	DEFAULT_BOARD,
 	DEFAULT_TIMEZONE,
 	MAX_RESULTS,
@@ -919,8 +921,7 @@ export async function list_cards_due(
 	const now = Date.now();
 	// v1.9.0 fix: day boundaries in Dann's local timezone, not the Worker's
 	// UTC runtime. Otherwise cards due at 00:30 CEST show up as "yesterday".
-	const startOfToday = startOfDayMsInTz(now);
-	const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
+	const { start: startOfToday, end: endOfToday } = dayWindowMsInTz(now);
 	const endOfWeek = now + 7 * 24 * 60 * 60 * 1000;
 
 	const passesScope = (c: TrelloCard): boolean => {
@@ -1020,7 +1021,7 @@ export async function search_cards_advanced(
 		limit?: number;
 		customFields?: boolean;
 	},
-): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
+): Promise<{ query: string; truncated: boolean; cards: (CardSummaryWithFields & { closed: boolean })[] }> {
 	const boardIds = input.boards
 		? await Promise.all(input.boards.map((b) => resolveBoardRef(client, b)))
 		: undefined;
@@ -1034,16 +1035,23 @@ export async function search_cards_advanced(
 		boardIds,
 		orgIds,
 		cardsLimit: input.limit,
+		cardCustomFieldItems: input.customFields,
 	});
-	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
+	// Archived hits are KEPT. This tool advertises Trello's `is:archived`
+	// operator, and until v1.22.0 it then filtered every archived card out — so
+	// that documented search could only ever return nothing. `closed` is
+	// surfaced per row instead, so a mixed result set stays readable.
+	const hits = results.slice(0, MAX_RESULTS);
 	// NOTE: `customFields` annotates the RESULTS; it does not let you filter on
 	// custom-field values. Trello's search syntax has no operator for them, so
-	// filtering has to happen on the returned rows.
+	// filtering has to happen on the returned rows. Since v1.22.0 the values
+	// ride along on the search response itself — no extra board scans.
 	return {
 		query: input.query,
+		truncated: results.length > MAX_RESULTS,
 		cards: input.customFields
-			? await attachCustomFields(client, hits)
-			: hits.map(summariseCard),
+			? (await attachCustomFields(client, hits)).map((c, i) => ({ ...c, closed: hits[i].closed }))
+			: hits.map((c) => ({ ...summariseCard(c), closed: c.closed })),
 	};
 }
 
@@ -1051,9 +1059,27 @@ export async function search_cards_advanced(
 export async function read_comments(
 	client: TrelloClient,
 	input: { cardId: string; limit?: number },
-): Promise<{ cardId: string; comments: TrelloComment[] }> {
-	const comments = await client.listComments(input.cardId, input.limit ?? 50);
-	return { cardId: input.cardId, comments };
+): Promise<{ cardId: string; comments: TrelloComment[]; truncated: boolean; note?: string }> {
+	const limit = input.limit ?? 50;
+	// Trello hands back the NEWEST `limit` comments, sorted here oldest-first —
+	// so a cut thread looks exactly like a short one. Say so, or a question like
+	// "what did we originally decide?" gets answered from the oldest comment
+	// that happened to survive the cut. v1.22.0.
+	const { comments, truncated } = await client.listCommentThread(input.cardId, limit);
+	return {
+		cardId: input.cardId,
+		comments,
+		truncated,
+		...(truncated
+			? {
+					note:
+						`Showing the ${comments.length} most recent comments; older ones exist and are NOT included. ` +
+						(limit < 1000
+							? `Re-run with a higher \`limit\` (max 1000) to see further back.`
+							: `This is the maximum this tool can return — read the card in Trello for the full history.`),
+				}
+			: {}),
+	};
 }
 
 /** list_labels — all labels on a board. */
@@ -1275,7 +1301,7 @@ export async function remove_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string; itemId: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	await client.removeChecklistItem(input.checklistId, input.itemId);
 	return { ok: true };
 }
@@ -1295,7 +1321,7 @@ export async function convert_checklist_item_to_card(
 		targetList?: string;
 		board?: string;
 	},
-): Promise<{ card: CardSummary }> {
+): Promise<{ card: CardSummary; warning?: string }> {
 	const sourceCard = await assertCardWritable(client, input.cardId);
 
 	// Trello births the new card on the SOURCE card's list. If the source is
@@ -1306,21 +1332,41 @@ export async function convert_checklist_item_to_card(
 		assertNotReadOnly(sourceCard.idList, "destination");
 	}
 
+	// Resolve and guard the destination BEFORE converting. The convert is
+	// irreversible — it destroys the checklist item — so every input that can
+	// still be rejected must be rejected while the item exists. Until v1.22.0
+	// this ran afterwards, so a typo'd or ambiguous list name, or a forbidden
+	// target, threw GuardError with the item already gone and a stray card left
+	// on the source list, while telling the caller the operation had failed.
+	// move_card guards its destination first for exactly this reason.
+	const targetId = input.targetList
+		? await resolveListRef(client, input.targetList, { board: input.board })
+		: undefined;
+	if (targetId !== undefined) assertCanWriteTo(targetId);
+
 	let newCard = await client.convertChecklistItemToCard(
 		input.cardId,
 		input.checklistId,
 		input.itemId,
 	);
 
-	if (input.targetList) {
-		const targetId = await resolveListRef(client, input.targetList, { board: input.board });
-		assertCanWriteTo(targetId);
-		if (targetId !== newCard.idList) {
+	// Past this line the item is gone and the card exists, so a failed move is
+	// not a failed call — throwing here would repeat the very lie the reorder
+	// above fixes. Report it as a warning and name the card, the way move_card
+	// surfaces its WIP warning.
+	let warning: string | undefined;
+	if (targetId !== undefined && targetId !== newCard.idList) {
+		try {
 			newCard = await client.moveCard(newCard.id, targetId);
+		} catch (e) {
+			warning =
+				`Item was converted to card ${newCard.id}, but the move to "${input.targetList}" failed: ` +
+				`${e instanceof Error ? e.message : String(e)}. The card is on list ${newCard.idList} — ` +
+				`finish with move_card.`;
 		}
 	}
 
-	return { card: summariseCard(newCard) };
+	return { card: summariseCard(newCard), ...(warning ? { warning } : {}) };
 }
 
 const BATCH_MAX = 50;
@@ -1544,7 +1590,7 @@ export async function rename_checklist(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string; name: string },
 ): Promise<{ checklist: { id: string; name: string } }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	const cl = await client.renameChecklist(input.checklistId, input.name);
 	return { checklist: { id: cl.id, name: cl.name } };
 }
@@ -1554,7 +1600,7 @@ export async function delete_checklist(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	await client.deleteChecklist(input.checklistId);
 	return { ok: true };
 }
@@ -1695,7 +1741,8 @@ export async function delete_comment(
  * the board's lists match LIST_ALIASES — for other boards (e.g. zoo) you still
  * get the date-based buckets but the GTD-section breakdown is empty.
  */
-const WEEKLY_REVIEW_CONTEXT_LISTS = ["@computer", "@home", "@phone", "@errands", "@lene"] as const;
+// Derived from constants.ts so the digest and the review cannot drift. v1.22.0.
+const WEEKLY_REVIEW_CONTEXT_LISTS = CONTEXT_LIST_ALIASES;
 // v1.20.0: could-ssf was missing. SSF has had its own label and its own
 // Could-do list for a while, so the horizon bucket the weekly review reads
 // silently omitted a whole sphere.
@@ -1744,8 +1791,7 @@ export async function weekly_review_pack(
 	const now = Date.now();
 	// v1.9.0 fix: local-time day boundaries, so a Friday morning review
 	// doesn't classify Saturday 01:30 CEST as "due_today".
-	const todayStart = startOfDayMsInTz(now);
-	const todayEnd = todayStart + 24 * 60 * 60 * 1000;
+	const { start: todayStart, end: todayEnd } = dayWindowMsInTz(now);
 	const weekEnd = now + 7 * 24 * 60 * 60 * 1000;
 	const staleCutoff = now - staleDays * 24 * 60 * 60 * 1000;
 
@@ -1757,16 +1803,16 @@ export async function weekly_review_pack(
 	const inboxCards = open.filter((c) => c.idList === inboxId);
 	const waitingCards = open.filter((c) => c.idList === waitingId);
 	const overdueCards = open.filter(
-		(c) => c.due && !c.dueComplete && Date.parse(c.due) < now,
+		(c) => isDueReportable(c) && Date.parse(c.due as string) < now,
 	);
 	const dueTodayCards = open.filter((c) => {
-		if (!c.due) return false;
-		const t = Date.parse(c.due);
+		if (!isDueReportable(c)) return false;
+		const t = Date.parse(c.due as string);
 		return t >= todayStart && t < todayEnd;
 	});
 	const dueThisWeekCards = open.filter((c) => {
-		if (!c.due) return false;
-		const t = Date.parse(c.due);
+		if (!isDueReportable(c)) return false;
+		const t = Date.parse(c.due as string);
 		return t >= now && t <= weekEnd;
 	});
 
@@ -2809,6 +2855,9 @@ export async function rename_custom_field_option(
 	oldOptionId: string;
 	newOptionId: string;
 	cardsRepointed: number;
+	/** How many of cardsRepointed were archived. Surfaced because until v1.22.0
+	 *  archived cards were invisible here and lost their value silently. */
+	archivedRepointed: number;
 	failures: { cardId: string; reason: string }[];
 }> {
 	if (!input.newValue.trim()) {
@@ -2835,7 +2884,13 @@ export async function rename_custom_field_option(
 	// 2. Re-point. Only cards actually using the old option are touched; the
 	//    board scan carries values inline, so this is one call plus one PUT per
 	//    affected card.
-	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+	// filter "all" — NOT the default open-cards-only scan. Step 3 deletes the old
+	// option, and Trello drops the customFieldItems of every card still pointing
+	// at it. Archived cards were invisible to this scan until v1.22.0, so a
+	// rename silently and permanently erased their value while reporting
+	// success — the snooze Power-Up archives cards, so on this board that is the
+	// common case, not an edge one.
+	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true, filter: "all" });
 	const affected = cards.filter((c) =>
 		(c.customFieldItems ?? []).some(
 			(it) => it.idCustomField === field.id && it.idValue === oldOptionId,
@@ -2843,10 +2898,14 @@ export async function rename_custom_field_option(
 	);
 	const failures: { cardId: string; reason: string }[] = [];
 	let cardsRepointed = 0;
+	let archivedRepointed = 0;
 	for (const card of affected) {
 		try {
 			await client.setCardCustomFieldItem(card.id, field.id, { idValue: created.id });
 			cardsRepointed += 1;
+			// Counted from SUCCESSES, like cardsRepointed — an archived card that
+			// failed belongs in `failures`, not in this total.
+			if (card.closed) archivedRepointed += 1;
 		} catch (e) {
 			failures.push({ cardId: card.id, reason: e instanceof Error ? e.message : String(e) });
 		}
@@ -2870,6 +2929,7 @@ export async function rename_custom_field_option(
 		oldOptionId,
 		newOptionId: created.id,
 		cardsRepointed,
+		archivedRepointed,
 		failures,
 	};
 }
@@ -3448,6 +3508,44 @@ export function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): 
 }
 
 /**
+ * Can this card legitimately be reported as due or overdue?
+ *
+ * Shared by weekly_review_pack and the daily digest so the two surfaces cannot
+ * disagree — until v1.22.0 the digest applied these exclusions and the review
+ * did not, so a Friday review showed work already ticked off, Butler/Repeater
+ * template cards, and cards sitting in Done as overdue, while the morning email
+ * reading the same board showed none of them.
+ *
+ * Deliberately NOT applied to list_cards_due: that tool is the overdue SWEEP —
+ * finding stale due dates on non-actionable lists is the point of it, and it
+ * stays board-generic (README documents only the digest and weekly_review_pack
+ * as board-tied).
+ */
+export function isDueReportable(card: { due: string | null; dueComplete?: boolean; idList: string }): boolean {
+	return card.due !== null && !card.dueComplete && ACTIONABLE_LIST_IDS.has(card.idList);
+}
+
+/**
+ * The local day containing `nowMs`, as [start, end) in epoch ms.
+ *
+ * Callers used to write `startOfDayMsInTz(now) + 24h`, which is wrong on the
+ * two EU DST transition days — the local day is 23 or 25 hours long there.
+ * Concretely, on 2026-10-25 (fall back) a card due 23:30 local was >= the
+ * computed end so it failed the "today" scope, and > now so it failed
+ * "overdue" — it vanished from both. On 2026-03-29 (spring forward) a card due
+ * 00:30 the NEXT day was reported as due today.
+ *
+ * Deriving the end from the timezone instead of a fixed offset: 26 hours past
+ * the start always lands inside the following local day in either DST
+ * direction, so taking that day's start gives the true next local midnight.
+ * v1.22.0.
+ */
+export function dayWindowMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): { start: number; end: number } {
+	const start = startOfDayMsInTz(nowMs, tz);
+	return { end: startOfDayMsInTz(start + 26 * 3600 * 1000, tz), start };
+}
+
+/**
  * Compute the wake-up time for a card with a `dueReminder` set.
  * Returns null if either input is null. Trello's `dueReminder` is the number
  * of minutes BEFORE the due date when the reminder should fire (so
@@ -3617,6 +3715,35 @@ async function assertCommentOnCard(
 		);
 	}
 	await assertCardWritable(client, actionCardId);
+}
+
+/**
+ * Assert that `checklistId` actually belongs to `cardId`, then that the card is
+ * writable. The same hole assertCommentOnCard closes, in a different shape:
+ * Trello's checklist endpoints (/checklists/{id}, /checklists/{id}/checkItems/…)
+ * are card-agnostic, so guarding only the caller-supplied cardId let a caller
+ * name a harmless card and mutate a checklist on any other — including one on
+ * Butler or Repeater Cards, the automation templates FORBIDDEN_LISTS exists to
+ * protect. The tool then reported success naming the innocent card.
+ *
+ * Costs one extra GET. Used by rename_checklist / delete_checklist /
+ * remove_checklist_item. v1.22.0 fix.
+ */
+async function assertChecklistOnCard(
+	client: TrelloClient,
+	cardId: string,
+	checklistId: string,
+): Promise<void> {
+	// Guard the named card FIRST: if the caller cannot write to the card they
+	// claim, there is no reason to reveal anything about the checklist.
+	await assertCardWritable(client, cardId);
+	const checklists = await client.listChecklistsOnCard(cardId);
+	if (!checklists.some((cl) => cl.id === checklistId)) {
+		throw new GuardError(
+			`Checklist ${checklistId} is not on card ${cardId}. Trello's checklist endpoints ignore the card, ` +
+				`so this would have modified a checklist somewhere else. Use list_checklist_items on the card you mean.`,
+		);
+	}
 }
 
 /**

@@ -635,7 +635,7 @@ export function registerTrelloTools(
 
 	server.tool(
 		"search_cards_advanced",
-		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`, multi-workspace scope via `workspaces`; tunable `limit` up to 1000.",
+		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`, multi-workspace scope via `workspaces`; tunable `limit` up to 1000. Archived cards ARE returned when the query asks for them (each row carries `closed`); `truncated` flags a result set cut at 200.",
 		{
 			query: z.string().min(1).describe("Search expression. Trello operators supported."),
 			boards: z
@@ -666,7 +666,7 @@ export function registerTrelloTools(
 
 	server.tool(
 		"read_comments",
-		"Chronological comment thread on a card. Each comment has text, author, timestamp.",
+		"Chronological comment thread on a card (oldest first). Each comment has text, author, timestamp. Returns the NEWEST `limit` comments — if `truncated` is true, older comments exist and are not shown, so do not treat the first one as the start of the thread.",
 		{
 			cardId: z.string(),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max comments to return (default 50)."),

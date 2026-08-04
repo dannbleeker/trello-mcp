@@ -126,6 +126,17 @@ const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5000;
 
 /**
+ * How long a board's custom-field DEFINITIONS stay cached (v1.18.0 memoisation,
+ * v1.22.0 TTL). The MCP client lives for the whole Durable Object session, so
+ * without a TTL a field or option added in the Trello UI mid-conversation was
+ * invisible for the rest of it — producing a confident, repeated wrong refusal
+ * ("No option labelled X ... Its options are: ...") that no MCP call could
+ * clear. 60s is long enough to keep killing the per-card refetch v1.18.0 was
+ * written to remove, short enough that a UI edit heals itself.
+ */
+const CUSTOM_FIELD_TTL_MS = 60_000;
+
+/**
  * Clamp a caller-supplied limit into [1, max]. Used by listActions,
  * listNotifications, listListActions, listMyActions — was inlined 4× before
  * v1.10.0. Exported so unit tests can pin the contract without going through
@@ -691,10 +702,25 @@ export class TrelloClient {
 
 	// ---- Lists ----
 
-	async listListsOnBoard(boardId: string): Promise<TrelloList[]> {
-		const data = await this.request("GET", `/boards/${boardId}/lists`, {
+	/**
+	 * `filter` is OPT-IN. Trello returns open lists only by default, so an
+	 * archived list could never be resolved by NAME — which made
+	 * archive_list({ closed: false }) impossible for the one input a human
+	 * actually has, and list_lists could not show it either. Only the resolver's
+	 * cache (resolve.ts boardLists) passes "all"; listCandidates then filters by
+	 * `closed` exactly as before unless the caller asked for archived ones, so
+	 * default resolution is unchanged and an archived list does not silently
+	 * become a writable target. v1.22.0.
+	 */
+	async listListsOnBoard(
+		boardId: string,
+		opts: { filter?: "open" | "closed" | "all" } = {},
+	): Promise<TrelloList[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
 			fields: "name,idBoard,closed,pos,subscribed",
-		});
+		};
+		if (opts.filter) params.filter = opts.filter;
+		const data = await this.request("GET", `/boards/${boardId}/lists`, params);
 		return data as TrelloList[];
 	}
 
@@ -792,14 +818,21 @@ export class TrelloClient {
 		return data as TrelloCard[];
 	}
 
+	/**
+	 * `filter` is OPT-IN so the eight existing callers emit a byte-identical URL
+	 * and keep Trello's default (open cards only). Only rename_custom_field_option
+	 * passes "all", because it must see archived cards before deleting an option
+	 * they still point at — otherwise Trello drops their values silently. v1.22.0.
+	 */
 	async listCardsOnBoard(
 		boardId: string,
-		opts: { customFieldItems?: boolean } = {},
+		opts: { customFieldItems?: boolean; filter?: "open" | "closed" | "all" } = {},
 	): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
 			fields: CARD_FIELDS,
 		};
 		if (opts.customFieldItems) params.customFieldItems = true;
+		if (opts.filter) params.filter = opts.filter;
 		const data = await this.request("GET", `/boards/${boardId}/cards`, params);
 		return data as TrelloCard[];
 	}
@@ -833,8 +866,15 @@ export class TrelloClient {
 	}
 
 	async searchCards(query: string, boardId?: string, orgId?: string): Promise<TrelloCard[]> {
+		// `is:open` is appended unless the caller already constrained it. Trello
+		// applies cards_limit BEFORE we filter, and archived cards dominate the
+		// ranking on a long-lived board — measured on this account, a bare query
+		// with cards_limit 20 came back 19 archived and 1 open. Without this the
+		// tool discarded most of its own quota and returned a handful of rows.
+		// The observable contract is unchanged: open cards only, same shape.
+		const scoped = /\bis:(archived|open)\b/.test(query) ? query : `${query} is:open`;
 		const params: Record<string, string | number | boolean | undefined> = {
-			query,
+			query: scoped,
 			modelTypes: "cards",
 			card_fields: CARD_FIELDS,
 			cards_limit: 50,
@@ -860,6 +900,7 @@ export class TrelloClient {
 		boardIds?: string[];
 		orgIds?: string[];
 		cardsLimit?: number;
+		cardCustomFieldItems?: boolean;
 	}): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query: input.query,
@@ -868,6 +909,10 @@ export class TrelloClient {
 			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
 			partial: true,
 		};
+		// /search DOES return custom-field values inline, contrary to the note
+		// that used to sit in search_cards_advanced — verified against the live
+		// API. That turns per-board scans into zero extra requests. v1.22.0.
+		if (input.cardCustomFieldItems) params.card_customFieldItems = true;
 		if (input.boardIds && input.boardIds.length) params.idBoards = input.boardIds.join(",");
 		if (input.orgIds && input.orgIds.length) params.idOrganizations = input.orgIds.join(",");
 		const data = await this.request("GET", "/search", params);
@@ -1446,8 +1491,28 @@ export class TrelloClient {
 	}
 
 	/** Convenience: comments only, chronological. */
+	/**
+	 * Trello returns the NEWEST `limit` actions; we then sort oldest-first, so a
+	 * truncated thread reads exactly like a complete one that happens to start
+	 * at comment #31. Asked "what did we originally decide", a caller would cite
+	 * the oldest comment it received and never learn that 30 older ones existed.
+	 * `truncated` is the fix — the data was always cut, it just never said so.
+	 * v1.22.0.
+	 */
+	async listCommentThread(
+		cardId: string,
+		limit = 50,
+	): Promise<{ comments: TrelloComment[]; truncated: boolean }> {
+		const actions = await this.listActions(cardId, "commentCard", limit);
+		return { comments: this.toComments(actions), truncated: actions.length >= clampLimit(limit) };
+	}
+
 	async listComments(cardId: string, limit = 50): Promise<TrelloComment[]> {
 		const actions = await this.listActions(cardId, "commentCard", limit);
+		return this.toComments(actions);
+	}
+
+	private toComments(actions: TrelloAction[]): TrelloComment[] {
 		const comments = actions
 			.map((a) => ({
 				id: a.id,
@@ -1512,7 +1577,7 @@ export class TrelloClient {
 	 * the affected board, so a stale definition can't outlive its own change.
 	 * v1.18.0.
 	 */
-	private customFieldCache = new Map<string, TrelloCustomField[]>();
+	private customFieldCache = new Map<string, { at: number; fields: TrelloCustomField[] }>();
 
 	/** Drop a board's cached definitions. Called by every custom-field mutation. */
 	private invalidateCustomFields(boardId?: string): void {
@@ -1522,10 +1587,10 @@ export class TrelloClient {
 
 	async listCustomFields(boardId: string): Promise<TrelloCustomField[]> {
 		const cached = this.customFieldCache.get(boardId);
-		if (cached) return cached;
+		if (cached && Date.now() - cached.at < CUSTOM_FIELD_TTL_MS) return cached.fields;
 		const data = await this.request("GET", `/boards/${boardId}/customFields`);
 		const fields = data as TrelloCustomField[];
-		this.customFieldCache.set(boardId, fields);
+		this.customFieldCache.set(boardId, { at: Date.now(), fields });
 		return fields;
 	}
 

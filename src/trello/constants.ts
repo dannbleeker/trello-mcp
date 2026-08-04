@@ -79,6 +79,27 @@ export const LIST_ALIASES = {
 export type ListAlias = keyof typeof LIST_ALIASES;
 
 /**
+ * The five GTD context lists, in board order. ONE source of truth: the weekly
+ * review (src/trello/tools.ts) and the daily digest (src/digest/render.ts) both
+ * derive from this. Each carried its own copy until v1.22.0 — exactly how the
+ * two surfaces drifted apart on what counts as actionable.
+ */
+export const CONTEXT_LIST_ALIASES = ["@computer", "@home", "@phone", "@errands", "@lene"] as const;
+
+/**
+ * Lists whose cards can legitimately be reported as due or overdue: the context
+ * lists plus Waiting-for and Inbox. Everything else — Done-do, Butler, Repeater
+ * Cards, Rolling Big Rocks, the Could-do horizons — either holds finished work
+ * or is automation infrastructure, and a due date sitting on one of those is
+ * noise, not a commitment.
+ */
+export const ACTIONABLE_LIST_IDS: ReadonlySet<string> = new Set<string>([
+	...CONTEXT_LIST_ALIASES.map((a) => LIST_ALIASES[a]),
+	LIST_ALIASES.waiting,
+	LIST_ALIASES.inbox,
+]);
+
+/**
  * Lists where ALL writes are refused: create_card, move_card to/from, archive,
  * update, label changes, comments, checklist edits.
  *

@@ -43,10 +43,8 @@
 import { Hono } from "hono";
 import { Octokit } from "octokit";
 import { ALLOWED_LOGINS } from "../allowlist";
-import { renderDigest } from "../digest/render";
+import { buildDigest } from "../digest/scheduler";
 import { TrelloClient } from "../trello/client";
-import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
-import { list_snoozed_cards } from "../trello/tools";
 import { UsageRecorder } from "../usage";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
 import { type DashboardEnv, DashboardApi } from "./api";
@@ -208,15 +206,12 @@ app.get("/digest/preview", async (c) => {
 	const usage = new UsageRecorder(c.env, "dashboard");
 	try {
 		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN, usage);
-		const nowMs = Date.now();
-		const cards = await client.listCardsOnBoard(BOARD_ALIASES[DEFAULT_BOARD]);
-		let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
-		try {
-			snoozed = (await list_snoozed_cards(client, {}, nowMs)).snoozed;
-		} catch (_e) {
-			// best-effort, same as the real send
-		}
-		const { html } = renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed);
+		// buildDigest is the same function the 04:00 cron uses. This route used
+		// to do its own fetch — without customFieldItems and without the field
+		// definitions — so it rendered every card with no custom-field badge and
+		// showed a layout the real email never had. A preview that does not
+		// build the real email is worse than no preview. v1.22.0.
+		const { html } = await buildDigest(client, Date.now());
 		return c.html(html, 200, { "Cache-Control": "no-store" });
 	} catch (_e) {
 		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);

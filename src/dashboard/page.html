@@ -989,12 +989,26 @@ async function flushCaptureQueue(){
   FLUSHING = true;
   let sent = 0;
   try {
-    let q = queueRead();
-    while (q.length){
+    // The snapshot decides WHAT to send and bounds the loop. What gets written
+    // BACK is always a fresh read: onCapture() appends to storage while this is
+    // awaiting, and writing the pre-await array back dropped that capture —
+    // after the toast had already told him it was saved. The read-modify-write
+    // is atomic because nothing awaits between the read and the write.
+    //
+    // Bounding on the snapshot rather than looping until storage is empty is
+    // deliberate: queueWrite() swallows a storage failure, so a live-read loop
+    // could resend the same capture forever. v1.21.3
+    for (const item of queueRead()){
       try {
-        await api("/api/capture", { method: "POST", body: JSON.stringify({ name: q[0] }) });
+        await api("/api/capture", { method: "POST", body: JSON.stringify({ name: item }) });
       } catch(e){ break; }
-      q.shift(); queueWrite(q); sent++;
+      const live = queueRead();
+      // Duplicates are possible (the same text captured twice offline); the
+      // first hit is the oldest, i.e. the one just sent. A miss means another
+      // tab already drained it — skip the write rather than resurrect anything.
+      const at = live.indexOf(item);
+      if (at >= 0){ live.splice(at, 1); queueWrite(live); }
+      sent++;
     }
   } finally { FLUSHING = false; }
   return sent;

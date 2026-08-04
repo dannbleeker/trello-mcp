@@ -46,6 +46,7 @@ type Page = {
 	setCaptureInput: (v: string) => void;
 	captureCalls: () => string[];
 	failCaptures: (v: boolean) => void;
+	duringCapture: (fn: ((name: string) => void | Promise<void>) | null) => void;
 };
 
 function loadPageScript(): Page {
@@ -80,13 +81,20 @@ function loadPageScript(): Page {
 	// out; `fail` simulates the network being down mid-flush.
 	const captureCalls: string[] = [];
 	let fail = false;
-	const fetchStub = (url: string, opts?: { body?: string }) => {
+	// Runs while a capture POST is in flight, so a test can reproduce "typed a
+	// capture while the queue was flushing" — the interleaving that used to lose
+	// it. Defaults to null and is reset in beforeEach, because loadPageScript()
+	// is called once at module scope and this variable is shared by every test.
+	let midFlight: ((name: string) => void | Promise<void>) | null = null;
+	const fetchStub = async (url: string, opts?: { body?: string }) => {
 		if (String(url).startsWith("/api/capture")) {
-			if (fail) return Promise.reject(new TypeError("offline"));
-			captureCalls.push(JSON.parse(opts?.body ?? "{}").name);
-			return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ card: {} }) });
+			if (fail) throw new TypeError("offline");
+			const name = JSON.parse(opts?.body ?? "{}").name;
+			captureCalls.push(name);
+			if (midFlight) await midFlight(name);
+			return { ok: true, status: 201, json: () => Promise.resolve({ card: {} }) };
 		}
-		return Promise.reject(new Error("no network in tests"));
+		throw new Error("no network in tests");
 	};
 
 	const factory = new Function(
@@ -116,6 +124,7 @@ function loadPageScript(): Page {
 		captureCalls: () => captureCalls.slice(),
 		failCaptures: (v: boolean) => { fail = v; },
 		contentHtml: () => content.innerHTML,
+		duringCapture: (fn: ((name: string) => void | Promise<void>) | null) => { midFlight = fn; },
 	});
 }
 
@@ -123,7 +132,7 @@ const {
 	labelBadges, labelHue, passesFilter, isPersonal, setFilter, FILTER_LABELS,
 	configureFromLists, layout, ageBadge, activityMs, render, contentHtml,
 	queueRead, queueWrite, flushCaptureQueue, onCapture,
-	setOnline, setCaptureInput, captureCalls, failCaptures,
+	setOnline, setCaptureInput, captureCalls, failCaptures, duringCapture,
 } = loadPageScript();
 
 /** Badge text between the pill's own tags, in render order. */
@@ -543,5 +552,63 @@ describe("escaping of server-derived strings in the rendered page", () => {
 		// This is what stops an over-eager "escape everything" fix.
 		const html = renderWithHostileList();
 		expect(html).toMatch(/<\/b> \d+\/3/);
+	});
+});
+
+describe("capture queued while the queue is flushing", () => {
+	// Reset the shared mid-flight hook before every test. loadPageScript() runs
+	// once at module scope, so leaving it armed would silently change the
+	// behaviour of every test that follows — including the flush-ordering ones
+	// above.
+	beforeEach(() => {
+		duringCapture(null);
+		queueWrite([]);
+		setOnline(true);
+		failCaptures(false);
+	});
+
+	it("keeps a capture typed mid-flush instead of overwriting it", async () => {
+		// The bug: flushCaptureQueue snapshotted the queue, POSTed, then wrote a
+		// mutated copy of the SNAPSHOT back — clobbering anything onCapture had
+		// appended to storage while the request was in flight. The user had
+		// already been toasted "Offline — saved".
+		queueWrite(["Call the accountant"]);
+
+		duringCapture(async () => {
+			// Signal drops mid-request: the new capture fails its POST and is
+			// queued, exactly as onCapture does when navigator.onLine is false.
+			setOnline(false);
+			failCaptures(true);
+			setCaptureInput("Book the hotel in Aarhus");
+			await onCapture();
+			// Signal returns before the first POST resolves.
+			setOnline(true);
+			failCaptures(false);
+		});
+
+		const sent = await flushCaptureQueue();
+
+		expect(sent).toBe(1);
+		expect(captureCalls()).toContain("Call the accountant");
+		// The whole point: the mid-flush capture survives.
+		expect(queueRead()).toEqual(["Book the hotel in Aarhus"]);
+	});
+
+	it("removes only the item it actually sent", async () => {
+		// captureCalls() accumulates for the lifetime of the module, so compare
+		// the tail rather than the whole array.
+		const before = captureCalls().length;
+		queueWrite(["first", "second"]);
+		await flushCaptureQueue();
+		expect(queueRead()).toEqual([]);
+		expect(captureCalls().slice(before)).toEqual(["first", "second"]);
+	});
+
+	it("leaves the queue intact when the very first send fails", async () => {
+		queueWrite(["a", "b"]);
+		failCaptures(true);
+		const sent = await flushCaptureQueue();
+		expect(sent).toBe(0);
+		expect(queueRead()).toEqual(["a", "b"]);
 	});
 });

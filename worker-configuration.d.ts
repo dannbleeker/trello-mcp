@@ -50,6 +50,15 @@ declare namespace Cloudflare {
 		// Optional healthchecks.io-style ping URL, hit after each successful
 		// digest cron send (silent-failure monitoring). Secret; optional.
 		HEARTBEAT_URL?: string;
+
+		// Per-tool / per-endpoint usage tracking (v1.21.0, src/usage.ts). Both
+		// optional so the Worker deploys and runs unchanged before either
+		// binding exists — same fail-soft pattern as RESEND_API_KEY.
+		//   USAGE    — Analytics Engine dataset; 3-month retention, the long-term
+		//              instrument. Dataset is created on first write.
+		//   USAGE_DB — D1 mirror; unlimited retention, and what /api/usage reads.
+		USAGE?: AnalyticsEngineDataset;
+		USAGE_DB?: D1Database;
 	}
 }
 

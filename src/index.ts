@@ -17,6 +17,11 @@
  *              forking the OAuth handler.
  *
  * Change log:
+ *   1.21.0 (2026-08-04) — init() builds one UsageRecorder per MCP session and
+ *                         hands it to BOTH the Trello client and the tool
+ *                         registrations. That sharing is the point: a single
+ *                         flush per tool call then persists the tool event and
+ *                         every Trello request that tool made. See src/usage.ts.
  *   1.16.0 (2026-07-10) — Registrations extracted to src/register-tools.ts (~1,300
  *                         lines out); MCP version now tracks package.json; +1 tool:
  *                         send_digest. Total: 99.
@@ -72,6 +77,7 @@ import pkg from "../package.json";
 import { runScheduledDigest } from "./digest/scheduler";
 import { GitHubHandler } from "./github-handler";
 import { registerTrelloTools } from "./register-tools";
+import { UsageRecorder } from "./usage";
 import type { Props } from "./utils";
 
 import { TrelloClient } from "./trello/client";
@@ -84,11 +90,16 @@ export class TrelloMCP extends McpAgent<Env, Record<string, never>, Props> {
 	});
 
 	async init() {
+		// One recorder per MCP session, shared by the tool wrapper and the Trello
+		// client. That sharing is what lets a single flush per tool call also
+		// persist the Trello requests that tool made (src/usage.ts).
+		const usage = new UsageRecorder(this.env, "mcp", this.props!.login);
 		registerTrelloTools(
 			this.server,
 			this.props!.login,
-			new TrelloClient(this.env.TRELLO_KEY, this.env.TRELLO_TOKEN),
+			new TrelloClient(this.env.TRELLO_KEY, this.env.TRELLO_TOKEN, usage),
 			this.env,
+			usage,
 		);
 	}
 }

@@ -21,11 +21,21 @@
  *              so transition days behave like any other day.
  *
  * Change log:
+ *   1.1.0 (2026-08-04) — Usage tracking. sendDigestEmail takes an optional
+ *                        recorder rather than creating one — it has three
+ *                        callers on three surfaces (this cron, the send_digest
+ *                        MCP tool, the dashboard button), so the digest's
+ *                        Trello calls are attributed to whichever actually
+ *                        triggered the send. runScheduledDigest owns the `cron`
+ *                        recorder and flushes in a finally: a digest that died
+ *                        mid-run is exactly when you want to see which Trello
+ *                        call it died on.
  *   1.0.0 (2026-07-10) — Initial (v1.14.0 digest release).
  */
 
 import { TrelloClient } from "../trello/client";
 import type { TrelloCustomField } from "../trello/client";
+import { type HttpUsageSink, UsageRecorder } from "../usage";
 import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
 import { list_snoozed_cards } from "../trello/tools";
 import { renderDigest } from "./render";
@@ -37,6 +47,10 @@ export interface DigestSendEnv {
 	RESEND_API_KEY?: string;
 	DIGEST_FROM?: string;
 	DIGEST_TO?: string;
+	// Usage tracking (v1.21.0). Optional — absent in unit tests and before the
+	// bindings are deployed; the recorder no-ops in both cases.
+	USAGE?: AnalyticsEngineDataset;
+	USAGE_DB?: D1Database;
 }
 
 /** The cron path additionally needs KV for the once-per-day sent flag. */
@@ -88,12 +102,20 @@ export function localDateInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): str
  * Fetch the board, render, and send via Resend. Throws on any failure so the
  * caller can leave the sent-flag unset and let the next cron slot retry.
  */
-export async function sendDigestEmail(env: DigestSendEnv, nowMs: number): Promise<void> {
+export async function sendDigestEmail(
+	env: DigestSendEnv,
+	nowMs: number,
+	usage?: HttpUsageSink,
+): Promise<void> {
 	if (!env.RESEND_API_KEY) {
 		throw new Error("RESEND_API_KEY is not configured — set it with `wrangler secret put RESEND_API_KEY`.");
 	}
 
-	const client = new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN);
+	// `usage` is passed in rather than created here because this function has
+	// three callers on three surfaces — the cron, the send_digest MCP tool and
+	// the dashboard button. Each owns its own recorder, so the digest's Trello
+	// calls are attributed to whichever surface actually triggered the send.
+	const client = new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN, usage);
 	const boardId = BOARD_ALIASES[DEFAULT_BOARD];
 	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
 	// Custom-field definitions are best-effort for the same reason as snoozed
@@ -150,12 +172,17 @@ export async function runScheduledDigest(env: DigestEnv, nowMs: number): Promise
 		return "skipped-already-sent";
 	}
 
+	const usage = new UsageRecorder(env, "cron");
 	try {
-		await sendDigestEmail(env, nowMs);
+		await sendDigestEmail(env, nowMs, usage);
 	} catch (e) {
 		// Leave the flag unset — the next cron slot in the window retries.
 		console.error("digest send failed:", e instanceof Error ? e.message : e);
 		return "failed";
+	} finally {
+		// Flushed on the failure path too: a digest that died mid-run is exactly
+		// when you want to see which Trello call it died on.
+		await usage.flush();
 	}
 
 	await markSent(env, nowMs);

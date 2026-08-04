@@ -10,6 +10,16 @@
  *              which lets us unit-test the tools without spinning up a Worker.
  *
  * Change log:
+ *   1.21.0 (2026-08-04) — Optional third constructor arg: a usage sink
+ *                         (src/usage.ts). retryableFetch — the floor all three
+ *                         callers pass through, including the multipart upload
+ *                         — records method, templated path, status, attempt
+ *                         count and duration on success, on Trello error and on
+ *                         network failure. It takes the raw PATH, never the
+ *                         built URL: the URL carries `key` and `token` in its
+ *                         query string and must never reach an analytics store.
+ *                         Optional and third so the 13 test construction sites
+ *                         are unchanged.
  *   1.19.0 (2026-07-27) — Multi-workspace. New TrelloOrganization type and
  *                         listMyOrganizations / getOrganization /
  *                         listOrganizationBoards. Board fetches request
@@ -98,6 +108,7 @@
  *   1.0.0 (2026-06-12) — Initial.
  */
 
+import { endpointName, type HttpUsageSink, type UsageOutcome } from "../usage";
 import { BOARD_FIELDS, CARD_FIELDS, MEMBER_FIELDS, ORGANIZATION_FIELDS } from "./constants";
 
 const BASE = "https://api.trello.com/1";
@@ -460,10 +471,40 @@ export interface TrelloComment {
 export class TrelloClient {
 	private readonly key: string;
 	private readonly token: string;
+	private readonly sink?: HttpUsageSink;
 
-	constructor(key: string, token: string) {
+	/**
+	 * `sink` is optional and third so the 13 test construction sites — and any
+	 * caller that doesn't care about analytics — stay untouched. When absent,
+	 * every recording path below short-circuits.
+	 */
+	constructor(key: string, token: string, sink?: HttpUsageSink) {
 		this.key = key;
 		this.token = token;
+		this.sink = sink;
+	}
+
+	/**
+	 * Record one Trello HTTP call. `endpoint` carries the RAW path, never the
+	 * built URL — the URL has `key` and `token` in its query string and must
+	 * never reach an analytics store. The path is templated by endpointName().
+	 */
+	private recordHttp(
+		endpoint: { method: string; path: string } | undefined,
+		outcome: UsageOutcome,
+		status: number,
+		attempts: number,
+		startedAt: number,
+	): void {
+		if (!this.sink || !endpoint) return;
+		this.sink.record({
+			kind: "http",
+			name: endpointName(endpoint.method, endpoint.path),
+			outcome,
+			durationMs: Date.now() - startedAt,
+			status,
+			attempts,
+		});
 	}
 
 	/** Internal: build the URL with auth params merged in. */
@@ -486,13 +527,26 @@ export class TrelloClient {
 	private async retryableFetch(
 		url: string,
 		initFactory: () => RequestInit | Promise<RequestInit>,
+		endpoint?: { method: string; path: string },
 	): Promise<Response> {
+		const startedAt = Date.now();
 		let attempt = 0;
 		while (true) {
 			attempt += 1;
 			const init = await initFactory();
-			const resp = await fetch(url, init);
-			if (resp.ok) return resp;
+			let resp: Response;
+			try {
+				resp = await fetch(url, init);
+			} catch (e) {
+				// Network-level failure: no status to report. Recorded so a
+				// flaky endpoint is visible, then rethrown unchanged.
+				this.recordHttp(endpoint, "internal", 0, attempt, startedAt);
+				throw e;
+			}
+			if (resp.ok) {
+				this.recordHttp(endpoint, "ok", resp.status, attempt, startedAt);
+				return resp;
+			}
 			const method = (init.method ?? "GET").toUpperCase();
 			const retriable =
 				resp.status === 429 || (RETRY_STATUSES.has(resp.status) && IDEMPOTENT_METHODS.has(method));
@@ -502,6 +556,9 @@ export class TrelloClient {
 				continue;
 			}
 			const respBody = await resp.text();
+			// Recorded with the attempt count, so "429s that eventually succeeded"
+			// and "429s that gave up" are distinguishable in the data.
+			this.recordHttp(endpoint, "trello", resp.status, attempt, startedAt);
 			throw new TrelloError(resp.status, respBody);
 		}
 	}
@@ -529,7 +586,7 @@ export class TrelloClient {
 				init.body = JSON.stringify(body);
 			}
 			return init;
-		});
+		}, { method, path });
 		// 204 No Content (rare for Trello) → return null
 		const ct = resp.headers.get("content-type") ?? "";
 		return ct.includes("application/json") ? await resp.json() : null;
@@ -1264,7 +1321,7 @@ export class TrelloClient {
 				input.filename,
 			);
 			return { method: "POST", body: form };
-		});
+		}, { method: "POST", path: `/cards/${cardId}/attachments` });
 		const ct = resp.headers.get("content-type") ?? "";
 		return (ct.includes("application/json") ? await resp.json() : null) as TrelloAttachment;
 	}
@@ -1513,10 +1570,14 @@ export class TrelloClient {
 		// Can't go through request() (it rebuilds the URL and would re-encode the
 		// slash), but retryableFetch takes a pre-built URL — so 429 / transient-5xx
 		// backoff still applies here, same as every other call. v1.17.0 fix.
-		const resp = await this.retryableFetch(url, () => ({
-			method: "PUT",
-			headers: { Accept: "application/json" },
-		}));
+		const resp = await this.retryableFetch(
+			url,
+			() => ({
+				method: "PUT",
+				headers: { Accept: "application/json" },
+			}),
+			{ method: "PUT", path: `/customFields/${customFieldId}` },
+		);
 		const ct = resp.headers.get("content-type") ?? "";
 		const data = ct.includes("application/json") ? await resp.json() : null;
 		// These endpoints are keyed by field ID, not board ID, so there's no

@@ -4,6 +4,66 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] — 2026-08-04
+
+Usage tracking. The Cloudflare request count says the Worker was busy; it can't
+say **which of the 102 tools Claude actually reaches for** — which is the number
+you need before deciding whether a 102-tool surface earns the context it costs
+on every conversation.
+
+### Added
+- **Per-tool and per-endpoint usage recording** (`src/usage.ts`). Two event
+  kinds: one row per MCP tool call (`list_cards`) and one per Trello REST call
+  (`GET /cards/{id}`). They are deliberately not 1:1 — `weekly_review_pack` is
+  one tool call and about a dozen Trello requests, and that fan-out is the
+  thing worth seeing. Both seams already existed as single chokepoints:
+  `guarded()` wrapped all 102 handlers but had no idea which tool it was
+  wrapping, and `retryableFetch()` is the floor every Trello call passes
+  through.
+- **Surface and outcome dimensions.** `mcp` / `dashboard` / `cron` — all three
+  share the Trello client, so without the tag a dashboard refresh looks like
+  MCP traffic. Outcomes are split `ok` / `guard` / `trello` / `internal` /
+  `denied` rather than ok-vs-error: a tool that routinely refuses at the guard
+  is usually a tool-*description* problem, and cheaper to fix than anything
+  else on the list.
+- **Three sinks, all optional, all fail-soft.** Analytics Engine (`USAGE`) for
+  the 3-month record, written non-blocking; D1 (`USAGE_DB`) for unlimited
+  retention and for the dashboard to read; and structured `console.log` picked
+  up by Workers Logs, which was already enabled. With no bindings present the
+  recorder no-ops — same pattern as `RESEND_API_KEY`.
+- **Dashboard Usage panel** and `GET /api/usage?days=N`. Collapsed by default
+  and lazy-loaded, bars per tool or per endpoint over 7 / 30 / 90 days. It
+  reads the D1 mirror rather than Analytics Engine on purpose: AE is only
+  queryable through Cloudflare's SQL API with an account-scoped API token, and
+  shipping that token to the Worker just to draw a panel is a credential this
+  feature does not need.
+- **`docs/usage-tracking.md`** and `migrations/0001_usage_events.sql`.
+- 21 unit tests (`test/usage.test.ts`), including assertions on the Analytics
+  Engine data-point shape. Those matter more than they look: miniflare's local
+  `writeDataPoint` is an empty function and the real runtime *silently drops* a
+  malformed point, so a schema mistake is invisible in local dev **and** in
+  production. Unit tests are the only place it can surface.
+
+### Changed
+- `guarded()` is now built by `makeGuarded(login, usage)` and takes the tool
+  name as its first argument, so each of the 102 registrations stayed at two
+  arguments. Rewritten mechanically by pairing each `server.tool("name"` with
+  its `guarded(` call, and the compiler enforces that none was missed.
+- `TrelloClient` takes an optional third constructor argument (a usage sink) and
+  `retryableFetch` takes the raw path. The **path**, never the built URL — the
+  URL carries `key` and `token` in its query string and must not reach an
+  analytics store. Optional and third so all 13 test construction sites and any
+  other caller stay untouched.
+- `sendDigestEmail()` takes an optional recorder rather than creating one: it
+  has three callers on three surfaces (cron, the `send_digest` tool, the
+  dashboard button), so the digest's Trello calls are attributed to whichever
+  surface actually triggered the send.
+
+### Security
+- Argument **values** are never recorded. Card titles, comment bodies and search
+  queries are personal data; the recorder accepts a name, an outcome and
+  timings, and has no argument channel at all. Pinned by test.
+
 ## [1.20.0] — 2026-07-30
 
 Findings from reading the live board against the GTD practice the dashboard is

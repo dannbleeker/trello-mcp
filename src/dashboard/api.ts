@@ -16,6 +16,18 @@
  *              plain Node without resolving the page.html Text-module import.
  *
  * Change log:
+ *   1.21.0 (2026-08-04) — Usage tracking. The session middleware now builds a
+ *                         request-scoped UsageRecorder and flushes it after the
+ *                         handler, so dashboard-originated Trello calls are
+ *                         attributed to the `dashboard` surface instead of
+ *                         looking like MCP traffic. New GET /api/usage returns
+ *                         the rollups behind the dashboard's Usage panel — read
+ *                         from the D1 mirror, NOT Analytics Engine, because AE
+ *                         is only queryable through Cloudflare's SQL API with an
+ *                         account-scoped token and this panel should not need a
+ *                         credential to exist. Every query is bounded by ts:
+ *                         D1 bills rows scanned, and hitting the daily read cap
+ *                         halts writes as well as reads.
  *   1.20.0 (2026-07-30) — GET /api/cards also returns the board's `lists`. The page
  *                         used to hardcode the board ID, the five context list IDs
  *                         and their WIP limits, so a list added or a limit changed
@@ -40,6 +52,7 @@ import { BOARD_ALIASES, DEFAULT_BOARD } from "../trello/constants";
 import { resolveBoardRef } from "../trello/resolve";
 import { GuardError } from "../trello/guards";
 import { create_card, list_snoozed_cards, move_card, set_due_complete, wake_card, weekly_review_pack } from "../trello/tools";
+import { type HttpUsageSink, UsageRecorder } from "../usage";
 import { verifySessionCookie } from "./session";
 
 /** The subset of Worker bindings the dashboard needs. Matches names in wrangler secrets/vars. */
@@ -55,6 +68,10 @@ export type DashboardEnv = {
 	DIGEST_TO?: string;
 	// Present in the real Worker; optional here so unit tests can omit it.
 	OAUTH_KV?: KVNamespace;
+	// Usage tracking (v1.21.0). Optional: absent in unit tests and before the
+	// bindings are deployed, in which case the recorder no-ops.
+	USAGE?: AnalyticsEngineDataset;
+	USAGE_DB?: D1Database;
 };
 
 /** Card capture always lands in the Inbox; the client never chooses the destination. */
@@ -63,12 +80,17 @@ const CAPTURE_LIST_ALIAS = "inbox";
 /** Where ✓ Done sends cards (see /api/done). */
 const DONE_LIST_ALIAS = "done";
 
-/** One place to construct the Trello client from bindings. */
-function trello(env: DashboardEnv): TrelloClient {
-	return new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN);
+/**
+ * One place to construct the Trello client from bindings. `usage` is optional
+ * and threaded from the request-scoped recorder, so dashboard-originated Trello
+ * calls are attributed to the `dashboard` surface rather than looking like MCP
+ * traffic.
+ */
+function trello(env: DashboardEnv, usage?: HttpUsageSink): TrelloClient {
+	return new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN, usage);
 }
 
-const api = new Hono<{ Bindings: DashboardEnv; Variables: { login: string } }>();
+const api = new Hono<{ Bindings: DashboardEnv; Variables: { login: string; usage: UsageRecorder } }>();
 
 /**
  * Session gate for every /api/* route. JSON 401 (not a redirect) — the page's
@@ -91,7 +113,12 @@ api.use("/api/*", async (c, next) => {
 		}
 	}
 	c.set("login", session.login);
+	// Request-scoped recorder: every Trello call this request makes buffers here
+	// and lands in one batched INSERT after the handler returns.
+	const usage = new UsageRecorder(c.env, "dashboard", session.login);
+	c.set("usage", usage);
 	await next();
+	await usage.flush();
 });
 
 /**
@@ -146,7 +173,7 @@ api.get("/api/cards", async (c) => {
 	// ?board=… — the same reference syntax the MCP tools take. One client for
 	// the whole request: the resolver's directory cache is per client, so
 	// building a second one below would throw the lookup away.
-	const client = trello(c.env);
+	const client = trello(c.env, c.get("usage"));
 	let boardId: string;
 	try {
 		boardId = await resolveBoardRef(client, boardParam ?? BOARD_ALIASES[DEFAULT_BOARD]);
@@ -197,7 +224,7 @@ api.post("/api/move", async (c) => {
 	}
 
 	try {
-		const client = trello(c.env);
+		const client = trello(c.env, c.get("usage"));
 		const { warning } = await move_card(client, { cardId, list });
 		return c.json({ ok: true, ...(warning ? { warning } : {}) });
 	} catch (e) {
@@ -213,7 +240,7 @@ api.post("/api/done", async (c) => {
 	}
 
 	try {
-		const client = trello(c.env);
+		const client = trello(c.env, c.get("usage"));
 		// Flip dueComplete first (same semantics as the MCP set_due_complete
 		// tool — Butler triggers watching it still fire), then move the card
 		// to Done-do ourselves. Butler's own move becomes a no-op, but cards
@@ -235,7 +262,7 @@ api.get("/api/review", async (c) => {
 	// review run through Claude all read the same numbers. Fetched lazily by the
 	// page (only when the panel is open) — it is a second full board read.
 	try {
-		return c.json(await weekly_review_pack(trello(c.env), {}));
+		return c.json(await weekly_review_pack(trello(c.env, c.get("usage")), {}));
 	} catch (e) {
 		return errorResponse(c, e);
 	}
@@ -243,7 +270,7 @@ api.get("/api/review", async (c) => {
 
 api.get("/api/snoozed", async (c) => {
 	try {
-		const { snoozed } = await list_snoozed_cards(trello(c.env), {});
+		const { snoozed } = await list_snoozed_cards(trello(c.env, c.get("usage")), {});
 		return c.json({ snoozed });
 	} catch (e) {
 		return errorResponse(c, e);
@@ -259,7 +286,7 @@ api.post("/api/wake", async (c) => {
 
 	try {
 		// wake_card refuses non-snoozed cards and guards the home list.
-		const { card } = await wake_card(trello(c.env), { cardId });
+		const { card } = await wake_card(trello(c.env, c.get("usage")), { cardId });
 		return c.json({ card, ok: true });
 	} catch (e) {
 		return errorResponse(c, e);
@@ -271,7 +298,7 @@ api.post("/api/digest/send", async (c) => {
 	// right now?"). Session + Origin gates apply via the /api/* middleware.
 	try {
 		const nowMs = Date.now();
-		await sendDigestEmail(c.env, nowMs);
+		await sendDigestEmail(c.env, nowMs, c.get("usage"));
 		// If this test send happens inside the 04-06 cron window, flag the day
 		// as sent so a remaining cron slot doesn't duplicate it minutes later.
 		if (c.env.OAUTH_KV) {
@@ -298,7 +325,7 @@ api.post("/api/undo-done", async (c) => {
 	}
 
 	try {
-		const client = trello(c.env);
+		const client = trello(c.env, c.get("usage"));
 		// Move back FIRST: if the flag-clear then fails, the card is at least
 		// visible in its column (still done-flagged) instead of stranded
 		// invisible in Done-do with the flag cleared. Butler's done-automation
@@ -320,11 +347,95 @@ api.post("/api/capture", async (c) => {
 	}
 
 	try {
-		const client = trello(c.env);
+		const client = trello(c.env, c.get("usage"));
 		const { card, warning } = await create_card(client, { list: CAPTURE_LIST_ALIAS, name });
 		return c.json({ card, ...(warning ? { warning } : {}) }, 201);
 	} catch (e) {
 		return errorResponse(c, e);
+	}
+});
+
+/**
+ * Usage rollup for the dashboard's Usage panel (v1.21.0).
+ *
+ * Reads the D1 mirror rather than Analytics Engine on purpose: AE can only be
+ * queried through Cloudflare's SQL API with an account-scoped API token, and
+ * shipping that token to the Worker just to draw a panel is a credential this
+ * feature does not need. D1 is already a binding, so the panel is a plain
+ * same-origin read behind the existing session gate.
+ *
+ * ?days=N (1–365, default 30) bounds every query against the ts index — an
+ * unbounded scan would be billed on rows scanned, and D1's daily read cap
+ * halts WRITES as well as reads when it is hit.
+ */
+api.get("/api/usage", async (c) => {
+	const db = c.env.USAGE_DB;
+	if (!db) {
+		// Not an error: the binding is optional, and the panel renders a hint.
+		return c.json({ enabled: false, days: 0, totals: null, tools: [], endpoints: [], surfaces: [] });
+	}
+
+	const raw = Number(c.req.query("days") ?? 30);
+	const days = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 1), 365) : 30;
+	const since = Date.now() - days * 86_400_000;
+
+	// Shared shape for the two "group by name" rollups. errors is split out
+	// rather than derived client-side so a mostly-failing tool is obvious.
+	const rollup = (kind: "tool" | "http") =>
+		db
+			.prepare(
+				`SELECT name,
+				        COUNT(*)                                            AS calls,
+				        SUM(CASE WHEN outcome = 'ok' THEN 0 ELSE 1 END)     AS errors,
+				        CAST(AVG(duration_ms) AS INTEGER)                   AS avgMs,
+				        MAX(ts)                                             AS lastTs
+				 FROM usage_events
+				 WHERE kind = ?1 AND ts >= ?2
+				 GROUP BY name
+				 ORDER BY calls DESC
+				 LIMIT 200`,
+			)
+			.bind(kind, since)
+			.all();
+
+	try {
+		const [tools, endpoints, surfaces, totals] = await Promise.all([
+			rollup("tool"),
+			rollup("http"),
+			db
+				.prepare(
+					`SELECT surface, kind, COUNT(*) AS calls
+					 FROM usage_events WHERE ts >= ?1
+					 GROUP BY surface, kind ORDER BY calls DESC`,
+				)
+				.bind(since)
+				.all(),
+			db
+				.prepare(
+					`SELECT SUM(CASE WHEN kind = 'tool' THEN 1 ELSE 0 END)                       AS toolCalls,
+					        SUM(CASE WHEN kind = 'http' THEN 1 ELSE 0 END)                       AS httpCalls,
+					        COUNT(DISTINCT CASE WHEN kind = 'tool' THEN name END)                AS distinctTools,
+					        SUM(CASE WHEN kind = 'http' AND status = 429 THEN 1 ELSE 0 END)      AS rateLimited,
+					        SUM(CASE WHEN outcome NOT IN ('ok') THEN 1 ELSE 0 END)               AS errors,
+					        MIN(ts)                                                              AS firstTs
+					 FROM usage_events WHERE ts >= ?1`,
+				)
+				.bind(since)
+				.all(),
+		]);
+		return c.json({
+			enabled: true,
+			days,
+			totals: totals.results?.[0] ?? null,
+			tools: tools.results ?? [],
+			endpoints: endpoints.results ?? [],
+			surfaces: surfaces.results ?? [],
+		});
+	} catch (e) {
+		// A missing table (binding deployed before the schema was applied) is the
+		// likeliest cause and is worth saying out loud rather than 500-ing.
+		console.error("usage rollup failed:", e);
+		return c.json({ error: "Usage data is unavailable (is the usage_events table created?)." }, 502);
 	}
 });
 

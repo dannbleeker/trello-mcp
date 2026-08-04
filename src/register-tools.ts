@@ -11,6 +11,16 @@
  *              byte-identical to the pre-split code — only the file moved.
  *
  * Change log:
+ *   1.2.0 (2026-08-04) — Usage tracking (v1.21.0). `guarded` is now produced by
+ *                        makeGuarded(login, usage) and takes the TOOL NAME as
+ *                        its first argument — the one thing this wrapper never
+ *                        knew, despite every one of the 102 handlers already
+ *                        funnelling through it. Closing over login keeps each
+ *                        call site at two arguments. Records name, outcome
+ *                        (ok/guard/trello/internal/denied) and duration, then
+ *                        flushes once per tool call — which also drains the
+ *                        Trello HTTP events that call produced, since the
+ *                        client shares the recorder. See src/usage.ts.
  *   1.1.1 (2026-07-28) — Post-deploy verification fix: on list_cards,
  *                        list_cards_due and snooze_read the `board` param
  *                        still described itself as "used only if `list` is
@@ -31,6 +41,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { ALLOWED_LOGINS } from "./allowlist";
+import { classifyError, type UsageOutcome, UsageRecorder } from "./usage";
 import { noteManualSend, sendDigestEmail } from "./digest/scheduler";
 import { TrelloClient, TrelloError } from "./trello/client";
 import { GuardError } from "./trello/guards";
@@ -238,34 +249,62 @@ const CUSTOM_FIELD_COLORS = z.enum([
 	"black",
 ]);
 
-/** Wrap a tool handler with auth check + uniform error mapping. */
-function guarded<TIn>(
-	login: string,
-	fn: (input: TIn) => Promise<unknown>,
-) {
-	return async (input: TIn) => {
-		if (!ALLOWED_LOGINS.has(login)) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Access denied. GitHub user "${login}" is not on this connector's allowlist.`,
-					},
-				],
-				isError: true,
+/**
+ * Build the tool-handler wrapper: auth check, uniform error mapping, and usage
+ * recording. A factory rather than a plain function so `login` and the recorder
+ * are closed over — that keeps each of the 102 call sites at two arguments
+ * (`guarded("tool_name", handler)`) instead of four.
+ *
+ * The tool NAME is the whole point of the signature change. Every call already
+ * funnelled through here; it just had no idea which tool it was wrapping.
+ */
+function makeGuarded(login: string, usage: UsageRecorder) {
+	return function guarded<TIn>(name: string, fn: (input: TIn) => Promise<unknown>) {
+		return async (input: TIn) => {
+			const startedAt = Date.now();
+			// One flush per tool call drains this tool's event AND every Trello
+			// HTTP event it produced (the client shares this recorder), so a
+			// 12-request tool costs a single batched INSERT.
+			const finish = async (outcome: UsageOutcome) => {
+				usage.record({ kind: "tool", name, outcome, durationMs: Date.now() - startedAt });
+				await usage.flush();
 			};
-		}
-		try {
-			return ok(await fn(input));
-		} catch (e) {
-			return err(e);
-		}
+			if (!ALLOWED_LOGINS.has(login)) {
+				await finish("denied");
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Access denied. GitHub user "${login}" is not on this connector's allowlist.`,
+						},
+					],
+					isError: true,
+				};
+			}
+			try {
+				const result = ok(await fn(input));
+				await finish("ok");
+				return result;
+			} catch (e) {
+				// GuardError / TrelloError / internal are kept apart: a tool that
+				// routinely returns `guard` is usually a tool-description problem.
+				await finish(classifyError(e));
+				return err(e);
+			}
+		};
 	};
 }
 
 
 /** Register every Trello tool on the server. Called once per DO init. */
-export function registerTrelloTools(server: McpServer, login: string, client: TrelloClient, env: Env): void {
+export function registerTrelloTools(
+	server: McpServer,
+	login: string,
+	client: TrelloClient,
+	env: Env,
+	usage: UsageRecorder,
+): void {
+	const guarded = makeGuarded(login, usage);
 
 	// ---- READS ----
 
@@ -273,21 +312,21 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_boards",
 		"List all open Trello boards the authenticated user belongs to, across every workspace. Returns id, alias (if known), name, url and the workspace each board sits in. Pass `workspace` to list one workspace's boards only.",
 		{ workspace: workspaceRef("Limits the listing to this workspace.") },
-		guarded(login, async (i: { workspace?: string }) => list_boards(client, i)),
+		guarded("list_boards", async (i: { workspace?: string }) => list_boards(client, i)),
 	);
 
 	server.tool(
 		"list_workspaces",
 		"List every Trello workspace the account belongs to, each with its open boards. Start here on a multi-workspace account: the names returned are what `workspace` arguments accept, and boards outside any workspace appear under \"(no workspace)\".",
 		{},
-		guarded(login, async () => list_workspaces(client)),
+		guarded("list_workspaces", async () => list_workspaces(client)),
 	);
 
 	server.tool(
 		"list_lists",
 		"List the lists on a board. `board` accepts an alias (e.g. \"dann-to-do\", \"zoo\"), the board's name, a raw board ID, or a trello.com/b/… URL — in any workspace. Defaults to dann-to-do.",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_lists(client, i)),
+		guarded("list_lists", async (i: { board?: string }) => list_lists(client, i)),
 	);
 
 	server.tool(
@@ -308,7 +347,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.optional()
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { list?: string; board?: string; label?: string; staleDays?: number; customFields?: boolean }) =>
+		guarded("list_cards", async (i: { list?: string; board?: string; label?: string; staleDays?: number; customFields?: boolean }) =>
 			list_cards(client, i),
 		),
 	);
@@ -323,7 +362,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.optional()
 				.describe("Include custom-field values (one extra API call). Default false."),
 		},
-		guarded(login, async (i: { cardId: string; customFields?: boolean }) => get_card(client, i)),
+		guarded("get_card", async (i: { cardId: string; customFields?: boolean }) => get_card(client, i)),
 	);
 
 	server.tool(
@@ -339,7 +378,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
 		guarded(
-			login,
+			"search_cards",
 			async (i: { query: string; board?: string; workspace?: string; customFields?: boolean }) =>
 				search_cards(client, i),
 		),
@@ -349,7 +388,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_checklist_items",
 		"List the checklists and their items on a card.",
 		{ cardId: z.string().describe("Trello card ID.") },
-		guarded(login, async (i: { cardId: string }) => list_checklist_items(client, i)),
+		guarded("list_checklist_items", async (i: { cardId: string }) => list_checklist_items(client, i)),
 	);
 
 	// ---- WRITES ----
@@ -377,7 +416,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				),
 		},
 		guarded(
-			login,
+			"create_card",
 			async (i: {
 				list: string;
 				board?: string;
@@ -398,7 +437,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			list: z.string().describe("Destination list — alias, name, or ID. A name is resolved on `board` when given, otherwise across every board you can see."),
 			board: boardHint,
 		},
-		guarded(login, async (i: { cardId: string; list: string; board?: string }) =>
+		guarded("move_card", async (i: { cardId: string; list: string; board?: string }) =>
 			move_card(client, i),
 		),
 	);
@@ -412,7 +451,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			desc: z.string().optional(),
 			due: z.union([z.string(), z.null()]).optional().describe("ISO 8601 due date, or null to clear."),
 		},
-		guarded(login, async (i: { cardId: string; name?: string; desc?: string; due?: string | null }) =>
+		guarded("update_card", async (i: { cardId: string; name?: string; desc?: string; due?: string | null }) =>
 			update_card(client, i),
 		),
 	);
@@ -421,7 +460,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"archive_card",
 		"Archive a card (Trello's `closed=true`). Soft delete only — cards can be restored via the Trello UI. There is no hard-delete tool.",
 		{ cardId: z.string().describe("Card to archive.") },
-		guarded(login, async (i: { cardId: string }) => archive_card(client, i)),
+		guarded("archive_card", async (i: { cardId: string }) => archive_card(client, i)),
 	);
 
 	server.tool(
@@ -431,7 +470,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			complete: z.boolean().describe("true = mark done, false = unmark."),
 		},
-		guarded(login, async (i: { cardId: string; complete: boolean }) => set_due_complete(client, i)),
+		guarded("set_due_complete", async (i: { cardId: string; complete: boolean }) => set_due_complete(client, i)),
 	);
 
 	server.tool(
@@ -441,7 +480,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			label: z.string().describe("Label ID or name."),
 		},
-		guarded(login, async (i: { cardId: string; label: string }) => add_label(client, i)),
+		guarded("add_label", async (i: { cardId: string; label: string }) => add_label(client, i)),
 	);
 
 	server.tool(
@@ -451,7 +490,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			label: z.string().describe("Label ID or name."),
 		},
-		guarded(login, async (i: { cardId: string; label: string }) => remove_label(client, i)),
+		guarded("remove_label", async (i: { cardId: string; label: string }) => remove_label(client, i)),
 	);
 
 	server.tool(
@@ -461,7 +500,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			text: z.string().min(1).describe("Comment body (Markdown supported by Trello)."),
 		},
-		guarded(login, async (i: { cardId: string; text: string }) => add_comment(client, i)),
+		guarded("add_comment", async (i: { cardId: string; text: string }) => add_comment(client, i)),
 	);
 
 	server.tool(
@@ -471,7 +510,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			text: z.string().min(1).describe("Item text."),
 		},
-		guarded(login, async (i: { cardId: string; text: string }) => add_checklist_item(client, i)),
+		guarded("add_checklist_item", async (i: { cardId: string; text: string }) => add_checklist_item(client, i)),
 	);
 
 	server.tool(
@@ -482,7 +521,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
 			complete: z.boolean().describe("true = tick, false = untick."),
 		},
-		guarded(login, async (i: { cardId: string; itemId: string; complete: boolean }) =>
+		guarded("set_checklist_item_state", async (i: { cardId: string; itemId: string; complete: boolean }) =>
 			set_checklist_item_state(client, i),
 		),
 	);
@@ -491,7 +530,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_attachments",
 		"List attachments on a card. Returns id, name, url, date, mimeType.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => list_attachments(client, i)),
+		guarded("list_attachments", async (i: { cardId: string }) => list_attachments(client, i)),
 	);
 
 	server.tool(
@@ -502,7 +541,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			url: z.string().url().describe("URL to attach."),
 			name: z.string().optional().describe("Friendly name for the attachment (defaults to the URL)."),
 		},
-		guarded(login, async (i: { cardId: string; url: string; name?: string }) =>
+		guarded("add_attachment", async (i: { cardId: string; url: string; name?: string }) =>
 			add_attachment(client, i),
 		),
 	);
@@ -516,7 +555,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			mimeType: z.string().optional().describe("MIME type (e.g. \"text/markdown\", \"application/pdf\"). Defaults to application/octet-stream."),
 			contentBase64: z.string().min(1).describe("File contents, base64-encoded. `data:...;base64,` prefix is tolerated."),
 		},
-		guarded(login, async (i: { cardId: string; filename: string; mimeType?: string; contentBase64: string }) =>
+		guarded("add_file_attachment", async (i: { cardId: string; filename: string; mimeType?: string; contentBase64: string }) =>
 			add_file_attachment(client, i),
 		),
 	);
@@ -528,7 +567,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			attachmentId: z.string().describe("Attachment ID from list_attachments."),
 		},
-		guarded(login, async (i: { cardId: string; attachmentId: string }) =>
+		guarded("remove_attachment", async (i: { cardId: string; attachmentId: string }) =>
 			remove_attachment(client, i),
 		),
 	);
@@ -549,7 +588,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			label: z.string().optional().describe("Filter to this label name (case-insensitive)."),
 			board: boardRef(),
 		},
-		guarded(login, async (i: { scope: "today" | "overdue" | "next_seven_days"; list?: string; label?: string; board?: string }) =>
+		guarded("list_cards_due", async (i: { scope: "today" | "overdue" | "next_seven_days"; list?: string; label?: string; board?: string }) =>
 			list_cards_due(client, i),
 		),
 	);
@@ -570,7 +609,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
 		guarded(
-			login,
+			"list_cards_by_list",
 			async (i: {
 				list: string;
 				board?: string;
@@ -603,7 +642,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.describe("Attach each result's custom-field values. NOTE: this annotates results — Trello's search syntax has no operator for custom fields, so you cannot FILTER on them here."),
 		},
 		guarded(
-			login,
+			"search_cards_advanced",
 			async (i: {
 				query: string;
 				boards?: string[];
@@ -621,14 +660,14 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max comments to return (default 50)."),
 		},
-		guarded(login, async (i: { cardId: string; limit?: number }) => read_comments(client, i)),
+		guarded("read_comments", async (i: { cardId: string; limit?: number }) => read_comments(client, i)),
 	);
 
 	server.tool(
 		"list_labels",
 		"All labels defined on a board (id, name, color).",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_labels(client, i)),
+		guarded("list_labels", async (i: { board?: string }) => list_labels(client, i)),
 	);
 
 	server.tool(
@@ -639,7 +678,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			name: z.string().min(1).describe("Label name."),
 			color: z.union([z.string(), z.null()]).optional().describe("Trello palette token, or null for none."),
 		},
-		guarded(login, async (i: { board?: string; name: string; color?: string | null }) =>
+		guarded("create_label", async (i: { board?: string; name: string; color?: string | null }) =>
 			create_label(client, i),
 		),
 	);
@@ -651,7 +690,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardRef(),
 			label: z.string().describe("Label ID or name."),
 		},
-		guarded(login, async (i: { board?: string; label: string }) =>
+		guarded("delete_label", async (i: { board?: string; label: string }) =>
 			delete_label(client, i),
 		),
 	);
@@ -664,7 +703,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			checklistId: z.string(),
 			itemId: z.string(),
 		},
-		guarded(login, async (i: { cardId: string; checklistId: string; itemId: string }) =>
+		guarded("remove_checklist_item", async (i: { cardId: string; checklistId: string; itemId: string }) =>
 			remove_checklist_item(client, i),
 		),
 	);
@@ -680,7 +719,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardHint,
 		},
 		guarded(
-			login,
+			"convert_checklist_item_to_card",
 			async (i: {
 				cardId: string;
 				checklistId: string;
@@ -698,7 +737,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]),
 		},
-		guarded(login, async (i: { cardId: string; position: "top" | "bottom" | number }) =>
+		guarded("set_card_position", async (i: { cardId: string; position: "top" | "bottom" | number }) =>
 			set_card_position(client, i),
 		),
 	);
@@ -710,7 +749,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			start: z.union([z.string(), z.null()]).describe("ISO 8601 string or null to clear."),
 		},
-		guarded(login, async (i: { cardId: string; start: string | null }) =>
+		guarded("set_start_date", async (i: { cardId: string; start: string | null }) =>
 			set_start_date(client, i),
 		),
 	);
@@ -728,7 +767,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardRef(),
 			label: z.string().optional().describe("Filter to this label name."),
 		},
-		guarded(login, async (i: { list?: string; board?: string; label?: string }) =>
+		guarded("snooze_read", async (i: { list?: string; board?: string; label?: string }) =>
 			snooze_read(client, i),
 		),
 	);
@@ -740,7 +779,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardIds: z.array(z.string()).min(1).max(50),
 			label: z.string().describe("Label name or ID."),
 		},
-		guarded(login, async (i: { cardIds: string[]; label: string }) =>
+		guarded("batch_add_label", async (i: { cardIds: string[]; label: string }) =>
 			batch_add_label(client, i),
 		),
 	);
@@ -753,7 +792,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			targetList: z.string().describe("Destination list — alias, name, or ID."),
 			board: boardHint,
 		},
-		guarded(login, async (i: { cardIds: string[]; targetList: string; board?: string }) =>
+		guarded("batch_move_cards", async (i: { cardIds: string[]; targetList: string; board?: string }) =>
 			batch_move_cards(client, i),
 		),
 	);
@@ -766,7 +805,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			filter: z.string().optional().describe("Trello action-type filter (comma-separated). Default: a curated activity set."),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max actions to return (default 50, hard cap 1000)."),
 		},
-		guarded(login, async (i: { cardId: string; filter?: string; limit?: number }) =>
+		guarded("card_activity_log", async (i: { cardId: string; filter?: string; limit?: number }) =>
 			card_activity_log(client, i),
 		),
 	);
@@ -780,14 +819,14 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_board_members",
 		"All members with access to a board (id, fullName, username, initials).",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_board_members(client, i)),
+		guarded("list_board_members", async (i: { board?: string }) => list_board_members(client, i)),
 	);
 
 	server.tool(
 		"list_card_members",
 		"Members assigned to a single card.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => list_card_members(client, i)),
+		guarded("list_card_members", async (i: { cardId: string }) => list_card_members(client, i)),
 	);
 
 	server.tool(
@@ -797,7 +836,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			member: z.string().describe("Member ID, username, or full name."),
 		},
-		guarded(login, async (i: { cardId: string; member: string }) => add_member_to_card(client, i)),
+		guarded("add_member_to_card", async (i: { cardId: string; member: string }) => add_member_to_card(client, i)),
 	);
 
 	server.tool(
@@ -807,7 +846,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			member: z.string().describe("Member ID, username, or full name."),
 		},
-		guarded(login, async (i: { cardId: string; member: string }) => remove_member_from_card(client, i)),
+		guarded("remove_member_from_card", async (i: { cardId: string; member: string }) => remove_member_from_card(client, i)),
 	);
 
 	server.tool(
@@ -817,7 +856,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: z.string().optional().describe("Board — alias, name, ID, or URL — to narrow to a single board."),
 			workspace: workspaceRef("Narrows to the boards in this workspace."),
 		},
-		guarded(login, async (i: { board?: string; workspace?: string }) =>
+		guarded("list_my_cards_assigned", async (i: { board?: string; workspace?: string }) =>
 			list_my_cards_assigned(client, i),
 		),
 	);
@@ -829,7 +868,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			name: z.string().min(1).describe("Checklist name."),
 		},
-		guarded(login, async (i: { cardId: string; name: string }) => create_checklist(client, i)),
+		guarded("create_checklist", async (i: { cardId: string; name: string }) => create_checklist(client, i)),
 	);
 
 	server.tool(
@@ -840,7 +879,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			checklistId: z.string(),
 			name: z.string().min(1).describe("New checklist name."),
 		},
-		guarded(login, async (i: { cardId: string; checklistId: string; name: string }) =>
+		guarded("rename_checklist", async (i: { cardId: string; checklistId: string; name: string }) =>
 			rename_checklist(client, i),
 		),
 	);
@@ -852,7 +891,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			checklistId: z.string(),
 		},
-		guarded(login, async (i: { cardId: string; checklistId: string }) =>
+		guarded("delete_checklist", async (i: { cardId: string; checklistId: string }) =>
 			delete_checklist(client, i),
 		),
 	);
@@ -869,7 +908,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
 		guarded(
-			login,
+			"copy_card",
 			async (i: {
 				cardId: string;
 				targetList: string;
@@ -889,7 +928,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			minutesBeforeDue: z.union([z.number().int().nonnegative(), z.null()])
 				.describe("Non-negative integer minutes, or null to clear."),
 		},
-		guarded(login, async (i: { cardId: string; minutesBeforeDue: number | null }) =>
+		guarded("set_due_reminder", async (i: { cardId: string; minutesBeforeDue: number | null }) =>
 			set_due_reminder(client, i),
 		),
 	);
@@ -902,7 +941,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			commentId: z.string().describe("Action ID from read_comments."),
 			text: z.string().min(1).describe("New comment body (Markdown supported)."),
 		},
-		guarded(login, async (i: { cardId: string; commentId: string; text: string }) =>
+		guarded("update_comment", async (i: { cardId: string; commentId: string; text: string }) =>
 			update_comment(client, i),
 		),
 	);
@@ -914,7 +953,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			commentId: z.string().describe("Action ID from read_comments."),
 		},
-		guarded(login, async (i: { cardId: string; commentId: string }) =>
+		guarded("delete_comment", async (i: { cardId: string; commentId: string }) =>
 			delete_comment(client, i),
 		),
 	);
@@ -931,7 +970,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.optional()
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
-		guarded(login, async (i: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean }) =>
+		guarded("weekly_review_pack", async (i: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean }) =>
 			weekly_review_pack(client, i),
 		),
 	);
@@ -949,7 +988,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			name: z.string().min(1),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
-		guarded(login, async (i: { board?: string; name: string; position?: "top" | "bottom" | number }) =>
+		guarded("create_list", async (i: { board?: string; name: string; position?: "top" | "bottom" | number }) =>
 			create_list(client, i),
 		),
 	);
@@ -962,7 +1001,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardHint,
 			name: z.string().min(1),
 		},
-		guarded(login, async (i: { list: string; board?: string; name: string }) =>
+		guarded("rename_list", async (i: { list: string; board?: string; name: string }) =>
 			rename_list(client, i),
 		),
 	);
@@ -975,7 +1014,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardHint,
 			closed: z.boolean().optional().describe("true (default) = archive, false = reopen."),
 		},
-		guarded(login, async (i: { list: string; board?: string; closed?: boolean }) =>
+		guarded("archive_list", async (i: { list: string; board?: string; closed?: boolean }) =>
 			archive_list(client, i),
 		),
 	);
@@ -994,7 +1033,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			workspace: workspaceRef("Disambiguates `targetBoard` by workspace."),
 		},
 		guarded(
-			login,
+			"move_list",
 			async (i: {
 				list: string;
 				position?: "top" | "bottom" | number;
@@ -1013,7 +1052,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			targetList: z.string().describe("List — alias, name, or ID — to receive."),
 			board: boardHint,
 		},
-		guarded(login, async (i: { sourceList: string; targetList: string; board?: string }) =>
+		guarded("move_all_cards", async (i: { sourceList: string; targetList: string; board?: string }) =>
 			move_all_cards(client, i),
 		),
 	);
@@ -1022,7 +1061,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"archive_all_cards",
 		"Bulk-archive every open card on a list.",
 		{ list: z.string().describe("List — alias, name, or 24-char ID. A name is resolved on `board` when given, otherwise across every board you can see."), board: boardHint },
-		guarded(login, async (i: { list: string; board?: string }) => archive_all_cards(client, i)),
+		guarded("archive_all_cards", async (i: { list: string; board?: string }) => archive_all_cards(client, i)),
 	);
 
 	server.tool(
@@ -1035,7 +1074,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			size: z.enum(["normal", "full"]).optional(),
 			brightness: z.enum(["light", "dark"]).optional(),
 		},
-		guarded(login, async (i: { cardId: string; color?: string; attachmentId?: string; size?: "normal" | "full"; brightness?: "light" | "dark" }) =>
+		guarded("set_card_cover", async (i: { cardId: string; color?: string; attachmentId?: string; size?: "normal" | "full"; brightness?: "light" | "dark" }) =>
 			set_card_cover(client, i),
 		),
 	);
@@ -1044,7 +1083,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"clear_card_cover",
 		"Remove the cover from a card.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => clear_card_cover(client, i)),
+		guarded("clear_card_cover", async (i: { cardId: string }) => clear_card_cover(client, i)),
 	);
 
 	server.tool(
@@ -1055,7 +1094,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
 			due: z.union([z.string(), z.null()]),
 		},
-		guarded(login, async (i: { cardId: string; itemId: string; due: string | null }) =>
+		guarded("set_checklist_item_due", async (i: { cardId: string; itemId: string; due: string | null }) =>
 			set_checklist_item_due(client, i),
 		),
 	);
@@ -1068,7 +1107,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
 			member: z.union([z.string(), z.null()]).describe("Member ID/username/full name, or null."),
 		},
-		guarded(login, async (i: { cardId: string; itemId: string; member: string | null }) =>
+		guarded("assign_checklist_item_member", async (i: { cardId: string; itemId: string; member: string | null }) =>
 			assign_checklist_item_member(client, i),
 		),
 	);
@@ -1081,7 +1120,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]),
 		},
-		guarded(login, async (i: { cardId: string; itemId: string; position: "top" | "bottom" | number }) =>
+		guarded("reorder_checklist_item", async (i: { cardId: string; itemId: string; position: "top" | "bottom" | number }) =>
 			reorder_checklist_item(client, i),
 		),
 	);
@@ -1095,7 +1134,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			name: z.string().min(1).optional(),
 			color: z.union([z.string(), z.null()]).optional(),
 		},
-		guarded(login, async (i: { board?: string; label: string; name?: string; color?: string | null }) =>
+		guarded("update_label", async (i: { board?: string; label: string; name?: string; color?: string | null }) =>
 			update_label(client, i),
 		),
 	);
@@ -1107,7 +1146,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			subscribed: z.boolean(),
 		},
-		guarded(login, async (i: { cardId: string; subscribed: boolean }) =>
+		guarded("subscribe_card", async (i: { cardId: string; subscribed: boolean }) =>
 			subscribe_card(client, i),
 		),
 	);
@@ -1120,7 +1159,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardHint,
 			subscribed: z.boolean(),
 		},
-		guarded(login, async (i: { list: string; board?: string; subscribed: boolean }) =>
+		guarded("subscribe_list", async (i: { list: string; board?: string; subscribed: boolean }) =>
 			subscribe_list(client, i),
 		),
 	);
@@ -1135,7 +1174,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			since: z.string().optional(),
 			before: z.string().optional(),
 		},
-		guarded(login, async (i: { filter?: string; readFilter?: "all" | "read" | "unread"; limit?: number; since?: string; before?: string }) =>
+		guarded("list_notifications", async (i: { filter?: string; readFilter?: "all" | "read" | "unread"; limit?: number; since?: string; before?: string }) =>
 			list_notifications(client, i),
 		),
 	);
@@ -1147,7 +1186,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			notificationId: z.string(),
 			unread: z.boolean().optional().describe("true = mark unread, false (default) = mark read."),
 		},
-		guarded(login, async (i: { notificationId: string; unread?: boolean }) =>
+		guarded("mark_notification_read", async (i: { notificationId: string; unread?: boolean }) =>
 			mark_notification_read(client, i),
 		),
 	);
@@ -1158,7 +1197,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		{
 			read: z.boolean().optional().describe("Default true (mark read). Pass false to bulk-unread, rarely useful."),
 		},
-		guarded(login, async (i: { read?: boolean }) =>
+		guarded("mark_all_notifications_read", async (i: { read?: boolean }) =>
 			mark_all_notifications_read(client, i),
 		),
 	);
@@ -1172,21 +1211,21 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"vote_card",
 		"Cast a vote on a card as the authenticated user (the connector's GitHub-allowlisted identity).",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => vote_card(client, i)),
+		guarded("vote_card", async (i: { cardId: string }) => vote_card(client, i)),
 	);
 
 	server.tool(
 		"unvote_card",
 		"Withdraw your vote from a card.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => unvote_card(client, i)),
+		guarded("unvote_card", async (i: { cardId: string }) => unvote_card(client, i)),
 	);
 
 	server.tool(
 		"list_card_voters",
 		"Members who have voted on a card (id, fullName, username, initials).",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => list_card_voters(client, i)),
+		guarded("list_card_voters", async (i: { cardId: string }) => list_card_voters(client, i)),
 	);
 
 	server.tool(
@@ -1197,7 +1236,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			emoji: z.string().min(1).describe("Emoji shortName, e.g. \"thumbsup\"."),
 			cardId: z.string().optional().describe("Card ID for a verification check; auto-derived from action if omitted."),
 		},
-		guarded(login, async (i: { commentId: string; emoji: string; cardId?: string }) =>
+		guarded("add_comment_reaction", async (i: { commentId: string; emoji: string; cardId?: string }) =>
 			add_comment_reaction(client, i),
 		),
 	);
@@ -1210,7 +1249,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			reactionId: z.string().describe("Reaction ID from list_comment_reactions."),
 			cardId: z.string().optional().describe("Card ID for a verification check; auto-derived from action if omitted."),
 		},
-		guarded(login, async (i: { commentId: string; reactionId: string; cardId?: string }) =>
+		guarded("remove_comment_reaction", async (i: { commentId: string; reactionId: string; cardId?: string }) =>
 			remove_comment_reaction(client, i),
 		),
 	);
@@ -1219,7 +1258,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_comment_reactions",
 		"All emoji reactions on a comment.",
 		{ commentId: z.string().describe("Action ID from read_comments.") },
-		guarded(login, async (i: { commentId: string }) => list_comment_reactions(client, i)),
+		guarded("list_comment_reactions", async (i: { commentId: string }) => list_comment_reactions(client, i)),
 	);
 
 	server.tool(
@@ -1231,7 +1270,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			newName: z.string().min(1).optional(),
 			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
-		guarded(login, async (i: { sourceChecklistId: string; targetCardId: string; newName?: string; position?: "top" | "bottom" | number }) =>
+		guarded("copy_checklist", async (i: { sourceChecklistId: string; targetCardId: string; newName?: string; position?: "top" | "bottom" | number }) =>
 			copy_checklist(client, i),
 		),
 	);
@@ -1240,7 +1279,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"mark_card_notifications_read",
 		"Clear every notification associated with one card in a single call. Faster than iterating mark_notification_read after processing a card.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => mark_card_notifications_read(client, i)),
+		guarded("mark_card_notifications_read", async (i: { cardId: string }) => mark_card_notifications_read(client, i)),
 	);
 
 	server.tool(
@@ -1252,7 +1291,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			filter: z.string().optional(),
 			limit: z.number().int().min(1).max(1000).optional(),
 		},
-		guarded(login, async (i: { list: string; board?: string; filter?: string; limit?: number }) =>
+		guarded("list_list_actions", async (i: { list: string; board?: string; filter?: string; limit?: number }) =>
 			list_list_actions(client, i),
 		),
 	);
@@ -1264,7 +1303,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			filter: z.string().optional(),
 			limit: z.number().int().min(1).max(1000).optional(),
 		},
-		guarded(login, async (i: { filter?: string; limit?: number }) =>
+		guarded("list_my_actions", async (i: { filter?: string; limit?: number }) =>
 			list_my_actions(client, i),
 		),
 	);
@@ -1273,14 +1312,14 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_board_memberships",
 		"Board memberships with role data (admin / normal / observer / virtual) plus confirmation + deactivation state. Richer than list_board_members.",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_board_memberships(client, i)),
+		guarded("list_board_memberships", async (i: { board?: string }) => list_board_memberships(client, i)),
 	);
 
 	server.tool(
 		"get_member",
 		"Look up any Trello member's profile by ID or username (e.g. resolving a member id seen in raw data).",
 		{ idOrUsername: z.string() },
-		guarded(login, async (i: { idOrUsername: string }) => get_member(client, i)),
+		guarded("get_member", async (i: { idOrUsername: string }) => get_member(client, i)),
 	);
 
 	// ============================================================
@@ -1295,7 +1334,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			label: z.string().describe("Label ID or name."),
 			board: boardRef("Used only when `label` is a name."),
 		},
-		guarded(login, async (i: { label: string; board?: string }) => get_label(client, i)),
+		guarded("get_label", async (i: { label: string; board?: string }) => get_label(client, i)),
 	);
 
 	server.tool(
@@ -1305,7 +1344,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			cardId: z.string(),
 			attachmentId: z.string(),
 		},
-		guarded(login, async (i: { cardId: string; attachmentId: string }) =>
+		guarded("get_attachment", async (i: { cardId: string; attachmentId: string }) =>
 			get_attachment(client, i),
 		),
 	);
@@ -1314,7 +1353,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_comment_reactions_summary",
 		"Grouped emoji-reaction counts on a comment. Lighter than list_comment_reactions when you just need per-emoji totals.",
 		{ commentId: z.string().describe("Action ID from read_comments.") },
-		guarded(login, async (i: { commentId: string }) =>
+		guarded("list_comment_reactions_summary", async (i: { commentId: string }) =>
 			list_comment_reactions_summary(client, i),
 		),
 	);
@@ -1323,21 +1362,21 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"get_action",
 		"Full detail for a single action (move, comment, update, etc.). Complements card_activity_log / list_list_actions / list_my_actions for drilling into one event.",
 		{ actionId: z.string() },
-		guarded(login, async (i: { actionId: string }) => get_action(client, i)),
+		guarded("get_action", async (i: { actionId: string }) => get_action(client, i)),
 	);
 
 	server.tool(
 		"get_action_display",
 		"Trello's pre-rendered human-readable version of an action (e.g. \"Dann moved X from @computer to @home\"). Useful for building activity feeds without reimplementing the rendering.",
 		{ actionId: z.string() },
-		guarded(login, async (i: { actionId: string }) => get_action_display(client, i)),
+		guarded("get_action_display", async (i: { actionId: string }) => get_action_display(client, i)),
 	);
 
 	server.tool(
 		"list_custom_fields",
 		"Custom-field DEFINITIONS on a board (Power-Up). Errors with an actionable message if the Custom Fields Power-Up is not enabled on the board.",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_custom_fields(client, i)),
+		guarded("list_custom_fields", async (i: { board?: string }) => list_custom_fields(client, i)),
 	);
 
 	server.tool(
@@ -1351,7 +1390,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			displayCardFront: z.boolean().optional().describe("Show this field on the card front? Default false."),
 		},
 		guarded(
-			login,
+			"create_custom_field",
 			async (i: { board?: string; name: string; type: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
 				create_custom_field(client, i),
 		),
@@ -1368,7 +1407,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			displayCardFront: z.boolean().optional(),
 		},
 		guarded(
-			login,
+			"update_custom_field",
 			async (i: { customFieldId: string; board?: string; name?: string; pos?: "top" | "bottom" | number; displayCardFront?: boolean }) =>
 				update_custom_field(client, i),
 		),
@@ -1385,7 +1424,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 				.optional()
 				.describe("Must be true. Without it the call is refused with a description of what would be lost."),
 		},
-		guarded(login, async (i: { customFieldId: string; board?: string; confirm?: boolean }) =>
+		guarded("delete_custom_field", async (i: { customFieldId: string; board?: string; confirm?: boolean }) =>
 			delete_custom_field(client, i),
 		),
 	);
@@ -1401,7 +1440,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			pos: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional(),
 		},
 		guarded(
-			login,
+			"add_custom_field_option",
 			async (i: { customFieldId: string; board?: string; value: string; color?: string; pos?: "top" | "bottom" | number }) =>
 				add_custom_field_option(client, i),
 		),
@@ -1415,7 +1454,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardRef("Used for the name lookup."),
 			optionId: z.string().describe("Option ID, or the option's label text."),
 		},
-		guarded(login, async (i: { customFieldId: string; optionId: string; board?: string }) =>
+		guarded("delete_custom_field_option", async (i: { customFieldId: string; optionId: string; board?: string }) =>
 			delete_custom_field_option(client, i),
 		),
 	);
@@ -1424,7 +1463,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_card_custom_fields",
 		"A card's custom-field values, joined against the board's definitions: each row carries `name` and `type`, list-type rows resolve to the option's label, and fields that have never been set are returned with value: null.",
 		{ cardId: z.string() },
-		guarded(login, async (i: { cardId: string }) => list_card_custom_fields(client, i)),
+		guarded("list_card_custom_fields", async (i: { cardId: string }) => list_card_custom_fields(client, i)),
 	);
 
 	server.tool(
@@ -1436,7 +1475,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			value: CUSTOM_FIELD_VALUE,
 		},
 		guarded(
-			login,
+			"set_card_custom_field",
 			async (i: { cardId: string; customFieldId: string; value: CustomFieldValue }) =>
 				set_card_custom_field(client, i),
 		),
@@ -1451,7 +1490,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			value: CUSTOM_FIELD_VALUE,
 		},
 		guarded(
-			login,
+			"batch_set_card_custom_field",
 			async (i: { cardIds: string[]; customFieldId: string; value: CustomFieldValue }) =>
 				batch_set_card_custom_field(client, i),
 		),
@@ -1468,7 +1507,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			color: CUSTOM_FIELD_COLORS.optional().describe("Override the colour; defaults to the old option's."),
 		},
 		guarded(
-			login,
+			"rename_custom_field_option",
 			async (i: { customFieldId: string; optionId: string; newValue: string; board?: string; color?: string }) =>
 				rename_custom_field_option(client, i),
 		),
@@ -1478,7 +1517,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_board_plugins",
 		"Power-Ups currently enabled on a board. Each row includes `id` (needed for disable) and `idPlugin`, plus an `alias` when known.",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_board_plugins(client, i)),
+		guarded("list_board_plugins", async (i: { board?: string }) => list_board_plugins(client, i)),
 	);
 
 	server.tool(
@@ -1488,7 +1527,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardRef(),
 			plugin: z.string().describe("Plugin alias (custom-fields, card-aging, voting, calendar) or ID."),
 		},
-		guarded(login, async (i: { board?: string; plugin: string }) =>
+		guarded("enable_board_plugin", async (i: { board?: string; plugin: string }) =>
 			enable_board_plugin(client, i),
 		),
 	);
@@ -1500,7 +1539,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			board: boardRef(),
 			boardPluginId: z.string().describe("The `id` from list_board_plugins (not the idPlugin)."),
 		},
-		guarded(login, async (i: { board?: string; boardPluginId: string }) =>
+		guarded("disable_board_plugin", async (i: { board?: string; boardPluginId: string }) =>
 			disable_board_plugin(client, i),
 		),
 	);
@@ -1509,7 +1548,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"get_plugin",
 		"Plugin metadata (name, description, url) by alias or plugin ID.",
 		{ plugin: z.string().describe("Plugin alias or ID.") },
-		guarded(login, async (i: { plugin: string }) => get_plugin(client, i)),
+		guarded("get_plugin", async (i: { plugin: string }) => get_plugin(client, i)),
 	);
 
 	// ============================================================
@@ -1520,14 +1559,14 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"list_snoozed_cards",
 		"Cards the Snooze Power-Up has hidden (archived) with a scheduled wake time. Returns name, home list, wakeUp (ISO), and overdueWake (wake time passed but Power-Up hasn't fired). Sorted soonest-first. Note: snooze_read is a different mechanism (dueReminder offsets) — this reads the actual Power-Up state.",
 		{ board: boardRef() },
-		guarded(login, async (i: { board?: string }) => list_snoozed_cards(client, i)),
+		guarded("list_snoozed_cards", async (i: { board?: string }) => list_snoozed_cards(client, i)),
 	);
 
 	server.tool(
 		"wake_card",
 		"Unarchive a Power-Up-snoozed card NOW — it returns to its home list. Refuses cards that aren't snoozed by the Snooze Power-Up (this is not a blind unarchiver). Creating snoozes via the API is impossible (Power-Up-private data); snoozing stays a Trello-UI action.",
 		{ cardId: z.string().describe("Snoozed card to wake.") },
-		guarded(login, async (i: { cardId: string }) => wake_card(client, i)),
+		guarded("wake_card", async (i: { cardId: string }) => wake_card(client, i)),
 	);
 
 	server.tool(
@@ -1536,7 +1575,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		{
 			paths: z.array(z.string()).min(1).max(10).describe("Relative Trello paths, e.g. [\"/boards/xxx\", \"/cards/yyy\"]."),
 		},
-		guarded(login, async (i: { paths: string[] }) => batch_get(client, i)),
+		guarded("batch_get", async (i: { paths: string[] }) => batch_get(client, i)),
 	);
 
 	server.tool(
@@ -1547,7 +1586,7 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 			label: z.string().optional(),
 			staleDays: z.number().int().positive().optional(),
 		},
-		guarded(login, async (i: { board?: string; label?: string; staleDays?: number }) =>
+		guarded("list_archived_cards", async (i: { board?: string; label?: string; staleDays?: number }) =>
 			list_archived_cards(client, i),
 		),
 	);
@@ -1560,9 +1599,9 @@ export function registerTrelloTools(server: McpServer, login: string, client: Tr
 		"send_digest",
 		"Send the 'Todays Actions' digest email NOW with live board data (same email as the daily 04:00 send). If sent inside the morning cron window, the day's cron send is marked done so it won't duplicate.",
 		{},
-		guarded(login, async () => {
+		guarded("send_digest", async () => {
 			const nowMs = Date.now();
-			await sendDigestEmail(env, nowMs);
+			await sendDigestEmail(env, nowMs, usage);
 			await noteManualSend(env, nowMs);
 			return { sent: true, to: env.DIGEST_TO ?? "(default recipient)" };
 		}),

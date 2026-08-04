@@ -245,6 +245,16 @@ A private, browser-accessible To-Do dashboard served by this same Worker — a h
 - **Installable**: the dashboard ships a web-app manifest — "Add to Home Screen" installs it as a standalone app. Dark mode follows the device preference.
 - **Digest monitoring (optional)**: set a [healthchecks.io](https://healthchecks.io) ping URL as the `HEARTBEAT_URL` secret; the Worker pings it after every successful daily send, so a silent digest failure becomes an email alert.
 
+## Usage tracking
+
+Since v1.21.0 the Worker records **which tools actually get used** — per tool and per Trello endpoint, not just an overall request count. Full detail in [`docs/usage-tracking.md`](docs/usage-tracking.md).
+
+- **Two event kinds**: one row per MCP tool call (`list_cards`) and one per Trello REST call (`GET /cards/{id}`, path-templated so IDs don't explode the cardinality). They're not 1:1 — `weekly_review_pack` is one tool call and about a dozen Trello requests, which is exactly the fan-out worth seeing.
+- **Tagged by surface** — `mcp` / `dashboard` / `cron` — because all three share the Trello client, and by outcome: `ok` / `guard` / `trello` / `internal`. That last split is the useful one: a tool that routinely refuses at the guard is usually a tool-*description* problem, and cheaper to fix than anything else.
+- **Three sinks, all optional and fail-soft.** Analytics Engine (`USAGE`, 3-month retention, non-blocking writes, dataset auto-created); D1 (`USAGE_DB`, unlimited retention, buffered so a 12-request tool costs one `INSERT`); and structured `console.log` picked up by Workers Logs. With no bindings present the recorder no-ops and the Worker is unchanged.
+- **Never records argument values.** Card titles, comment bodies and search queries stay in the Worker — the recorder takes a name, an outcome and timings, and has no argument channel at all. The request URL never reaches a sink either, since it carries `key` and `token`.
+- **Dashboard panel**: `/dashboard` → **Usage**, collapsed by default and lazy-loaded. Bars per tool or per endpoint over 7 / 30 / 90 days. It reads the D1 mirror rather than Analytics Engine, which is what keeps a Cloudflare API token out of the Worker entirely.
+
 ## Daily email digest
 
 Since v1.14.0 the Worker also emails **"Todays Actions"** — a full HTML replica of the dashboard plus an *Overdue & due today* section — every day at **04:00 Europe/Copenhagen**, DST-proof, with board data fetched at send time.
@@ -326,12 +336,13 @@ No tool code changes are needed — the existing tools resolve aliases at call t
 src/
   index.ts                  — Worker entry, OAuth wiring, tool registrations
   allowlist.ts              — GitHub-login allowlist (shared: MCP + dashboard)
+  usage.ts                  — per-tool / per-endpoint usage recorder (AE + D1 + logs)
   github-handler.ts         — OAuth consent screen + GitHub callback; mounts the dashboard
   utils.ts                  — auth helpers (unchanged from template)
   workers-oauth-utils.ts    — cookie/state utilities (HMAC helpers exported for the dashboard)
   dashboard/
     handler.ts              — browser routes: /, /dashboard, /app/login|callback|logout, /digest/preview
-    api.ts                  — session-gated JSON API: /api/cards|move|done|capture|digest/send
+    api.ts                  — session-gated JSON API: /api/cards|move|done|capture|digest/send|usage
     session.ts              — signed __Host-DASH_SESSION cookie (sign/verify/expiry)
     page.html               — the dashboard page (imported as a wrangler Text module)
   digest/
@@ -343,7 +354,9 @@ src/
     resolve.ts              — workspace / board / list reference resolution + directory cache
     guards.ts               — server-side safety guards
     tools.ts                — 102 tool implementations (testable in plain Node)
-test/                       — vitest unit tests (265; no real Trello calls)
+test/                       — vitest unit tests (352; no real Trello calls)
+migrations/                 — D1 schema for the usage_events table
+docs/                       — usage-tracking.md, snooze-v2.md
 wrangler.jsonc              — Cloudflare Workers config
 package.json
 tsconfig.json

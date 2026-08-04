@@ -39,6 +39,28 @@
       "id": "6ddeb7f29d9b4cd898cb89a8ff6d3aca"
     }
   ],
+  // Usage tracking (v1.21.0, src/usage.ts). Two sinks on purpose:
+  //   USAGE    — Analytics Engine. Purpose-built, non-blocking writes, 3-month
+  //              retention. The dataset is created automatically on the first
+  //              write; there is nothing to provision. Query it with the SQL API
+  //              (see docs/usage-tracking.md) using a token with
+  //              Account Analytics: Read.
+  //   USAGE_DB — D1 mirror. Unlimited retention and, unlike Analytics Engine,
+  //              readable from inside the Worker — which is what lets the
+  //              dashboard's Usage panel exist without shipping an API token.
+  "analytics_engine_datasets": [
+    {
+      "binding": "USAGE",
+      "dataset": "trello_mcp_usage"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "USAGE_DB",
+      "database_name": "trello-mcp-usage",
+      "database_id": "8e58b547-28c7-43b5-a356-a3e9cef39617"
+    }
+  ],
   // Daily digest cron. Cloudflare cron is UTC-only, so we fire at 02/03/04 UTC
   // and the handler (src/digest/scheduler.ts) sends exactly once, at or after
   // 04:00 Europe/Copenhagen, DST-proof — the extra firings are retry slots.

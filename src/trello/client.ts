@@ -126,6 +126,17 @@ const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 5000;
 
 /**
+ * How long a board's custom-field DEFINITIONS stay cached (v1.18.0 memoisation,
+ * v1.22.0 TTL). The MCP client lives for the whole Durable Object session, so
+ * without a TTL a field or option added in the Trello UI mid-conversation was
+ * invisible for the rest of it — producing a confident, repeated wrong refusal
+ * ("No option labelled X ... Its options are: ...") that no MCP call could
+ * clear. 60s is long enough to keep killing the per-card refetch v1.18.0 was
+ * written to remove, short enough that a UI edit heals itself.
+ */
+const CUSTOM_FIELD_TTL_MS = 60_000;
+
+/**
  * Clamp a caller-supplied limit into [1, max]. Used by listActions,
  * listNotifications, listListActions, listMyActions — was inlined 4× before
  * v1.10.0. Exported so unit tests can pin the contract without going through
@@ -1480,8 +1491,28 @@ export class TrelloClient {
 	}
 
 	/** Convenience: comments only, chronological. */
+	/**
+	 * Trello returns the NEWEST `limit` actions; we then sort oldest-first, so a
+	 * truncated thread reads exactly like a complete one that happens to start
+	 * at comment #31. Asked "what did we originally decide", a caller would cite
+	 * the oldest comment it received and never learn that 30 older ones existed.
+	 * `truncated` is the fix — the data was always cut, it just never said so.
+	 * v1.22.0.
+	 */
+	async listCommentThread(
+		cardId: string,
+		limit = 50,
+	): Promise<{ comments: TrelloComment[]; truncated: boolean }> {
+		const actions = await this.listActions(cardId, "commentCard", limit);
+		return { comments: this.toComments(actions), truncated: actions.length >= clampLimit(limit) };
+	}
+
 	async listComments(cardId: string, limit = 50): Promise<TrelloComment[]> {
 		const actions = await this.listActions(cardId, "commentCard", limit);
+		return this.toComments(actions);
+	}
+
+	private toComments(actions: TrelloAction[]): TrelloComment[] {
 		const comments = actions
 			.map((a) => ({
 				id: a.id,
@@ -1546,7 +1577,7 @@ export class TrelloClient {
 	 * the affected board, so a stale definition can't outlive its own change.
 	 * v1.18.0.
 	 */
-	private customFieldCache = new Map<string, TrelloCustomField[]>();
+	private customFieldCache = new Map<string, { at: number; fields: TrelloCustomField[] }>();
 
 	/** Drop a board's cached definitions. Called by every custom-field mutation. */
 	private invalidateCustomFields(boardId?: string): void {
@@ -1556,10 +1587,10 @@ export class TrelloClient {
 
 	async listCustomFields(boardId: string): Promise<TrelloCustomField[]> {
 		const cached = this.customFieldCache.get(boardId);
-		if (cached) return cached;
+		if (cached && Date.now() - cached.at < CUSTOM_FIELD_TTL_MS) return cached.fields;
 		const data = await this.request("GET", `/boards/${boardId}/customFields`);
 		const fields = data as TrelloCustomField[];
-		this.customFieldCache.set(boardId, fields);
+		this.customFieldCache.set(boardId, { at: Date.now(), fields });
 		return fields;
 	}
 

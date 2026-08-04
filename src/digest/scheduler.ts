@@ -99,6 +99,38 @@ export function localDateInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): str
 }
 
 /**
+ * Fetch the board and render the digest. The ONE place the email is built, so
+ * the 04:00 send and the /digest/preview route cannot diverge — the preview
+ * used to do its own fetch without customFieldItems and without the field
+ * definitions, so it rendered every card with no custom-field badge and showed
+ * a layout the real email never had. A preview whose whole job is "check the
+ * email before it goes out" has to build the same email. v1.22.0.
+ *
+ * Both extra reads stay best-effort for the reason they always were: the
+ * morning email must never die because a Power-Up read failed.
+ */
+export async function buildDigest(
+	client: TrelloClient,
+	nowMs: number,
+): Promise<{ html: string; subject: string }> {
+	const boardId = BOARD_ALIASES[DEFAULT_BOARD];
+	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+	let customFields: TrelloCustomField[] = [];
+	try {
+		customFields = await client.listCustomFields(boardId);
+	} catch (e) {
+		console.error("digest custom-fields fetch failed (badges omitted):", e instanceof Error ? e.message : e);
+	}
+	let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
+	try {
+		snoozed = (await list_snoozed_cards(client, {}, nowMs)).snoozed;
+	} catch (e) {
+		console.error("digest snoozed-cards fetch failed (section omitted):", e instanceof Error ? e.message : e);
+	}
+	return renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed, customFields);
+}
+
+/**
  * Fetch the board, render, and send via Resend. Throws on any failure so the
  * caller can leave the sent-flag unset and let the next cron slot retry.
  */
@@ -116,26 +148,7 @@ export async function sendDigestEmail(
 	// the dashboard button. Each owns its own recorder, so the digest's Trello
 	// calls are attributed to whichever surface actually triggered the send.
 	const client = new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN, usage);
-	const boardId = BOARD_ALIASES[DEFAULT_BOARD];
-	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
-	// Custom-field definitions are best-effort for the same reason as snoozed
-	// cards below: the morning email must never die because a Power-Up read
-	// failed. Without them, cards simply render without custom-field badges.
-	let customFields: TrelloCustomField[] = [];
-	try {
-		customFields = await client.listCustomFields(boardId);
-	} catch (e) {
-		console.error("digest custom-fields fetch failed (badges omitted):", e instanceof Error ? e.message : e);
-	}
-	// Snoozed cards are best-effort: the morning email must never die because
-	// the Snooze Power-Up read failed — the section is simply omitted. v1.15.0.
-	let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
-	try {
-		snoozed = (await list_snoozed_cards(client, {}, nowMs)).snoozed;
-	} catch (e) {
-		console.error("digest snoozed-cards fetch failed (section omitted):", e instanceof Error ? e.message : e);
-	}
-	const { html, subject } = renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed, customFields);
+	const { html, subject } = await buildDigest(client, nowMs);
 
 	const resp = await fetch("https://api.resend.com/emails", {
 		body: JSON.stringify({

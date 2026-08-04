@@ -4,6 +4,93 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] — 2026-08-04
+
+The rest of the bug hunt. Every fix below was found by an adversarially
+verified sweep of the repo, and every regression test was checked to FAIL
+against the pre-fix tree before being kept.
+
+### Fixed — data loss
+- **`convert_checklist_item_to_card` destroyed the checklist item before it
+  guarded the destination.** A typo'd or ambiguous list name, or a forbidden
+  target, threw `GuardError` with the item already gone and a stray card on the
+  source list — while telling the caller the call had failed, which the model
+  reads as "nothing happened" and retries. The destination is now resolved and
+  guarded first, as `move_card` always did. Past the convert, a failed move
+  returns the card plus a `warning` instead of throwing: throwing there would
+  repeat the exact lie the reorder fixes.
+- **`delete_checklist` / `rename_checklist` / `remove_checklist_item` mutated
+  checklists on other cards.** They guarded the caller-supplied `cardId` but
+  wrote to `/checklists/{id}`, which never mentions the card — so naming a
+  harmless card and passing a checklistId from a Butler or Repeater Cards
+  template mutated the template and reported success naming the innocent card.
+  New `assertChecklistOnCard`, mirroring `assertCommentOnCard`, which closed
+  the identical hole for comments in v1.9.0.
+- **`rename_custom_field_option` silently erased archived cards' values.** It
+  scanned open cards only, re-pointed those, then deleted the old option — and
+  Trello drops the `customFieldItems` of every card still on it. On this board
+  that is the common case, not an edge one: the snooze Power-Up archives cards.
+  The result now reports `archivedRepointed`, counted from successes.
+
+### Fixed — silently wrong answers
+- **Day windows were an hour wrong on both DST transition days.**
+  `startOfDay + 24h` assumes a 24-hour local day; the EU transition days are 23
+  and 25. On 2026-10-25 a card due 23:30 local failed both the "today" and
+  "overdue" scopes and vanished; on 2026-03-29 a card due 00:30 the next day
+  was reported as due today. New `dayWindowMsInTz` derives the end from the
+  timezone. Verified against the real 2026 transitions.
+- **`weekly_review_pack` reported finished work and automation as due.** Its
+  due buckets ignored `dueComplete` and included non-actionable lists, so the
+  Friday review counted ticked-off cards, Butler/Repeater templates and cards
+  already in Done — while the digest, reading the same board, showed none of
+  them. Both now share one `isDueReportable` predicate, and the five context
+  lists have a single source of truth in `constants.ts` rather than a copy in
+  each surface. Deliberately NOT applied to `list_cards_due`: that tool is the
+  overdue sweep, and finding stale due dates on non-actionable lists is the
+  point of it.
+- **`search_cards_advanced` could never return an archived card**, despite
+  advertising Trello's `is:archived` operator — it filtered every archived hit
+  out. Archived hits are kept, each row carries `closed`, and a result set cut
+  at 200 now says so via `truncated`.
+- **`search_cards` was discarding most of its own quota.** Trello applies
+  `cards_limit` before we filter, and archived cards dominate the ranking on a
+  long-lived board: measured live on this account, a bare query with
+  `cards_limit` 20 returned 19 archived and 1 open. It now appends `is:open`
+  unless the caller constrained it. Observable contract unchanged.
+- **`read_comments` presented a truncated thread as a complete one.** Trello
+  returns the NEWEST N comments, sorted here oldest-first, so 50 of 80 read
+  exactly like a thread that starts at comment #1 — and "what did we originally
+  decide?" got answered from the wrong comment. Adds `truncated` and a `note`.
+- **An archived list could not be unarchived by name.** `listListsOnBoard`
+  never asked Trello for archived lists, so `archive_list({ closed: false })`
+  could not resolve one and `list_lists` could not show it. The resolver's
+  cache now fetches all lists; `listCandidates` still filters by `closed`
+  unless the caller asked otherwise, so default resolution is untouched.
+- **`/digest/preview` rendered a different email from the one the cron sends.**
+  It fetched without `customFieldItems` and never loaded the field definitions,
+  so custom-field badges never appeared in the preview whose only job is to
+  check the email before it goes out. Both paths now call one `buildDigest`.
+- **The custom-field cache had no TTL.** The MCP client lives for the whole
+  session, so an option added in the Trello UI mid-conversation stayed invisible
+  and produced a confident, repeated wrong refusal that no MCP call could clear.
+  60s — long enough to keep killing the per-card refetch v1.18.0 removed.
+- **The Usage panel's "429s" tile read 0 while Trello was throttling.** A
+  retried-then-successful 429 is stored with its final status (200) and
+  `attempts > 1`, so counting `status = 429` missed exactly the throttling that
+  got absorbed. Now counts retries too, and the tile is labelled "Throttled".
+
+### Changed
+- `/api/usage` no longer computes a `surfaces` aggregate the page never read —
+  one fewer windowed D1 scan per panel open.
+- `search_cards_advanced` returns `truncated` and `closed` per row;
+  `read_comments` returns `truncated` and an optional `note`;
+  `rename_custom_field_option` returns `archivedRepointed`;
+  `convert_checklist_item_to_card` may return `warning`. All additive.
+
+### Added
+- `test/checklist-guards.test.ts`, `test/archived-cards.test.ts`,
+  `test/time-and-truth.test.ts` — 30 tests. 407 pass in total.
+
 ## [1.21.3] — 2026-08-04
 
 Dashboard fixes from the bug hunt: one stored XSS, one data loss, plus two

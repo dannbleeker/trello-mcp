@@ -666,7 +666,7 @@ export function registerTrelloTools(
 
 	server.tool(
 		"read_comments",
-		"Chronological comment thread on a card. Each comment has text, author, timestamp.",
+		"Chronological comment thread on a card (oldest first). Each comment has text, author, timestamp. Returns the NEWEST `limit` comments — if `truncated` is true, older comments exist and are not shown, so do not treat the first one as the start of the thread.",
 		{
 			cardId: z.string(),
 			limit: z.number().int().min(1).max(1000).optional().describe("Max comments to return (default 50)."),

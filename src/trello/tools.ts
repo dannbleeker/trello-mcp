@@ -193,6 +193,8 @@
  */
 
 import {
+	ACTIONABLE_LIST_IDS,
+	CONTEXT_LIST_ALIASES,
 	DEFAULT_BOARD,
 	DEFAULT_TIMEZONE,
 	MAX_RESULTS,
@@ -919,8 +921,7 @@ export async function list_cards_due(
 	const now = Date.now();
 	// v1.9.0 fix: day boundaries in Dann's local timezone, not the Worker's
 	// UTC runtime. Otherwise cards due at 00:30 CEST show up as "yesterday".
-	const startOfToday = startOfDayMsInTz(now);
-	const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
+	const { start: startOfToday, end: endOfToday } = dayWindowMsInTz(now);
 	const endOfWeek = now + 7 * 24 * 60 * 60 * 1000;
 
 	const passesScope = (c: TrelloCard): boolean => {
@@ -1058,9 +1059,27 @@ export async function search_cards_advanced(
 export async function read_comments(
 	client: TrelloClient,
 	input: { cardId: string; limit?: number },
-): Promise<{ cardId: string; comments: TrelloComment[] }> {
-	const comments = await client.listComments(input.cardId, input.limit ?? 50);
-	return { cardId: input.cardId, comments };
+): Promise<{ cardId: string; comments: TrelloComment[]; truncated: boolean; note?: string }> {
+	const limit = input.limit ?? 50;
+	// Trello hands back the NEWEST `limit` comments, sorted here oldest-first —
+	// so a cut thread looks exactly like a short one. Say so, or a question like
+	// "what did we originally decide?" gets answered from the oldest comment
+	// that happened to survive the cut. v1.22.0.
+	const { comments, truncated } = await client.listCommentThread(input.cardId, limit);
+	return {
+		cardId: input.cardId,
+		comments,
+		truncated,
+		...(truncated
+			? {
+					note:
+						`Showing the ${comments.length} most recent comments; older ones exist and are NOT included. ` +
+						(limit < 1000
+							? `Re-run with a higher \`limit\` (max 1000) to see further back.`
+							: `This is the maximum this tool can return — read the card in Trello for the full history.`),
+				}
+			: {}),
+	};
 }
 
 /** list_labels — all labels on a board. */
@@ -1722,7 +1741,8 @@ export async function delete_comment(
  * the board's lists match LIST_ALIASES — for other boards (e.g. zoo) you still
  * get the date-based buckets but the GTD-section breakdown is empty.
  */
-const WEEKLY_REVIEW_CONTEXT_LISTS = ["@computer", "@home", "@phone", "@errands", "@lene"] as const;
+// Derived from constants.ts so the digest and the review cannot drift. v1.22.0.
+const WEEKLY_REVIEW_CONTEXT_LISTS = CONTEXT_LIST_ALIASES;
 // v1.20.0: could-ssf was missing. SSF has had its own label and its own
 // Could-do list for a while, so the horizon bucket the weekly review reads
 // silently omitted a whole sphere.
@@ -1771,8 +1791,7 @@ export async function weekly_review_pack(
 	const now = Date.now();
 	// v1.9.0 fix: local-time day boundaries, so a Friday morning review
 	// doesn't classify Saturday 01:30 CEST as "due_today".
-	const todayStart = startOfDayMsInTz(now);
-	const todayEnd = todayStart + 24 * 60 * 60 * 1000;
+	const { start: todayStart, end: todayEnd } = dayWindowMsInTz(now);
 	const weekEnd = now + 7 * 24 * 60 * 60 * 1000;
 	const staleCutoff = now - staleDays * 24 * 60 * 60 * 1000;
 
@@ -1784,16 +1803,16 @@ export async function weekly_review_pack(
 	const inboxCards = open.filter((c) => c.idList === inboxId);
 	const waitingCards = open.filter((c) => c.idList === waitingId);
 	const overdueCards = open.filter(
-		(c) => c.due && !c.dueComplete && Date.parse(c.due) < now,
+		(c) => isDueReportable(c) && Date.parse(c.due as string) < now,
 	);
 	const dueTodayCards = open.filter((c) => {
-		if (!c.due) return false;
-		const t = Date.parse(c.due);
+		if (!isDueReportable(c)) return false;
+		const t = Date.parse(c.due as string);
 		return t >= todayStart && t < todayEnd;
 	});
 	const dueThisWeekCards = open.filter((c) => {
-		if (!c.due) return false;
-		const t = Date.parse(c.due);
+		if (!isDueReportable(c)) return false;
+		const t = Date.parse(c.due as string);
 		return t >= now && t <= weekEnd;
 	});
 
@@ -3486,6 +3505,44 @@ export function startOfDayMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): 
 		guess -= Date.UTC(w.y, w.m - 1, w.d, w.hh, w.mm, w.ss) - targetAsUtc;
 	}
 	return guess;
+}
+
+/**
+ * Can this card legitimately be reported as due or overdue?
+ *
+ * Shared by weekly_review_pack and the daily digest so the two surfaces cannot
+ * disagree — until v1.22.0 the digest applied these exclusions and the review
+ * did not, so a Friday review showed work already ticked off, Butler/Repeater
+ * template cards, and cards sitting in Done as overdue, while the morning email
+ * reading the same board showed none of them.
+ *
+ * Deliberately NOT applied to list_cards_due: that tool is the overdue SWEEP —
+ * finding stale due dates on non-actionable lists is the point of it, and it
+ * stays board-generic (README documents only the digest and weekly_review_pack
+ * as board-tied).
+ */
+export function isDueReportable(card: { due: string | null; dueComplete?: boolean; idList: string }): boolean {
+	return card.due !== null && !card.dueComplete && ACTIONABLE_LIST_IDS.has(card.idList);
+}
+
+/**
+ * The local day containing `nowMs`, as [start, end) in epoch ms.
+ *
+ * Callers used to write `startOfDayMsInTz(now) + 24h`, which is wrong on the
+ * two EU DST transition days — the local day is 23 or 25 hours long there.
+ * Concretely, on 2026-10-25 (fall back) a card due 23:30 local was >= the
+ * computed end so it failed the "today" scope, and > now so it failed
+ * "overdue" — it vanished from both. On 2026-03-29 (spring forward) a card due
+ * 00:30 the NEXT day was reported as due today.
+ *
+ * Deriving the end from the timezone instead of a fixed offset: 26 hours past
+ * the start always lands inside the following local day in either DST
+ * direction, so taking that day's start gives the true next local midnight.
+ * v1.22.0.
+ */
+export function dayWindowMsInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): { start: number; end: number } {
+	const start = startOfDayMsInTz(nowMs, tz);
+	return { end: startOfDayMsInTz(start + 26 * 3600 * 1000, tz), start };
 }
 
 /**

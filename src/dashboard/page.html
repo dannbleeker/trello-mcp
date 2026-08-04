@@ -730,7 +730,7 @@ function render(){
         + '<span class="wip none"><b>Trello requests</b> '+(t.httpCalls||0)+'</span>'
         + '<span class="wip none"><b>Distinct tools</b> '+(t.distinctTools||0)+'</span>'
         + '<span class="wip '+((t.errors||0)?'over':'ok')+'"><b>Errors</b> '+(t.errors||0)+'</span>'
-        + '<span class="wip '+((t.rateLimited||0)?'over':'ok')+'"><b>429s</b> '+(t.rateLimited||0)+'</span>'
+        + '<span class="wip '+((t.rateLimited||0)?'over':'ok')+'"><b>Throttled</b> '+(t.rateLimited||0)+'</span>'
         + '</div>';
       usagePanel += '<div class="usg-tabs">'
         + '<button class="usg-tab'+(USAGE_VIEW==="tools"?" on":"")+'" onclick="setUsageView(\'tools\')">Tools</button>'

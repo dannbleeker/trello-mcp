@@ -792,14 +792,21 @@ export class TrelloClient {
 		return data as TrelloCard[];
 	}
 
+	/**
+	 * `filter` is OPT-IN so the eight existing callers emit a byte-identical URL
+	 * and keep Trello's default (open cards only). Only rename_custom_field_option
+	 * passes "all", because it must see archived cards before deleting an option
+	 * they still point at — otherwise Trello drops their values silently. v1.22.0.
+	 */
 	async listCardsOnBoard(
 		boardId: string,
-		opts: { customFieldItems?: boolean } = {},
+		opts: { customFieldItems?: boolean; filter?: "open" | "closed" | "all" } = {},
 	): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
 			fields: CARD_FIELDS,
 		};
 		if (opts.customFieldItems) params.customFieldItems = true;
+		if (opts.filter) params.filter = opts.filter;
 		const data = await this.request("GET", `/boards/${boardId}/cards`, params);
 		return data as TrelloCard[];
 	}

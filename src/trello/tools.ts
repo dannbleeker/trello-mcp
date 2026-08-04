@@ -1275,7 +1275,7 @@ export async function remove_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string; itemId: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	await client.removeChecklistItem(input.checklistId, input.itemId);
 	return { ok: true };
 }
@@ -1295,7 +1295,7 @@ export async function convert_checklist_item_to_card(
 		targetList?: string;
 		board?: string;
 	},
-): Promise<{ card: CardSummary }> {
+): Promise<{ card: CardSummary; warning?: string }> {
 	const sourceCard = await assertCardWritable(client, input.cardId);
 
 	// Trello births the new card on the SOURCE card's list. If the source is
@@ -1306,21 +1306,41 @@ export async function convert_checklist_item_to_card(
 		assertNotReadOnly(sourceCard.idList, "destination");
 	}
 
+	// Resolve and guard the destination BEFORE converting. The convert is
+	// irreversible — it destroys the checklist item — so every input that can
+	// still be rejected must be rejected while the item exists. Until v1.22.0
+	// this ran afterwards, so a typo'd or ambiguous list name, or a forbidden
+	// target, threw GuardError with the item already gone and a stray card left
+	// on the source list, while telling the caller the operation had failed.
+	// move_card guards its destination first for exactly this reason.
+	const targetId = input.targetList
+		? await resolveListRef(client, input.targetList, { board: input.board })
+		: undefined;
+	if (targetId !== undefined) assertCanWriteTo(targetId);
+
 	let newCard = await client.convertChecklistItemToCard(
 		input.cardId,
 		input.checklistId,
 		input.itemId,
 	);
 
-	if (input.targetList) {
-		const targetId = await resolveListRef(client, input.targetList, { board: input.board });
-		assertCanWriteTo(targetId);
-		if (targetId !== newCard.idList) {
+	// Past this line the item is gone and the card exists, so a failed move is
+	// not a failed call — throwing here would repeat the very lie the reorder
+	// above fixes. Report it as a warning and name the card, the way move_card
+	// surfaces its WIP warning.
+	let warning: string | undefined;
+	if (targetId !== undefined && targetId !== newCard.idList) {
+		try {
 			newCard = await client.moveCard(newCard.id, targetId);
+		} catch (e) {
+			warning =
+				`Item was converted to card ${newCard.id}, but the move to "${input.targetList}" failed: ` +
+				`${e instanceof Error ? e.message : String(e)}. The card is on list ${newCard.idList} — ` +
+				`finish with move_card.`;
 		}
 	}
 
-	return { card: summariseCard(newCard) };
+	return { card: summariseCard(newCard), ...(warning ? { warning } : {}) };
 }
 
 const BATCH_MAX = 50;
@@ -1544,7 +1564,7 @@ export async function rename_checklist(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string; name: string },
 ): Promise<{ checklist: { id: string; name: string } }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	const cl = await client.renameChecklist(input.checklistId, input.name);
 	return { checklist: { id: cl.id, name: cl.name } };
 }
@@ -1554,7 +1574,7 @@ export async function delete_checklist(
 	client: TrelloClient,
 	input: { cardId: string; checklistId: string },
 ): Promise<{ ok: true }> {
-	await assertCardWritable(client, input.cardId);
+	await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	await client.deleteChecklist(input.checklistId);
 	return { ok: true };
 }
@@ -2809,6 +2829,9 @@ export async function rename_custom_field_option(
 	oldOptionId: string;
 	newOptionId: string;
 	cardsRepointed: number;
+	/** How many of cardsRepointed were archived. Surfaced because until v1.22.0
+	 *  archived cards were invisible here and lost their value silently. */
+	archivedRepointed: number;
 	failures: { cardId: string; reason: string }[];
 }> {
 	if (!input.newValue.trim()) {
@@ -2835,7 +2858,13 @@ export async function rename_custom_field_option(
 	// 2. Re-point. Only cards actually using the old option are touched; the
 	//    board scan carries values inline, so this is one call plus one PUT per
 	//    affected card.
-	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
+	// filter "all" — NOT the default open-cards-only scan. Step 3 deletes the old
+	// option, and Trello drops the customFieldItems of every card still pointing
+	// at it. Archived cards were invisible to this scan until v1.22.0, so a
+	// rename silently and permanently erased their value while reporting
+	// success — the snooze Power-Up archives cards, so on this board that is the
+	// common case, not an edge one.
+	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true, filter: "all" });
 	const affected = cards.filter((c) =>
 		(c.customFieldItems ?? []).some(
 			(it) => it.idCustomField === field.id && it.idValue === oldOptionId,
@@ -2843,10 +2872,14 @@ export async function rename_custom_field_option(
 	);
 	const failures: { cardId: string; reason: string }[] = [];
 	let cardsRepointed = 0;
+	let archivedRepointed = 0;
 	for (const card of affected) {
 		try {
 			await client.setCardCustomFieldItem(card.id, field.id, { idValue: created.id });
 			cardsRepointed += 1;
+			// Counted from SUCCESSES, like cardsRepointed — an archived card that
+			// failed belongs in `failures`, not in this total.
+			if (card.closed) archivedRepointed += 1;
 		} catch (e) {
 			failures.push({ cardId: card.id, reason: e instanceof Error ? e.message : String(e) });
 		}
@@ -2870,6 +2903,7 @@ export async function rename_custom_field_option(
 		oldOptionId,
 		newOptionId: created.id,
 		cardsRepointed,
+		archivedRepointed,
 		failures,
 	};
 }
@@ -3617,6 +3651,35 @@ async function assertCommentOnCard(
 		);
 	}
 	await assertCardWritable(client, actionCardId);
+}
+
+/**
+ * Assert that `checklistId` actually belongs to `cardId`, then that the card is
+ * writable. The same hole assertCommentOnCard closes, in a different shape:
+ * Trello's checklist endpoints (/checklists/{id}, /checklists/{id}/checkItems/…)
+ * are card-agnostic, so guarding only the caller-supplied cardId let a caller
+ * name a harmless card and mutate a checklist on any other — including one on
+ * Butler or Repeater Cards, the automation templates FORBIDDEN_LISTS exists to
+ * protect. The tool then reported success naming the innocent card.
+ *
+ * Costs one extra GET. Used by rename_checklist / delete_checklist /
+ * remove_checklist_item. v1.22.0 fix.
+ */
+async function assertChecklistOnCard(
+	client: TrelloClient,
+	cardId: string,
+	checklistId: string,
+): Promise<void> {
+	// Guard the named card FIRST: if the caller cannot write to the card they
+	// claim, there is no reason to reveal anything about the checklist.
+	await assertCardWritable(client, cardId);
+	const checklists = await client.listChecklistsOnCard(cardId);
+	if (!checklists.some((cl) => cl.id === checklistId)) {
+		throw new GuardError(
+			`Checklist ${checklistId} is not on card ${cardId}. Trello's checklist endpoints ignore the card, ` +
+				`so this would have modified a checklist somewhere else. Use list_checklist_items on the card you mean.`,
+		);
+	}
 }
 
 /**

@@ -391,3 +391,27 @@ describe("POST /api/undo-done (v1.16.0)", () => {
 		expect(putParams[1].get("dueComplete")).toBe("false");
 	});
 });
+
+describe("dashboard security headers", () => {
+	// A string assertion about headers, not proof the page renders under them —
+	// that was verified by loading the real page in Chromium with this exact
+	// policy and observing zero violations. This test exists so the header
+	// cannot be silently dropped later.
+	it("serves the dashboard with a CSP that blocks exfiltration", async () => {
+		const { DashboardHandler } = await import("../src/dashboard/handler");
+		const res = await DashboardHandler.fetch(
+			new Request("https://example.com/dashboard", { headers: { Cookie: await sessionFor("dannbleeker") } }),
+			ENV as unknown as Parameters<typeof DashboardHandler.fetch>[1],
+		);
+		const csp = res.headers.get("Content-Security-Policy") ?? "";
+		expect(res.status).toBe(200);
+		// The two directives that do the work: no outbound fetch/XHR to another
+		// origin, and no remote image beacon.
+		expect(csp).toContain("connect-src 'self'");
+		expect(csp).toContain("img-src 'self' data:");
+		expect(csp).toContain("default-src 'none'");
+		expect(csp).toContain("frame-ancestors 'none'");
+		// X-Frame-Options stays: old Safari honours only that.
+		expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+	});
+});

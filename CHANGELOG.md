@@ -4,6 +4,53 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.3] — 2026-08-04
+
+Dashboard fixes from the bug hunt: one stored XSS, one data loss, plus two
+layers of defence in depth.
+
+### Security
+- **Stored XSS: Trello list names are now escaped in the health-bar WIP row.**
+  It was the only unescaped server-derived string on the page — every other
+  name already went through `esc()`, including the cards-per-list pill and the
+  column head, and the email digest escapes it too. On a shared board anyone
+  who can rename a list could get script execution in the authenticated
+  session, with the whole `/api/*` surface available to it. The WIP counts
+  stay unescaped deliberately: `esc()` is string-only and `esc(0)` returns
+  `""`, so escaping them would blank the numbers — pinned by test so an
+  over-eager follow-up fails loudly.
+- **Trello ids interpolated into card attributes are escaped too.** Not
+  exploitable today (ids are 24-char hex), but these attributes feed the
+  interactive round-trip, and the invariant "every server-derived string
+  reaches the DOM through `esc()`" is cheaper to hold than to re-audit.
+- **The dashboard route sends a Content-Security-Policy.** Honest about what
+  it buys: `'unsafe-inline'` is mandatory, so an injected `<img onerror>` still
+  runs. What it removes is the payload's exit — `connect-src 'self'` blocks
+  fetch/XHR/beacon to an attacker origin, `img-src 'self' data:` blocks the
+  classic image-beacon exfil, `default-src 'none'` blocks pulling a remote
+  script. Verified by loading the real page in Chromium under this exact
+  policy: renders correctly, `/api/*` calls succeed, zero violations.
+
+### Fixed
+- **A quick capture typed while the offline queue is syncing is no longer
+  lost.** `flushCaptureQueue()` snapshotted the queue, POSTed, then wrote a
+  mutated copy of that stale snapshot back — clobbering anything `onCapture()`
+  had appended to storage meanwhile, after the toast had already said it was
+  saved. It now reads storage fresh after each send and removes only the item
+  it sent. The loop still bounds on the snapshot: `queueWrite()` swallows a
+  storage failure, so a live-read loop could resend forever.
+
+### Added
+- 14 tests across `test/dashboard-labels.test.ts` and
+  `test/dashboard-api.test.ts`. Each was verified to FAIL against the pre-fix
+  tree — the XSS test on a raw `<img src=x` in the rendered health bar, the
+  capture test on an empty queue where the mid-flush capture should be, the
+  CSP test on a missing header.
+- `vitest.config.ts` gains `assetsInclude: ["**/*.html"]`, which makes
+  `src/dashboard/handler.ts` importable in the suite for the first time — its
+  `page.html` Text-module import previously put every route on that handler
+  out of reach.
+
 ## [1.21.2] — 2026-08-04
 
 Security. Both halves of a hole opened by v1.21.0, found by an adversarially

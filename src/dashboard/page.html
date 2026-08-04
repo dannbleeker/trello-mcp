@@ -632,10 +632,15 @@ function render(){
   const totalNext = ctxCounts.reduce((s,x)=>s+x.n, 0);
 
   // ---- Health bar ----
+  // A list name is board DATA, not page data: renamed in Trello it arrives here
+  // verbatim, so it goes through esc() like every other server string on this
+  // page (the digest replica already does — src/digest/render.ts). This row was
+  // the one place that didn't. The counts must NOT be escaped: esc() is
+  // string-only and esc(0) returns "". v1.21.3
   let wipHtml = ctxCounts.map(({l,n}) => {
-    if (l.wip == null) return '<span class="wip none"><span class="dot"></span><b>'+l.name+'</b> '+n+'</span>';
+    if (l.wip == null) return '<span class="wip none"><span class="dot"></span><b>'+esc(l.name)+'</b> '+n+'</span>';
     const over = n > l.wip;
-    return '<span class="wip '+(over?'over':'ok')+'"><span class="dot"></span><b>'+l.name+'</b> '+n+'/'+l.wip+(over?' ⚠':'')+'</span>';
+    return '<span class="wip '+(over?'over':'ok')+'"><span class="dot"></span><b>'+esc(l.name)+'</b> '+n+'/'+l.wip+(over?' ⚠':'')+'</span>';
   }).join("");
 
   let health = '<div class="health"><div class="health-top">'

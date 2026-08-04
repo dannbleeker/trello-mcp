@@ -36,6 +36,8 @@ type Page = {
 	};
 	ageBadge: (c: { dateLastActivity?: string }, kind: string) => string;
 	activityMs: (c: { dateLastActivity?: string }) => number;
+	render: () => void;
+	contentHtml: () => string;
 	queueRead: () => string[];
 	queueWrite: (q: string[]) => void;
 	flushCaptureQueue: () => Promise<number>;
@@ -54,8 +56,17 @@ function loadPageScript(): Page {
 	// capture input is a single shared node so a test can set its value and
 	// call the page's real onCapture().
 	const capInput = { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
+	// #content is shared (not a fresh object per lookup) so a test can call the
+	// page's real render() and then read what it actually wrote — which is the
+	// only way to assert on escaping in the rendered output rather than on a
+	// re-implementation of it.
+	const content = { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
 	const el = (id?: string) =>
-		id === "capInput" ? capInput : { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
+		id === "capInput"
+			? capInput
+			: id === "content"
+				? content
+				: { innerHTML: "", value: "", disabled: false, onclick: null, classList: { add() {}, remove() {} }, style: {} };
 	const document = { addEventListener() {}, getElementById: el, querySelectorAll: () => [], activeElement: null };
 	const window = { addEventListener() {} };
 	const store = new Map<string, string>();
@@ -90,6 +101,7 @@ function loadPageScript(): Page {
 			labelBadges: labelBadges, labelHue: labelHue, passesFilter: passesFilter,
 			isPersonal: isPersonal, setFilter: setFilter, FILTER_LABELS: FILTER_LABELS,
 			configureFromLists: configureFromLists, ageBadge: ageBadge, activityMs: activityMs,
+			render: render,
 			queueRead: queueRead, queueWrite: queueWrite,
 			flushCaptureQueue: flushCaptureQueue, onCapture: onCapture,
 			// CTX and friends are reassigned by configureFromLists, so hand back a
@@ -103,12 +115,13 @@ function loadPageScript(): Page {
 		setCaptureInput: (v: string) => { capInput.value = v; },
 		captureCalls: () => captureCalls.slice(),
 		failCaptures: (v: boolean) => { fail = v; },
+		contentHtml: () => content.innerHTML,
 	});
 }
 
 const {
 	labelBadges, labelHue, passesFilter, isPersonal, setFilter, FILTER_LABELS,
-	configureFromLists, layout, ageBadge, activityMs,
+	configureFromLists, layout, ageBadge, activityMs, render, contentHtml,
 	queueRead, queueWrite, flushCaptureQueue, onCapture,
 	setOnline, setCaptureInput, captureCalls, failCaptures,
 } = loadPageScript();
@@ -487,5 +500,48 @@ describe("filter chip drift guard", () => {
 			expect(shown).toHaveLength(1); // selective, not a pass-through
 		}
 		setFilter("all");
+	});
+});
+
+describe("escaping of server-derived strings in the rendered page", () => {
+	// The health-bar WIP row interpolated Trello list names into innerHTML raw
+	// (v1.21.0 and earlier) — the only unescaped server string on the page. A
+	// board member renaming a list to an <img onerror=...> payload got script
+	// execution in Dann's authenticated session, with access to /api/*.
+	//
+	// These drive the page's real render() and read the real #content, so they
+	// pin the rendered bytes rather than a re-implementation of the escaping.
+	const HOSTILE = '@Ops<img src=x onerror=alert(1)> (WIP limit 3)';
+
+	function renderWithHostileList(): string {
+		configureFromLists([
+			{ closed: false, id: "l-hostile", name: HOSTILE },
+			{ closed: false, id: "l-inbox", name: "Inbox" },
+			{ closed: false, id: "l-waiting", name: "Waiting for..." },
+		]);
+		render();
+		return contentHtml();
+	}
+
+	it("never emits a raw tag from a list name", () => {
+		const html = renderWithHostileList();
+		// Fails on pre-v1.21.3 code: the WIP row emitted this verbatim.
+		expect(html).not.toContain("<img src=x");
+		expect(html).not.toContain("onerror=alert(1)>");
+	});
+
+	it("escapes the list name in every place it is rendered", () => {
+		const html = renderWithHostileList();
+		// WIP row, cards-per-list overview pill, and the column head all render
+		// the same name — each must be escaped, not just the one that was fixed.
+		const escaped = html.match(/&lt;img src=x/g) ?? [];
+		expect(escaped.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("leaves the numeric WIP count unescaped", () => {
+		// esc() is string-only — esc(0) returns "" — so the counts must stay raw.
+		// This is what stops an over-eager "escape everything" fix.
+		const html = renderWithHostileList();
+		expect(html).toMatch(/<\/b> \d+\/3/);
 	});
 });

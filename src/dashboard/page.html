@@ -571,8 +571,8 @@ function descSnippet(c){
 
 function moveSelect(c){
   let opts = '<option value="">Move…</option>';
-  MOVE_TARGETS.forEach(t => { if (t.id !== c.idList) opts += '<option value="'+t.id+'">'+esc(t.name)+'</option>'; });
-  return '<select class="mv" data-card="'+c.id+'" onchange="onMove(this)">'+opts+'</select>';
+  MOVE_TARGETS.forEach(t => { if (t.id !== c.idList) opts += '<option value="'+esc(t.id)+'">'+esc(t.name)+'</option>'; });
+  return '<select class="mv" data-card="'+esc(c.id)+'" onchange="onMove(this)">'+opts+'</select>';
 }
 
 function cardHtml(c, opts){
@@ -582,11 +582,11 @@ function cardHtml(c, opts){
   let actions = "";
   if (!opts.noActions){
     actions = '<div class="card-actions">'
-      + '<button class="btn done" data-card="'+c.id+'" onclick="onDone(this)">✓ Done</button>'
+      + '<button class="btn done" data-card="'+esc(c.id)+'" onclick="onDone(this)">✓ Done</button>'
       + moveSelect(c)
       + '</div>';
   }
-  return '<div class="card" data-card="'+c.id+'">'
+  return '<div class="card" data-card="'+esc(c.id)+'">'
     + '<div class="ttl">'+link+'</div>'
     + descSnippet(c)
     + badgesHtml(c, opts)
@@ -671,7 +671,7 @@ function render(){
           + '<div class="meta'+(s.overdueWake?' overdue':'')+'">'
           + (s.overdueWake ? 'overdue wake — was due ' : 'wakes ') + esc(fmtWake(s.wakeUp))
           + ' · → '+esc(home)+'</div></div>'
-          + '<button class="btn done" data-card="'+s.id+'" onclick="onWake(this)">Wake now</button></div>';
+          + '<button class="btn done" data-card="'+esc(s.id)+'" onclick="onWake(this)">Wake now</button></div>';
       }).join("");
     }
     snoozePanel = '<div class="col" style="margin-bottom:16px;"><div class="col-head"><span class="name">Snoozed cards</span>'

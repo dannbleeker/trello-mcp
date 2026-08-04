@@ -23,7 +23,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `list_archived_cards` | Closed (archived) cards on a board — same CardSummary shape as list_cards |
 | `get_card` | Full details for one card |
 | `search_cards` | Fuzzy name search, scoped by `board` or `workspace` (or unscoped); includes `desc` |
-| `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, multi-board **and multi-workspace** scope |
+| `search_cards_advanced` | `/search` with operator support: `due:overdue`, `label:red`, `has:attachments`, `is:archived`, multi-board **and multi-workspace** scope. Archived hits are returned (each row carries `closed`) |
 | `list_checklist_items` | Checklists + items on a card |
 | `list_attachments` | Attachments on a card (id, name, url, date, mimeType) |
 | `get_attachment` | Fetch a single attachment with richer fields (previews[], edgeColor, pos) than list_attachments returns |

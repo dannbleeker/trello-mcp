@@ -94,3 +94,50 @@ describe("rename_custom_field_option sees archived cards", () => {
 		expect(client.deleteCustomFieldOption).not.toHaveBeenCalled();
 	});
 });
+
+describe("archived lists are resolvable by name", () => {
+	it("caches every list, so listCandidates can widen to archived ones", async () => {
+		// Trello returns open lists only by default, so an archived list could
+		// never be matched by NAME — which made archive_list({closed:false})
+		// impossible for the one input a human actually has, and list_lists
+		// could not show it either.
+		const { boardLists } = await import("../src/trello/resolve");
+		const listListsOnBoard = vi.fn(async () => [
+			{ id: "l1", name: "Backlog", closed: false, idBoard: BOARD, pos: 1 },
+			{ id: "l2", name: "Old Sprint", closed: true, idBoard: BOARD, pos: 2 },
+		]);
+		const client = { listListsOnBoard } as unknown as TrelloClient;
+		const lists = await boardLists(client, BOARD);
+		expect(listListsOnBoard).toHaveBeenCalledWith(BOARD, { filter: "all" });
+		expect(lists.map((l) => l.name)).toContain("Old Sprint");
+	});
+});
+
+describe("search does not throw away its own quota", () => {
+	it("search_cards scopes to open cards so archived hits do not eat cards_limit", async () => {
+		// Trello applies cards_limit BEFORE we filter, and archived cards
+		// dominate the ranking on a long-lived board — a bare query with
+		// cards_limit 20 came back 19 archived and 1 open on this account.
+		const { TrelloClient: RealClient } = await import("../src/trello/client");
+		const client = new RealClient("k", "t");
+		const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ cards: [] }), { status: 200, headers: { "Content-Type": "application/json" } }),
+		);
+		await client.searchCards("design review");
+		const url = new URL(spy.mock.calls[0][0] as string);
+		spy.mockRestore();
+		expect(url.searchParams.get("query")).toBe("design review is:open");
+	});
+
+	it("leaves an explicit is:archived query alone", async () => {
+		const { TrelloClient: RealClient } = await import("../src/trello/client");
+		const client = new RealClient("k", "t");
+		const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ cards: [] }), { status: 200, headers: { "Content-Type": "application/json" } }),
+		);
+		await client.searchCards("design review is:archived");
+		const url = new URL(spy.mock.calls[0][0] as string);
+		spy.mockRestore();
+		expect(url.searchParams.get("query")).toBe("design review is:archived");
+	});
+});

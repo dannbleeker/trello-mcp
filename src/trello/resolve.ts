@@ -145,7 +145,12 @@ export async function boardLists(
 		const hit = fresh(cache.lists.get(boardId), now);
 		if (hit) return hit;
 	}
-	const lists = await client.listListsOnBoard(boardId);
+	// filter "all" so the cache holds archived lists too. listCandidates() below
+	// filters them out unless the caller explicitly asked for archived ones, so
+	// this widens what CAN be resolved without widening what is resolved by
+	// default. Fetching open-only here is what made unarchiving by name
+	// impossible. v1.22.0.
+	const lists = await client.listListsOnBoard(boardId, { filter: "all" });
 	cache.lists.set(boardId, { at: now, value: lists });
 	return lists;
 }

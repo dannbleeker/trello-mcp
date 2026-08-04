@@ -635,7 +635,7 @@ export function registerTrelloTools(
 
 	server.tool(
 		"search_cards_advanced",
-		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`, multi-workspace scope via `workspaces`; tunable `limit` up to 1000.",
+		"Trello /search with operator support inside the query string: `due:day`, `due:overdue`, `due:week`, `label:red`, `list:\"Inbox\"`, `has:attachments`, `description:\"foo\"`, `is:archived`. Multi-board scope via `boards`, multi-workspace scope via `workspaces`; tunable `limit` up to 1000. Archived cards ARE returned when the query asks for them (each row carries `closed`); `truncated` flags a result set cut at 200.",
 		{
 			query: z.string().min(1).describe("Search expression. Trello operators supported."),
 			boards: z

@@ -1020,7 +1020,7 @@ export async function search_cards_advanced(
 		limit?: number;
 		customFields?: boolean;
 	},
-): Promise<{ query: string; cards: CardSummaryWithFields[] }> {
+): Promise<{ query: string; truncated: boolean; cards: (CardSummaryWithFields & { closed: boolean })[] }> {
 	const boardIds = input.boards
 		? await Promise.all(input.boards.map((b) => resolveBoardRef(client, b)))
 		: undefined;
@@ -1034,16 +1034,23 @@ export async function search_cards_advanced(
 		boardIds,
 		orgIds,
 		cardsLimit: input.limit,
+		cardCustomFieldItems: input.customFields,
 	});
-	const hits = results.filter((c) => !c.closed).slice(0, MAX_RESULTS);
+	// Archived hits are KEPT. This tool advertises Trello's `is:archived`
+	// operator, and until v1.22.0 it then filtered every archived card out — so
+	// that documented search could only ever return nothing. `closed` is
+	// surfaced per row instead, so a mixed result set stays readable.
+	const hits = results.slice(0, MAX_RESULTS);
 	// NOTE: `customFields` annotates the RESULTS; it does not let you filter on
 	// custom-field values. Trello's search syntax has no operator for them, so
-	// filtering has to happen on the returned rows.
+	// filtering has to happen on the returned rows. Since v1.22.0 the values
+	// ride along on the search response itself — no extra board scans.
 	return {
 		query: input.query,
+		truncated: results.length > MAX_RESULTS,
 		cards: input.customFields
-			? await attachCustomFields(client, hits)
-			: hits.map(summariseCard),
+			? (await attachCustomFields(client, hits)).map((c, i) => ({ ...c, closed: hits[i].closed }))
+			: hits.map((c) => ({ ...summariseCard(c), closed: c.closed })),
 	};
 }
 

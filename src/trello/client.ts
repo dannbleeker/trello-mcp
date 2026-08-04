@@ -691,10 +691,25 @@ export class TrelloClient {
 
 	// ---- Lists ----
 
-	async listListsOnBoard(boardId: string): Promise<TrelloList[]> {
-		const data = await this.request("GET", `/boards/${boardId}/lists`, {
+	/**
+	 * `filter` is OPT-IN. Trello returns open lists only by default, so an
+	 * archived list could never be resolved by NAME — which made
+	 * archive_list({ closed: false }) impossible for the one input a human
+	 * actually has, and list_lists could not show it either. Only the resolver's
+	 * cache (resolve.ts boardLists) passes "all"; listCandidates then filters by
+	 * `closed` exactly as before unless the caller asked for archived ones, so
+	 * default resolution is unchanged and an archived list does not silently
+	 * become a writable target. v1.22.0.
+	 */
+	async listListsOnBoard(
+		boardId: string,
+		opts: { filter?: "open" | "closed" | "all" } = {},
+	): Promise<TrelloList[]> {
+		const params: Record<string, string | number | boolean | undefined> = {
 			fields: "name,idBoard,closed,pos,subscribed",
-		});
+		};
+		if (opts.filter) params.filter = opts.filter;
+		const data = await this.request("GET", `/boards/${boardId}/lists`, params);
 		return data as TrelloList[];
 	}
 
@@ -840,8 +855,15 @@ export class TrelloClient {
 	}
 
 	async searchCards(query: string, boardId?: string, orgId?: string): Promise<TrelloCard[]> {
+		// `is:open` is appended unless the caller already constrained it. Trello
+		// applies cards_limit BEFORE we filter, and archived cards dominate the
+		// ranking on a long-lived board — measured on this account, a bare query
+		// with cards_limit 20 came back 19 archived and 1 open. Without this the
+		// tool discarded most of its own quota and returned a handful of rows.
+		// The observable contract is unchanged: open cards only, same shape.
+		const scoped = /\bis:(archived|open)\b/.test(query) ? query : `${query} is:open`;
 		const params: Record<string, string | number | boolean | undefined> = {
-			query,
+			query: scoped,
 			modelTypes: "cards",
 			card_fields: CARD_FIELDS,
 			cards_limit: 50,
@@ -867,6 +889,7 @@ export class TrelloClient {
 		boardIds?: string[];
 		orgIds?: string[];
 		cardsLimit?: number;
+		cardCustomFieldItems?: boolean;
 	}): Promise<TrelloCard[]> {
 		const params: Record<string, string | number | boolean | undefined> = {
 			query: input.query,
@@ -875,6 +898,10 @@ export class TrelloClient {
 			cards_limit: Math.min(input.cardsLimit ?? 50, 1000),
 			partial: true,
 		};
+		// /search DOES return custom-field values inline, contrary to the note
+		// that used to sit in search_cards_advanced — verified against the live
+		// API. That turns per-board scans into zero extra requests. v1.22.0.
+		if (input.cardCustomFieldItems) params.card_customFieldItems = true;
 		if (input.boardIds && input.boardIds.length) params.idBoards = input.boardIds.join(",");
 		if (input.orgIds && input.orgIds.length) params.idOrganizations = input.orgIds.join(",");
 		const data = await this.request("GET", "/search", params);

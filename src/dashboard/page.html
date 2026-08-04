@@ -146,6 +146,17 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 .ov-panel-title.click { cursor: pointer; user-select: none; }
 .ov-panel-title.click:hover { color: #1c2024; }
 .rev-sub { font-size: 12px; font-weight: 600; color: #4b5563; margin: 12px 0 8px; }
+/* Usage panel (v1.21.0). A bar chart made of divs — the counts span orders of
+   magnitude, so the bar is what makes the long tail readable at a glance. */
+.usg-row { display: grid; grid-template-columns: minmax(0,1fr) 46px; gap: 8px; align-items: center; padding: 3px 0; }
+.usg-bar { position: relative; height: 18px; border-radius: 4px; background: #f1f3f5; overflow: hidden; }
+.usg-bar i { position: absolute; inset: 0 auto 0 0; background: #dbe3ea; }
+.usg-bar.err i { background: #f7d4d0; }
+.usg-bar span { position: relative; display: block; padding: 2px 6px; font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.usg-n { font-size: 11px; text-align: right; color: #4b5563; font-variant-numeric: tabular-nums; }
+.usg-tabs { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+.usg-tab { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid #e3e6ea; background: #fff; cursor: pointer; color: #4b5563; }
+.usg-tab.on { background: #1c2024; color: #fff; border-color: #1c2024; }
 /* Collapsed, the panel is just its own title — don't reserve body space. */
 .ov-panel.collapsed { padding-bottom: 12px; }
 .ov-panel.collapsed .ov-panel-title { margin-bottom: 0; }
@@ -251,6 +262,12 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
   .badge.age.buried { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
   .ov-panel-title.click:hover { color: #e5e7eb; }
   .rev-sub { color: #d1d5db; }
+  .usg-bar { background: #24272b; }
+  .usg-bar i { background: #33383f; }
+  .usg-bar.err i { background: #4a201c; }
+  .usg-n { color: #9aa3ad; }
+  .usg-tab { background: #1e2125; border-color: #2e3237; color: #9aa3ad; }
+  .usg-tab.on { background: #e5e7eb; color: #15171a; border-color: #e5e7eb; }
   .cap-queued { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
   #toast { background: #e5e7eb; color: #15171a; }
   .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
@@ -337,6 +354,15 @@ let REVIEW = null;         // weekly_review_pack payload; null = not loaded
 // and stays a one-line strip the rest of the week — available when Dann is
 // travelling and reviews on a different day, invisible when he isn't.
 let REVIEW_OPEN = new Date().getDay() === 5;
+
+// ---- Usage panel state (v1.21.0) ----
+// Which of the MCP tools Claude actually reaches for, and where the Trello API
+// budget goes. Collapsed by default and lazy-loaded: this is a diagnostic, not
+// part of the daily board, and /api/usage is a D1 read the board doesn't need.
+let USAGE = null;
+let USAGE_VIEW = "tools";
+let USAGE_DAYS = 30;
+let USAGE_OPEN = (function(){ try { return localStorage.getItem("dann_dash_usage_open") === "1"; } catch(e){ return false; } })();
 const DAY_NAME = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
 
 // Horizon aliases as weekly_review_pack returns them → their board names. An
@@ -679,6 +705,50 @@ function render(){
   }
   reviewPanel += '</div>';
 
+  // ---- Usage panel ----
+  // Bars are scaled to the busiest row, not to the total: the distribution is
+  // heavily skewed (a handful of tools dominate) and the point of the panel is
+  // to make the long tail — the tools that never get called — legible.
+  let usagePanel = '<div class="ov-panel'+(USAGE_OPEN?'':' collapsed')+'"><div class="ov-panel-title click" onclick="toggleUsage()">'
+    + 'Usage <small>' + (USAGE_OPEN ? 'per tool &amp; per Trello endpoint ▴' : 'which tools actually get used ▾') + '</small></div>';
+  if (USAGE_OPEN){
+    if (USAGE === null){
+      usagePanel += '<div class="empty">loading…</div>';
+    } else if (USAGE.error){
+      usagePanel += '<div class="empty">'+esc(USAGE.error)+'</div>';
+    } else if (!USAGE.enabled){
+      usagePanel += '<div class="empty">usage tracking isn’t bound yet — deploy with the USAGE_DB binding to start collecting</div>';
+    } else {
+      const t = USAGE.totals || {};
+      usagePanel += '<div class="wip-row">'
+        + '<span class="wip none"><b>Tool calls</b> '+(t.toolCalls||0)+'</span>'
+        + '<span class="wip none"><b>Trello requests</b> '+(t.httpCalls||0)+'</span>'
+        + '<span class="wip none"><b>Distinct tools</b> '+(t.distinctTools||0)+'</span>'
+        + '<span class="wip '+((t.errors||0)?'over':'ok')+'"><b>Errors</b> '+(t.errors||0)+'</span>'
+        + '<span class="wip '+((t.rateLimited||0)?'over':'ok')+'"><b>429s</b> '+(t.rateLimited||0)+'</span>'
+        + '</div>';
+      usagePanel += '<div class="usg-tabs">'
+        + '<button class="usg-tab'+(USAGE_VIEW==="tools"?" on":"")+'" onclick="setUsageView(\'tools\')">Tools</button>'
+        + '<button class="usg-tab'+(USAGE_VIEW==="endpoints"?" on":"")+'" onclick="setUsageView(\'endpoints\')">Trello endpoints</button>'
+        + [7,30,90].map(function(d){ return '<button class="usg-tab'+(USAGE_DAYS===d?" on":"")+'" onclick="setUsageDays('+d+')">'+d+'d</button>'; }).join("")
+        + '</div>';
+      const rows = (USAGE_VIEW === "tools" ? USAGE.tools : USAGE.endpoints) || [];
+      const max = rows.reduce(function(m,r){ return Math.max(m, r.calls||0); }, 0) || 1;
+      usagePanel += rows.length
+        ? rows.map(function(r){
+            const pct = Math.max(2, Math.round((r.calls / max) * 100));
+            const errs = r.errors || 0;
+            const tip = r.name+' — '+r.calls+' calls, '+errs+' errors, avg '+(r.avgMs||0)+'ms';
+            return '<div class="usg-row" title="'+esc(tip)+'">'
+              + '<div class="usg-bar'+(errs && errs >= r.calls / 2 ? ' err' : '')+'"><i style="width:'+pct+'%"></i>'
+              + '<span>'+esc(r.name)+(errs ? ' · '+errs+' err' : '')+'</span></div>'
+              + '<div class="usg-n">'+r.calls+'</div></div>';
+          }).join("")
+        : '<div class="empty">nothing recorded in this window yet</div>';
+    }
+  }
+  usagePanel += '</div>';
+
   // ---- Quick capture ----
   const queued = queueRead().length;
   let capture = '<div class="capture">'
@@ -735,6 +805,7 @@ function render(){
     + capture
     + overview
     + reviewPanel
+    + usagePanel
     + '<div class="zone-title">Next actions <small>by context · filter to focus</small></div>'
     + '<div class="filters">'+chips+'</div>'
     + '<div class="cols">'+ctxCols+'</div>'
@@ -768,6 +839,28 @@ function toggleReview(){
   REVIEW_OPEN = !REVIEW_OPEN;
   render();
   if (REVIEW_OPEN && REVIEW === null) loadReview();
+}
+
+function toggleUsage(){
+  USAGE_OPEN = !USAGE_OPEN;
+  try { localStorage.setItem("dann_dash_usage_open", USAGE_OPEN ? "1" : "0"); } catch(e){}
+  render();
+  if (USAGE_OPEN && USAGE === null) loadUsage();
+}
+
+function setUsageView(v){ USAGE_VIEW = v; render(); }
+
+function setUsageDays(d){ USAGE_DAYS = d; USAGE = null; render(); loadUsage(); }
+
+// Same lazy contract as loadReview(): only runs when the panel is open, and a
+// failure leaves a message rather than zeros that read as "nothing happened".
+async function loadUsage(){
+  try {
+    USAGE = await api("/api/usage?days=" + USAGE_DAYS);
+  } catch(e){
+    USAGE = { error: e.message };
+  }
+  render();
 }
 
 // Lazy: /api/review is a second full board read, so it only runs when the panel
@@ -955,6 +1048,7 @@ async function init(){
     render();
     loadSnoozed(); // non-blocking; fills the Snoozed stat when ready
     if (REVIEW_OPEN) loadReview(); // Fridays: the panel is open, so fill it
+    if (USAGE_OPEN) loadUsage();   // only if it was left open last visit
     flushCaptureQueue().then(n => { if (n) reloadAfterFlush(n); });
   } catch(e){
     document.getElementById("content").innerHTML =

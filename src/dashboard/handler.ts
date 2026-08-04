@@ -22,6 +22,10 @@
  *              manual step documented in the README.
  *
  * Change log:
+ *   1.2.0 (2026-08-04) — /digest/preview owns a `dashboard` UsageRecorder and
+ *                        flushes it in a finally. This route sits outside the
+ *                        /api/* middleware, so it cannot inherit the
+ *                        request-scoped recorder that api.ts installs.
  *   1.1.0 (2026-07-10) — /app/callback: token-exchange/GitHub failures now return a
  *                        friendly 502 and every exit path clears the one-time state
  *                        cookie (previously an unhandled throw → bare 500 with the
@@ -36,6 +40,7 @@ import { renderDigest } from "../digest/render";
 import { TrelloClient } from "../trello/client";
 import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
 import { list_snoozed_cards } from "../trello/tools";
+import { UsageRecorder } from "../usage";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
 import { type DashboardEnv, DashboardApi } from "./api";
 import DASHBOARD_HTML from "./page.html";
@@ -171,8 +176,10 @@ app.get("/digest/preview", async (c) => {
 	// digest can be eyeballed without sending anything.
 	const denied = await requireSession(c);
 	if (denied) return denied;
+	// This route sits outside the /api/* middleware, so it owns its recorder.
+	const usage = new UsageRecorder(c.env, "dashboard");
 	try {
-		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN);
+		const client = new TrelloClient(c.env.TRELLO_KEY, c.env.TRELLO_TOKEN, usage);
 		const nowMs = Date.now();
 		const cards = await client.listCardsOnBoard(BOARD_ALIASES[DEFAULT_BOARD]);
 		let snoozed: Awaited<ReturnType<typeof list_snoozed_cards>>["snoozed"] = [];
@@ -185,6 +192,8 @@ app.get("/digest/preview", async (c) => {
 		return c.html(html, 200, { "Cache-Control": "no-store" });
 	} catch (_e) {
 		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);
+	} finally {
+		await usage.flush();
 	}
 });
 

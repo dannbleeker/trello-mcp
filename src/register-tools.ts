@@ -259,18 +259,21 @@ const CUSTOM_FIELD_COLORS = z.enum([
  * funnelled through here; it just had no idea which tool it was wrapping.
  */
 function makeGuarded(login: string, usage: UsageRecorder) {
+	// A refused call must have no persistent side effects. v1.21.0 recorded the
+	// denial like any other event, which let any GitHub account holding a session
+	// turn requests into permanent D1 rows and Analytics Engine points — and the
+	// streamable-HTTP transport dispatches a JSON-RPC ARRAY, so one POST was N
+	// rows, not one. Logged once per session instead: enough to see that someone
+	// knocked, bounded by session count rather than call count. v1.21.2.
+	let deniedLogged = false;
 	return function guarded<TIn>(name: string, fn: (input: TIn) => Promise<unknown>) {
 		return async (input: TIn) => {
-			const startedAt = Date.now();
-			// One flush per tool call drains this tool's event AND every Trello
-			// HTTP event it produced (the client shares this recorder), so a
-			// 12-request tool costs a single batched INSERT.
-			const finish = async (outcome: UsageOutcome) => {
-				usage.record({ kind: "tool", name, outcome, durationMs: Date.now() - startedAt });
-				await usage.flush();
-			};
+			// Checked FIRST, above any recording. Ordering is the fix.
 			if (!ALLOWED_LOGINS.has(login)) {
-				await finish("denied");
+				if (!deniedLogged) {
+					deniedLogged = true;
+					usage.logOnly({ kind: "tool", name, outcome: "denied", durationMs: 0 });
+				}
 				return {
 					content: [
 						{
@@ -281,6 +284,14 @@ function makeGuarded(login: string, usage: UsageRecorder) {
 					isError: true,
 				};
 			}
+			const startedAt = Date.now();
+			// One flush per tool call drains this tool's event AND every Trello
+			// HTTP event it produced (the client shares this recorder), so a
+			// 12-request tool costs a single batched INSERT.
+			const finish = async (outcome: UsageOutcome) => {
+				usage.record({ kind: "tool", name, outcome, durationMs: Date.now() - startedAt });
+				await usage.flush();
+			};
 			try {
 				const result = ok(await fn(input));
 				await finish("ok");

@@ -10,13 +10,25 @@
  *              this file is only the wiring: DO class, OAuthProvider config,
  *              and the { fetch, scheduled } export.
  *
- *              On a non-allowlisted login the server still registers tools but
- *              every handler refuses with a clear message — easier to debug
- *              than silently hiding tools, and OAuth has already completed by
- *              the time tool calls arrive so we cannot reject earlier without
- *              forking the OAuth handler.
+ *              On a non-allowlisted login the OAuth callback now refuses to mint
+ *              a token at all (src/github-handler.ts). The earlier claim here —
+ *              that OAuth had already completed by the time tool calls arrive,
+ *              so we could not reject earlier without forking the OAuth handler
+ *              — was simply wrong: /callback IS our handler, we call
+ *              completeAuthorization ourselves, and the dashboard has rejected
+ *              at that exact point since v1.12.0.
+ *
+ *              Tools are still registered for every login and still refuse per
+ *              call, for two reasons that outlive the OAuth gate: a token minted
+ *              before v1.21.2 stays valid in OAUTH_KV until it expires and must
+ *              not become a free write channel, and a clear refusal is easier to
+ *              debug than silently hidden tools.
  *
  * Change log:
+ *   1.21.2 (2026-08-04) — Security. See the allowlist note above: the OAuth
+ *                         callback now 403s a non-allowlisted login instead of
+ *                         issuing it a token, and the per-call refusal no longer
+ *                         writes anything persistent (src/register-tools.ts).
  *   1.21.0 (2026-08-04) — init() builds one UsageRecorder per MCP session and
  *                         hands it to BOTH the Trello client and the tool
  *                         registrations. That sharing is the point: a single

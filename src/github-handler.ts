@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import { Octokit } from "octokit";
+import { ALLOWED_LOGINS } from "./allowlist";
 import { DashboardHandler } from "./dashboard/handler";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "./utils";
 import {
@@ -172,6 +173,24 @@ app.get("/callback", async (c) => {
 	// Fetch the user info from GitHub
 	const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
 	const { login, name, email } = user.data;
+
+	// Gate the allowlist HERE, not only at tool-call time. Minting a token for a
+	// login that can never use it hands any GitHub account a working session —
+	// /register is open for dynamic client registration — and stores that user's
+	// GitHub access token in OAUTH_KV as a side effect. Mirrors the browser flow
+	// in src/dashboard/handler.ts, which has gated at this exact point since
+	// v1.12.0. Clearing the one-time state cookie keeps the discipline that every
+	// path out of this handler clears it. v1.21.2.
+	if (!ALLOWED_LOGINS.has(login)) {
+		const headers = new Headers({ "Content-Type": "text/plain; charset=utf-8" });
+		if (clearSessionCookie) {
+			headers.set("Set-Cookie", clearSessionCookie);
+		}
+		return new Response(
+			`Access denied. GitHub user "${login}" is not on this connector's allowlist.`,
+			{ headers, status: 403 },
+		);
+	}
 
 	// Return back to the MCP client a new token
 	const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({

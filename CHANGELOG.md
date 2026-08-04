@@ -4,6 +4,60 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.2] — 2026-08-04
+
+Security. Both halves of a hole opened by v1.21.0, found by an adversarially
+verified bug hunt over the whole repo.
+
+### Security
+- **A refused tool call no longer writes anything persistent.** v1.21.0's
+  `guarded` recorded the denial *before* rejecting it, so a refusal cost a D1
+  row and an Analytics Engine data point. That matters because the MCP OAuth
+  flow did not check the allowlist at all: any GitHub account could complete
+  sign-in, hold a session, and convert requests into permanent rows. The
+  streamable-HTTP transport dispatches a JSON-RPC **array**, so a single POST
+  carrying N calls wrote N rows — the amplification was per-message, not
+  per-request. The allowlist check now runs first, and the denial is logged
+  once per session via a new `UsageRecorder.logOnly()` (Workers Logs: 3 days,
+  free) instead of persisted (D1: forever; AE: billable volume). The refusal
+  message and response shape are byte-identical.
+- **The OAuth callback refuses a non-allowlisted login instead of minting a
+  token for it.** `src/github-handler.ts` now 403s before
+  `completeAuthorization`, mirroring what the browser flow in
+  `src/dashboard/handler.ts` has done since v1.12.0. The comment in
+  `src/index.ts` claiming we "cannot reject earlier without forking the OAuth
+  handler" was wrong — `/callback` is our handler — and has been corrected.
+  Minting a token also stored that user's GitHub access token in `OAUTH_KV` as
+  a side effect; it no longer does.
+
+  Both halves ship together on purpose: the OAuth gate stops new tokens, the
+  guard fix protects against tokens already in KV, which nothing can revoke.
+
+### Added
+- `test/tool-guard.test.ts` (7 tests). Verified to FAIL against the pre-fix
+  code — 5 refused calls wrote 5 rows and all 102 tools wrote 102 — which is
+  the vulnerability reproduced rather than argued.
+
+## [1.21.1] — 2026-08-04
+
+### Security
+- **Bumped `hono` 4.12.27 → 4.13.0** (advisory patched in >=4.12.34: ReDoS in the
+  CORS middleware via `Access-Control-Request-Headers`). This repo does not use
+  Hono's CORS middleware — `grep -rn "cors" src/` finds nothing — so the
+  affected path was never reachable here, but `hono` is the only *direct*
+  dependency on the advisory list and the bump is one line.
+
+  For the record, the rest of the Dependabot list does **not** reach the
+  deployed Worker. Grepping the actual `wrangler deploy` bundle for each
+  vulnerable package returns zero matches: `express`, `body-parser`,
+  `fast-uri`, `ip-address`, `js-yaml`, `undici`, `sharp`,
+  `@hono/node-server`. They arrive via `@modelcontextprotocol/sdk`'s
+  Node/Express transports and `agents` → `json-schema-to-typescript`; this
+  Worker runs `McpAgent` on Workers, so those paths are tree-shaken out.
+  `undici` and `sharp` are dev-only (wrangler/miniflare). Severity there is
+  scored against the package, not against whether this Worker executes it —
+  they clear when the SDK and `agents` update upstream.
+
 ## [1.21.0] — 2026-08-04
 
 Usage tracking. The Cloudflare request count says the Worker was busy; it can't

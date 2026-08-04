@@ -202,22 +202,46 @@ export class UsageRecorder {
 				doubles: [event.durationMs, event.status ?? 0, event.attempts ?? 0].slice(0, AE_MAX_DOUBLES),
 			});
 
-			// Structured, not interpolated: Workers Logs indexes JSON fields, so
-			// `evt=usage AND kind=tool` is a query rather than a text match.
-			console.log(
-				JSON.stringify({
-					evt: "usage",
-					kind: event.kind,
-					surface: this.surface,
-					name: event.name,
-					outcome: event.outcome,
-					ms: event.durationMs,
-					...(event.status !== undefined ? { status: event.status } : {}),
-					...(event.attempts !== undefined && event.attempts > 1 ? { attempts: event.attempts } : {}),
-				}),
-			);
+			this.logEvent(event);
 		} catch {
 			// Never let instrumentation break the request it is instrumenting.
+		}
+	}
+
+	/**
+	 * Structured, not interpolated: Workers Logs indexes JSON fields, so
+	 * `evt=usage AND kind=tool` is a query rather than a text match.
+	 */
+	private logEvent(event: UsageEvent): void {
+		console.log(
+			JSON.stringify({
+				evt: "usage",
+				kind: event.kind,
+				surface: this.surface,
+				name: event.name,
+				outcome: event.outcome,
+				ms: event.durationMs,
+				...(event.status !== undefined ? { status: event.status } : {}),
+				...(event.attempts !== undefined && event.attempts > 1 ? { attempts: event.attempts } : {}),
+			}),
+		);
+	}
+
+	/**
+	 * Log an event WITHOUT persisting it — no D1 row, no Analytics Engine point.
+	 *
+	 * For work whose volume an UNAUTHENTICATED caller could drive. A refused tool
+	 * call is the only case today: until v1.21.2 the denied path recorded like
+	 * any other, so any GitHub login holding a session could turn requests into
+	 * permanent rows — and the streamable-HTTP transport dispatches a JSON-RPC
+	 * array, so one POST was N rows. Workers Logs keeps 3 days and costs nothing;
+	 * a D1 row is forever and an AE point is billable volume.
+	 */
+	logOnly(event: UsageEvent): void {
+		try {
+			this.logEvent(event);
+		} catch {
+			// Same contract as record(): instrumentation never breaks the request.
 		}
 	}
 

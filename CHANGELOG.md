@@ -4,6 +4,26 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.1] — 2026-08-04
+
+### Security
+- **Bumped `hono` 4.12.27 → 4.13.0** (advisory patched in >=4.12.34: ReDoS in the
+  CORS middleware via `Access-Control-Request-Headers`). This repo does not use
+  Hono's CORS middleware — `grep -rn "cors" src/` finds nothing — so the
+  affected path was never reachable here, but `hono` is the only *direct*
+  dependency on the advisory list and the bump is one line.
+
+  For the record, the rest of the Dependabot list does **not** reach the
+  deployed Worker. Grepping the actual `wrangler deploy` bundle for each
+  vulnerable package returns zero matches: `express`, `body-parser`,
+  `fast-uri`, `ip-address`, `js-yaml`, `undici`, `sharp`,
+  `@hono/node-server`. They arrive via `@modelcontextprotocol/sdk`'s
+  Node/Express transports and `agents` → `json-schema-to-typescript`; this
+  Worker runs `McpAgent` on Workers, so those paths are tree-shaken out.
+  `undici` and `sharp` are dev-only (wrangler/miniflare). Severity there is
+  scored against the package, not against whether this Worker executes it —
+  they clear when the SDK and `agents` update upstream.
+
 ## [1.21.0] — 2026-08-04
 
 Usage tracking. The Cloudflare request count says the Worker was busy; it can't

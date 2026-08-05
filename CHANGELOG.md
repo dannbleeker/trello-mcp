@@ -4,6 +4,42 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] — 2026-08-04
+
+Dependency hygiene: **every Dependabot advisory in the tree is now cleared**,
+production and dev. `pnpm audit` reports 0 across all severities.
+
+### Security
+- **`@modelcontextprotocol/sdk` 1.29.0 → 1.30.0**, which cleared `body-parser`
+  and all three `fast-uri` advisories.
+- **`agents` 0.9.0 → 0.20.1.** This is the significant one. `agents@0.9.0`
+  pinned the MCP SDK at exactly `1.29.0`, so bumping the SDK alone produced two
+  copies in the tree and a type error (`Server` declared twice, private
+  `_serverInfo` mismatch). 0.20.1 declares the SDK as a *peer* instead, which
+  dedupes it, and it has dropped `json-schema-to-typescript` — the source of
+  the `js-yaml` advisory. `@hono/node-server` and `ip-address` went with it.
+- **`wrangler` 4.110.0 → 4.118.0**, clearing `sharp`; **`vitest` 4.1.9 →
+  4.1.10**.
+- **pnpm override: `undici` `^7.29.0`.** The last one standing, pulled in by
+  miniflare (dev-only — it never reaches the Worker). Pinned inside major 7
+  deliberately: an unbounded `>=7.29.0` resolved to 8.x, a major jump into
+  miniflare's internals for no benefit.
+
+### Notes for the next reader
+- The deployed bundle grew from 2,570 KiB to 3,487 KiB (gzip 473 → 671 KiB)
+  with the `agents` upgrade. Comfortably inside the Workers limit, but it is a
+  40% jump and worth knowing before blaming a later change for it.
+- The unit suite does not exercise `McpAgent` — it drives `registerTrelloTools`
+  through a stub server — so a runtime regression in `agents` would not be
+  caught by `pnpm test`. The check that matters for this release is a real MCP
+  tool call against the deployed Worker.
+- None of these advisories reached the deployed Worker before this release
+  either: grepping the bundle for each vulnerable package returned zero matches,
+  because they arrive via the MCP SDK's Node/Express transports and are
+  tree-shaken out. This release removes them from the dependency graph rather
+  than from the bundle, which is worth doing for signal quality — a permanently
+  red Dependabot badge trains you to ignore it.
+
 ## [1.22.0] — 2026-08-04
 
 The rest of the bug hunt. Every fix below was found by an adversarially

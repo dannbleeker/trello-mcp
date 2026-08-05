@@ -4,6 +4,33 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] — 2026-08-05
+
+### Added
+- **`pnpm verify:dashboard`** (`scripts/verify-dashboard.mjs`) — renders
+  `src/dashboard/page.html` in Chromium against stubbed `/api/*` responses and
+  the production CSP, then asserts what only a browser can answer.
+
+  The unit tests evaluate the page's script in a stub DOM, which catches logic
+  but cannot tell you whether the page *renders* — the v1.21.0 Usage panel
+  shipped without anything ever running it, and a ReferenceError there would
+  have surfaced only as a silently missing section on the live dashboard.
+
+  The load-bearing check is the XSS one. `test/dashboard-labels.test.ts`
+  asserts on the rendered HTML *string*; this asserts the browser built no
+  `<img>` node and ran no script from a Trello list renamed to a payload.
+  Verified by reverting the v1.21.3 escaping fix: the script fails with
+  `XSS: a hostile list name executed script in the page` and exits 1.
+
+  It also pins the tested CSP against the one `handler.ts` actually sends, so
+  the script cannot drift into passing on a stale policy.
+
+  Not wired into CI — it needs a browser binary, and that cost belongs to a
+  deliberate decision rather than to every PR. `playwright` is a devDependency;
+  its browser download is already suppressed by this repo's
+  `pnpm.onlyBuiltDependencies`, so `pnpm install` is unaffected. Run
+  `npx playwright install chromium` once per machine.
+
 ## [1.23.0] — 2026-08-04
 
 Dependency hygiene: **every Dependabot advisory in the tree is now cleared**,

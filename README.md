@@ -354,7 +354,7 @@ src/
     resolve.ts              — workspace / board / list reference resolution + directory cache
     guards.ts               — server-side safety guards
     tools.ts                — 102 tool implementations (testable in plain Node)
-test/                       — vitest unit tests (363; no real Trello calls)
+test/                       — vitest unit tests (407; no real Trello calls)
 migrations/                 — D1 schema for the usage_events table
 docs/                       — usage-tracking.md, snooze-v2.md
 wrangler.jsonc              — Cloudflare Workers config
@@ -368,8 +368,19 @@ tsconfig.json
 ```sh
 pnpm install
 pnpm type-check         # tsc --noEmit
+pnpm test               # vitest run (407 unit tests, no real Trello calls)
 pnpm dev                # wrangler dev → http://localhost:8788
 ```
+
+**Verifying the dashboard page.** The unit tests evaluate `page.html`'s script in a stub DOM — that catches logic, but it cannot tell you whether the page *renders*. `pnpm verify:dashboard` loads the real page in Chromium against stubbed `/api/*` responses and the production CSP, and asserts: the board renders with no page errors, no CSP violations, the Usage panel populates, same-origin API calls still succeed under `connect-src 'self'`, and — the one only a browser can answer — that a Trello list renamed to an XSS payload produces **no live DOM node and runs no script**. A string assertion cannot see that; the browser either builds the `<img>` or it doesn't.
+
+```sh
+npx playwright install chromium   # once per machine
+pnpm verify:dashboard
+pnpm verify:dashboard --theme dark --out /tmp/dash.png
+```
+
+Deliberately not in CI: it needs a browser binary, and that cost belongs to a deliberate decision rather than to every PR. Run it when `page.html` changes.
 
 ## Related
 

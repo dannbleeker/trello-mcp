@@ -11,6 +11,7 @@ import {
 	add_checklist_item,
 	assign_checklist_item_member,
 	move_checklist_item,
+	move_checklist_items,
 	reorder_checklist_item,
 	set_checklist_item_due,
 	set_checklist_item_state,
@@ -235,5 +236,50 @@ describe("item-level tools refuse an item that is not on the card", () => {
 		});
 		await set_checklist_item_state(client, { cardId: CARD, itemId: "IT1", complete: true });
 		expect(client.setChecklistItemState).toHaveBeenCalledWith(CARD, "IT1", true);
+	});
+});
+
+describe("move_checklist_items", () => {
+	const two = () =>
+		stubClient({
+			listChecklistsOnCard: vi.fn(async () => [
+				{ id: "CL-A", idCard: CARD, name: "A", checkItems: [{ id: "IT1", pos: 1 }, { id: "IT2", pos: 2 }] },
+				{ id: "CL-B", idCard: CARD, name: "B", checkItems: [] },
+			]),
+		});
+
+	it("moves each item to the target, in order, at the bottom", async () => {
+		const client = two();
+		await move_checklist_items(client, { cardId: CARD, itemIds: ["IT2", "IT1"], toChecklistId: "CL-B" });
+		expect(client.updateChecklistItem).toHaveBeenNthCalledWith(1, CARD, "IT2", { idChecklist: "CL-B", pos: "bottom" });
+		expect(client.updateChecklistItem).toHaveBeenNthCalledWith(2, CARD, "IT1", { idChecklist: "CL-B", pos: "bottom" });
+	});
+
+	it("one foreign item refuses the WHOLE batch, nothing moved", async () => {
+		const client = two();
+		await expect(
+			move_checklist_items(client, { cardId: CARD, itemIds: ["IT1", "IT-FOREIGN"], toChecklistId: "CL-B" }),
+		).rejects.toBeInstanceOf(GuardError);
+		expect(client.updateChecklistItem).not.toHaveBeenCalled();
+	});
+
+	it("refuses a foreign target, duplicates, empty and oversize input without writing", async () => {
+		const client = two();
+		const bad = [
+			{ itemIds: ["IT1"], toChecklistId: "CL-FOREIGN" },
+			{ itemIds: ["IT1", "IT1"], toChecklistId: "CL-B" },
+			{ itemIds: [], toChecklistId: "CL-B" },
+			{ itemIds: Array.from({ length: 51 }, (_, i) => `IT${i}`), toChecklistId: "CL-B" },
+		];
+		for (const b of bad) await expect(move_checklist_items(client, { cardId: CARD, ...b })).rejects.toBeInstanceOf(GuardError);
+		expect(client.updateChecklistItem).not.toHaveBeenCalled();
+	});
+
+	it("a mid-batch Trello failure reports what already moved", async () => {
+		const client = two();
+		client.updateChecklistItem.mockResolvedValueOnce({ id: "IT1" } as never).mockRejectedValueOnce(new Error("boom"));
+		await expect(
+			move_checklist_items(client, { cardId: CARD, itemIds: ["IT1", "IT2"], toChecklistId: "CL-B" }),
+		).rejects.toThrow(/Moved 1 of 2.*IT2 failed: boom.*Already moved: IT1/);
 	});
 });

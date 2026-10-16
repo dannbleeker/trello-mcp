@@ -96,11 +96,26 @@ describe("checklist flow through registered tools", () => {
 		const moved = await call("move_checklist_item", { cardId: CARD, itemId: dflt.body.item.id, toChecklistId: "CL-APPROVED" });
 		expect(moved.isError).toBeUndefined();
 		expect(moved.body.item.checklistId).toBe("CL-APPROVED");
+		expect(moved.body.item.index).toBe(2); // after "ship it"
+		expect(moved.body.item.pos).toBeUndefined();
 
 		const listed = await call("list_checklist_items", { cardId: CARD });
 		const byId = Object.fromEntries(listed.body.checklists.map((c: any) => [c.id, c.items.map((i: any) => i.name)]));
 		expect(byId).toEqual({ "CL-PROPOSED": [], "CL-APPROVED": ["ship it", "default"] });
 		expect(listed.body.checklists[1].items[0]).toMatchObject({ due: null, memberId: null });
+	});
+
+	it("moves a whole batch in one call and keeps the order", async () => {
+		const a = await call("add_checklist_item", { cardId: CARD, text: "one", checklistId: "CL-PROPOSED" });
+		const b = await call("add_checklist_item", { cardId: CARD, text: "two", checklistId: "CL-PROPOSED" });
+		const r = await call("move_checklist_items", {
+			cardId: CARD,
+			itemIds: [b.body.item.id, a.body.item.id],
+			toChecklistId: "CL-APPROVED",
+		});
+		expect(r.isError).toBeUndefined();
+		expect(r.body.moved.map((m: any) => [m.name, m.index])).toEqual([["two", 1], ["one", 2]]);
+		expect(fake.checklists[0].checkItems).toHaveLength(0);
 	});
 
 	it("refuses a checklist from another card and writes nothing", async () => {

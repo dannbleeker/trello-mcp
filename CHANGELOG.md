@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] — 2026-10-16
+
+### Added
+- **`move_checklist_items`** (`cardId`, `itemIds[]`, `toChecklistId`) moves up
+  to 50 items to one checklist in a single call, in the order given. Validates
+  everything before the first write (duplicates, items or target not on the
+  card), so a bad id moves nothing. A Trello failure part-way reports what had
+  already moved.
+
+### Changed
+- `move_checklist_item` replies with `index` (1-based place in the destination
+  checklist) instead of Trello's raw `pos`, which is a ~1.4e14 float that
+  means nothing to a caller. One extra GET. `reorder_checklist_item` still
+  returns `pos`, since its input is a raw position.
+
 ## [1.24.1] — 2026-10-16
 
 ### Fixed

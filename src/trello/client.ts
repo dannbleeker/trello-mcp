@@ -1194,7 +1194,7 @@ export class TrelloClient {
 	async listChecklistsOnCard(cardId: string): Promise<Checklist[]> {
 		const data = await this.request("GET", `/cards/${cardId}/checklists`, {
 			fields: "name,idCard",
-			checkItem_fields: "name,state,pos,idChecklist",
+			checkItem_fields: "name,state,pos,idChecklist,due,idMember",
 		});
 		return data as Checklist[];
 	}

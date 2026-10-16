@@ -207,6 +207,7 @@ import {
 	resolveList,
 } from "./constants";
 import type {
+	Checklist,
 	TrelloAction,
 	TrelloAttachment,
 	TrelloCard,
@@ -614,7 +615,19 @@ export async function search_cards(
 export async function list_checklist_items(
 	client: TrelloClient,
 	input: { cardId: string },
-): Promise<{ checklists: { id: string; name: string; items: { id: string; name: string; state: "complete" | "incomplete" }[] }[] }> {
+): Promise<{
+	checklists: {
+		id: string;
+		name: string;
+		items: {
+			id: string;
+			name: string;
+			state: "complete" | "incomplete";
+			due: string | null;
+			memberId: string | null;
+		}[];
+	}[];
+}> {
 	const checklists = await client.listChecklistsOnCard(input.cardId);
 	return {
 		checklists: checklists.map((cl) => ({
@@ -622,7 +635,13 @@ export async function list_checklist_items(
 			name: cl.name,
 			items: cl.checkItems
 				.sort((a, b) => a.pos - b.pos)
-				.map((it) => ({ id: it.id, name: it.name, state: it.state })),
+				.map((it) => ({
+					id: it.id,
+					name: it.name,
+					state: it.state,
+					due: it.due ?? null,
+					memberId: it.idMember ?? null,
+				})),
 		})),
 	};
 }
@@ -788,11 +807,13 @@ export async function add_comment(
 export async function add_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; text: string; checklistId?: string },
-): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete" } }> {
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string } }> {
 	if (input.checklistId) await assertChecklistOnCard(client, input.cardId, input.checklistId);
 	else await assertCardWritable(client, input.cardId);
 	const item = await client.addChecklistItem(input.cardId, input.text, input.checklistId);
-	return { item: { id: item.id, name: item.name, state: item.state } };
+	// checklistId in the reply shows where the item actually landed, which
+	// matters when the caller omitted it and the card has several checklists.
+	return { item: { id: item.id, name: item.name, state: item.state, checklistId: item.idChecklist } };
 }
 
 /** set_checklist_item_state — tick/untick a single checklist item. */
@@ -800,7 +821,7 @@ export async function set_checklist_item_state(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; complete: boolean },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete" } }> {
-	await assertCardWritable(client, input.cardId);
+	await assertItemOnCard(client, input.cardId, input.itemId);
 	const item = await client.setChecklistItemState(input.cardId, input.itemId, input.complete);
 	return { item: { id: item.id, name: item.name, state: item.state } };
 }
@@ -2083,7 +2104,7 @@ export async function set_checklist_item_due(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; due: string | null },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; due: string | null } }> {
-	await assertCardWritable(client, input.cardId);
+	await assertItemOnCard(client, input.cardId, input.itemId);
 	if (input.due !== null && Number.isNaN(Date.parse(input.due))) {
 		throw new GuardError(`due must be a valid ISO 8601 date or null; got "${input.due}".`);
 	}
@@ -2103,7 +2124,7 @@ export async function assign_checklist_item_member(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; member: string | null },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; memberId: string | null } }> {
-	const card = await assertCardWritable(client, input.cardId);
+	const { card } = await assertItemOnCard(client, input.cardId, input.itemId);
 	let memberId: string | null = null;
 	if (input.member !== null) {
 		const resolved = await resolveMember(client, card.idBoard, input.member);
@@ -2127,7 +2148,7 @@ export async function reorder_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; position: "top" | "bottom" | number },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; pos: number } }> {
-	await assertCardWritable(client, input.cardId);
+	await assertItemOnCard(client, input.cardId, input.itemId);
 	if (
 		input.position !== "top" &&
 		input.position !== "bottom" &&
@@ -2150,11 +2171,10 @@ export async function move_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; toChecklistId: string; position?: "top" | "bottom" | number },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string; pos: number } }> {
-	await assertChecklistOnCard(client, input.cardId, input.toChecklistId);
-	const checklists = await client.listChecklistsOnCard(input.cardId);
-	if (!checklists.some((cl) => cl.checkItems.some((it) => it.id === input.itemId))) {
+	const { checklists } = await assertItemOnCard(client, input.cardId, input.itemId);
+	if (!checklists.some((cl) => cl.id === input.toChecklistId)) {
 		throw new GuardError(
-			`Checklist item ${input.itemId} is not on card ${input.cardId}. Use list_checklist_items on the card you mean.`,
+			`Checklist ${input.toChecklistId} is not on card ${input.cardId}. Use list_checklist_items on the card you mean.`,
 		);
 	}
 	const p = input.position;
@@ -2163,7 +2183,8 @@ export async function move_checklist_item(
 	}
 	const item = await client.updateChecklistItem(input.cardId, input.itemId, {
 		idChecklist: input.toChecklistId,
-		pos: p,
+		// Explicit: Trello's placement when pos is omitted on a move is not documented.
+		pos: p ?? "bottom",
 	});
 	return {
 		item: { id: item.id, name: item.name, state: item.state, checklistId: item.idChecklist, pos: item.pos },
@@ -3778,6 +3799,30 @@ async function assertChecklistOnCard(
 				`so this would have modified a checklist somewhere else. Use list_checklist_items on the card you mean.`,
 		);
 	}
+}
+
+/**
+ * Assert that `itemId` is a check item on one of `cardId`'s checklists, then
+ * that the card is writable. Same hole as assertChecklistOnCard, one level
+ * down: the item-level tools take a cardId AND an itemId, but guarding only
+ * the cardId lets a caller name a harmless card and touch an item elsewhere.
+ * Returns the card and its checklists so a caller needing either (move, assign)
+ * does not fetch twice. Costs one extra GET.
+ */
+async function assertItemOnCard(
+	client: TrelloClient,
+	cardId: string,
+	itemId: string,
+): Promise<{ card: TrelloCard; checklists: Checklist[] }> {
+	const card = await assertCardWritable(client, cardId);
+	const checklists = await client.listChecklistsOnCard(cardId);
+	if (!checklists.some((cl) => cl.checkItems.some((it) => it.id === itemId))) {
+		throw new GuardError(
+			`Checklist item ${itemId} is not on card ${cardId}. Trello's check-item endpoints ignore the card, ` +
+				`so this would have modified an item somewhere else. Use list_checklist_items on the card you mean.`,
+		);
+	}
+	return { card, checklists };
 }
 
 /**

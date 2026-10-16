@@ -7,7 +7,18 @@
 // retries.
 
 import { describe, expect, it, vi } from "vitest";
-import { add_checklist_item, move_checklist_item, convert_checklist_item_to_card, delete_checklist, rename_checklist, remove_checklist_item } from "../src/trello/tools";
+import {
+	add_checklist_item,
+	assign_checklist_item_member,
+	move_checklist_item,
+	reorder_checklist_item,
+	set_checklist_item_due,
+	set_checklist_item_state,
+	convert_checklist_item_to_card,
+	delete_checklist,
+	rename_checklist,
+	remove_checklist_item,
+} from "../src/trello/tools";
 import type { TrelloClient } from "../src/trello/client";
 import { GuardError } from "../src/trello/guards";
 import { LIST_ALIASES } from "../src/trello/constants";
@@ -49,6 +60,7 @@ function stubClient(over: Record<string, unknown> = {}) {
 		renameChecklist: vi.fn(async (id: string, name: string) => ({ id, name })),
 		removeChecklistItem: vi.fn(async () => undefined),
 		addChecklistItem: vi.fn(async () => ({ id: "IT1", name: "x", state: "incomplete" })),
+		setChecklistItemState: vi.fn(async () => ({ id: "IT1", name: "x", state: "complete" })),
 		updateChecklistItem: vi.fn(async () => ({ id: "IT1", name: "x", state: "incomplete", idChecklist: "CL-OWNED", pos: 1 })),
 		listListsOnBoard: vi.fn(async () => [{ id: COMPUTER, name: "@Computer", closed: false }]),
 		...over,
@@ -189,12 +201,39 @@ describe("add_checklist_item / move_checklist_item", () => {
 		expect(client.updateChecklistItem).not.toHaveBeenCalled();
 	});
 
-	it("move: sends idChecklist for an owned item and target", async () => {
+	it("move: sends idChecklist, defaulting position to bottom", async () => {
 		const client = stubClient({
 			listChecklistsOnCard: vi.fn(async () => [{ id: "CL-OWNED", idCard: CARD, name: "Steps", checkItems: [{ id: "IT1" }] }]),
 		});
 		const r = await move_checklist_item(client, { cardId: CARD, itemId: "IT1", toChecklistId: "CL-OWNED" });
-		expect(client.updateChecklistItem).toHaveBeenCalledWith(CARD, "IT1", { idChecklist: "CL-OWNED", pos: undefined });
+		expect(client.updateChecklistItem).toHaveBeenCalledWith(CARD, "IT1", { idChecklist: "CL-OWNED", pos: "bottom" });
 		expect(r.item.checklistId).toBe("CL-OWNED");
+	});
+});
+
+describe("item-level tools refuse an item that is not on the card", () => {
+	// The card is writable and real; only the itemId is foreign. Without the
+	// guard each of these would PUT /cards/{card}/checkItem/{foreign item}.
+	const cases: [string, (c: ReturnType<typeof stubClient>) => Promise<unknown>][] = [
+		["set_checklist_item_state", (c) => set_checklist_item_state(c, { cardId: CARD, itemId: "IT-FOREIGN", complete: true })],
+		["set_checklist_item_due", (c) => set_checklist_item_due(c, { cardId: CARD, itemId: "IT-FOREIGN", due: null })],
+		["assign_checklist_item_member", (c) => assign_checklist_item_member(c, { cardId: CARD, itemId: "IT-FOREIGN", member: null })],
+		["reorder_checklist_item", (c) => reorder_checklist_item(c, { cardId: CARD, itemId: "IT-FOREIGN", position: "top" })],
+	];
+	for (const [name, call] of cases) {
+		it(`${name}: GuardError, nothing written`, async () => {
+			const client = stubClient();
+			await expect(call(client)).rejects.toBeInstanceOf(GuardError);
+			expect(client.updateChecklistItem).not.toHaveBeenCalled();
+			expect(client.setChecklistItemState).not.toHaveBeenCalled();
+		});
+	}
+
+	it("an owned item still passes", async () => {
+		const client = stubClient({
+			listChecklistsOnCard: vi.fn(async () => [{ id: "CL-OWNED", idCard: CARD, name: "Steps", checkItems: [{ id: "IT1" }] }]),
+		});
+		await set_checklist_item_state(client, { cardId: CARD, itemId: "IT1", complete: true });
+		expect(client.setChecklistItemState).toHaveBeenCalledWith(CARD, "IT1", true);
 	});
 });

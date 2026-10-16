@@ -2170,7 +2170,9 @@ export async function reorder_checklist_item(
 export async function move_checklist_item(
 	client: TrelloClient,
 	input: { cardId: string; itemId: string; toChecklistId: string; position?: "top" | "bottom" | number },
-): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string; pos: number } }> {
+): Promise<{
+	item: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string; index: number | null };
+}> {
 	const { checklists } = await assertItemOnCard(client, input.cardId, input.itemId);
 	if (!checklists.some((cl) => cl.id === input.toChecklistId)) {
 		throw new GuardError(
@@ -2186,8 +2188,88 @@ export async function move_checklist_item(
 		// Explicit: Trello's placement when pos is omitted on a move is not documented.
 		pos: p ?? "bottom",
 	});
+	// Trello's raw pos is a huge float (~1.4e14) that means nothing to a caller.
+	// Report the item's 1-based place in the destination instead (one extra GET).
+	const after = await client.listChecklistsOnCard(input.cardId);
+	const dest = after.find((cl) => cl.id === input.toChecklistId);
+	const at = dest ? [...dest.checkItems].sort((a, b) => a.pos - b.pos).findIndex((it) => it.id === item.id) : -1;
 	return {
-		item: { id: item.id, name: item.name, state: item.state, checklistId: item.idChecklist, pos: item.pos },
+		item: {
+			id: item.id,
+			name: item.name,
+			state: item.state,
+			checklistId: item.idChecklist,
+			index: at >= 0 ? at + 1 : null,
+		},
+	};
+}
+
+/** Upper bound for move_checklist_items: one Trello PUT per item, sequential. */
+const MOVE_CHECKLIST_ITEMS_MAX = 50;
+
+/**
+ * move_checklist_items — move several items to one checklist on the SAME card,
+ * in the order given (each lands at the bottom, so the list order is kept).
+ * Everything is validated before the first write: duplicate ids, items not on
+ * the card, or a target not on the card refuse the whole batch with nothing
+ * moved. A Trello failure part-way is reported with what had already moved,
+ * because the earlier moves cannot be undone here.
+ */
+export async function move_checklist_items(
+	client: TrelloClient,
+	input: { cardId: string; itemIds: string[]; toChecklistId: string },
+): Promise<{
+	moved: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string; index: number | null }[];
+}> {
+	const ids = input.itemIds;
+	if (ids.length === 0) throw new GuardError("itemIds must contain at least one item.");
+	if (ids.length > MOVE_CHECKLIST_ITEMS_MAX) {
+		throw new GuardError(`At most ${MOVE_CHECKLIST_ITEMS_MAX} items per call; got ${ids.length}.`);
+	}
+	if (new Set(ids).size !== ids.length) throw new GuardError("itemIds contains duplicates.");
+	const card = await assertCardWritable(client, input.cardId);
+	const checklists = await client.listChecklistsOnCard(card.id);
+	if (!checklists.some((cl) => cl.id === input.toChecklistId)) {
+		throw new GuardError(
+			`Checklist ${input.toChecklistId} is not on card ${input.cardId}. Use list_checklist_items on the card you mean.`,
+		);
+	}
+	const onCard = new Set(checklists.flatMap((cl) => cl.checkItems.map((it) => it.id)));
+	const foreign = ids.filter((id) => !onCard.has(id));
+	if (foreign.length > 0) {
+		throw new GuardError(
+			`Checklist item(s) ${foreign.join(", ")} are not on card ${input.cardId}; nothing was moved. ` +
+				`Use list_checklist_items on the card you mean.`,
+		);
+	}
+	const done: string[] = [];
+	for (const id of ids) {
+		try {
+			await client.updateChecklistItem(input.cardId, id, { idChecklist: input.toChecklistId, pos: "bottom" });
+			done.push(id);
+		} catch (e) {
+			const reason = e instanceof Error ? e.message : String(e);
+			throw new GuardError(
+				`Moved ${done.length} of ${ids.length} before item ${id} failed: ${reason}. ` +
+					`Already moved: ${done.length ? done.join(", ") : "none"}. Use list_checklist_items to see the current state.`,
+			);
+		}
+	}
+	const after = await client.listChecklistsOnCard(input.cardId);
+	const dest = after.find((cl) => cl.id === input.toChecklistId);
+	const ordered = dest ? [...dest.checkItems].sort((a, b) => a.pos - b.pos) : [];
+	return {
+		moved: ids.map((id) => {
+			const it = ordered.find((x) => x.id === id);
+			const at = ordered.findIndex((x) => x.id === id);
+			return {
+				id,
+				name: it?.name ?? "",
+				state: it?.state ?? "incomplete",
+				checklistId: input.toChecklistId,
+				index: at >= 0 ? at + 1 : null,
+			};
+		}),
 	};
 }
 

@@ -100,6 +100,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `set_checklist_item_due` | Set or clear a due date on a checklist item |
 | `assign_checklist_item_member` | Assign or unassign a member on a checklist item |
 | `move_checklist_item` | Move an item to another checklist on the same card (keeps state, due, assignee) |
+| `move_checklist_items` | Move several items to one other checklist in a single call (all-or-nothing validation, max 50) |
 | `reorder_checklist_item` | Move a checklist item within its checklist (top/bottom/number) |
 | `update_label` | Rename and/or recolor an existing label |
 | `subscribe_card` | Watch / unwatch a card |

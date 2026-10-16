@@ -116,6 +116,7 @@ import {
 	move_all_cards,
 	move_card,
 	move_checklist_item,
+	move_checklist_items,
 	move_list,
 	read_comments,
 	remove_attachment,
@@ -1153,6 +1154,19 @@ export function registerTrelloTools(
 			"move_checklist_item",
 			async (i: { cardId: string; itemId: string; toChecklistId: string; position?: "top" | "bottom" | number }) =>
 				move_checklist_item(client, i),
+		),
+	);
+
+	server.tool(
+		"move_checklist_items",
+		"Move several checklist items to one other checklist on the same card in a single call, keeping their order, state, due dates and assignees. Up to 50 items. Everything is checked before the first move: if any item or the target is not on the card, nothing moves. Use list_checklist_items for the ids.",
+		{
+			cardId: z.string(),
+			itemIds: z.array(z.string()).min(1).max(50).describe("Item IDs to move, in the order they should land."),
+			toChecklistId: z.string().describe("Destination checklist ID (must be on this card)."),
+		},
+		guarded("move_checklist_items", async (i: { cardId: string; itemIds: string[]; toChecklistId: string }) =>
+			move_checklist_items(client, i),
 		),
 	);
 

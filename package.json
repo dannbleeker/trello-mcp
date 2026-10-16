@@ -27,7 +27,7 @@
 		"@cloudflare/workers-types": "^4.20260402.1",
 		"playwright": "^1.62.1",
 		"typescript": "6.0.2",
-		"vitest": "^4.1.10",
+		"vitest": "^4.1.11",
 		"wrangler": "^4.118.0"
 	},
 	"pnpm": {

@@ -303,7 +303,9 @@ async function main() {
 		await trello("DELETE", `/checklists/${cl.id}/checkItems/${item.id}`);
 	});
 
-	await step("add to chosen checklist + move_checklist_item (idChecklist)", async () => {
+	// Raw API call: checks that REAL Trello honours idChecklist on a check-item PUT
+	// (the one thing test/checklist-flow.test.ts cannot). It does not run the MCP tools.
+	await step("Trello API: PUT checkItem with idChecklist moves the item", async () => {
 		const cl3 = await trello("POST", `/cards/${cardId}/checklists`, { name: "MoveTarget" });
 		const item = await trello("POST", `/checklists/${checklist2Id}/checkItems`, { name: "Will move" });
 		const moved = await trello("PUT", `/cards/${cardId}/checkItem/${item.id}`, { idChecklist: cl3.id });

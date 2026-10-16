@@ -4,6 +4,30 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.1] — 2026-10-16
+
+### Fixed
+- **Item-level checklist tools now check the item is on the card.**
+  `set_checklist_item_state`, `set_checklist_item_due`,
+  `assign_checklist_item_member` and `reorder_checklist_item` only guarded the
+  `cardId`, so a caller could name a harmless card and modify a check item on
+  another (the hole v1.22.0 closed for checklists). One extra GET per call.
+  Not confirmed whether Trello itself rejects the mismatch; the guard does not
+  depend on it.
+- **`move_checklist_item` passes `pos: "bottom"` when no position is given**
+  rather than relying on Trello's undocumented default.
+
+### Changed
+- `add_checklist_item` returns the `checklistId` the item landed in, so a
+  caller that omitted it can see which checklist it got.
+- `list_checklist_items` returns each item's `due` and `memberId`.
+
+### Tests
+- `test/checklist-flow.test.ts` drives the registered handlers, real client
+  and real tools against an in-memory fake of Trello's HTTP API, including the
+  two-checklist scenario that prompted 1.24.0. The `scripts/smoke.mjs` step now
+  says plainly that it checks Trello's API, not the MCP tools.
+
 ## [1.24.0] — 2026-10-16
 
 ### Added

@@ -1147,7 +1147,7 @@ export function registerTrelloTools(
 			cardId: z.string(),
 			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
 			toChecklistId: z.string().describe("Destination checklist ID (must be on this card)."),
-			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional().describe("Position in the destination. Defaults to the end."),
+			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional().describe("Position in the destination. Defaults to \"bottom\"."),
 		},
 		guarded(
 			"move_checklist_item",

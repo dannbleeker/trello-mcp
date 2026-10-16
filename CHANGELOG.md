@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] — 2026-10-16
+
+### Added
+- **`add_checklist_item` takes an optional `checklistId`.** Before, the item
+  always went to the card's first checklist, so a card with two checklists
+  could not have anything added to the second. Without `checklistId`
+  behaviour is unchanged. A `checklistId` that is not on the card is refused
+  (same guard as `remove_checklist_item`).
+- **`move_checklist_item`** (`cardId`, `itemId`, `toChecklistId`, optional
+  `position`) moves an item to another checklist on the same card, keeping its
+  id, state, due date and assignee. Uses `idChecklist` on Trello's check-item
+  update endpoint. Item and target must both be on the card.
+
 ## [1.23.1] — 2026-08-05
 
 ### Added

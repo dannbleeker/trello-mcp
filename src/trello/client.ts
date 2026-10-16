@@ -1240,10 +1240,12 @@ export class TrelloClient {
 	 * Add a checklist item. If the card has no checklist yet, this creates one
 	 * named "Checklist" and adds the item to it.
 	 */
-	async addChecklistItem(cardId: string, text: string): Promise<ChecklistItem> {
-		const existing = await this.listChecklistsOnCard(cardId);
+	async addChecklistItem(cardId: string, text: string, targetChecklistId?: string): Promise<ChecklistItem> {
 		let checklistId: string;
-		if (existing.length === 0) {
+		const existing = targetChecklistId ? [] : await this.listChecklistsOnCard(cardId);
+		if (targetChecklistId) {
+			checklistId = targetChecklistId;
+		} else if (existing.length === 0) {
 			const created = await this.request("POST", `/cards/${cardId}/checklists`, {
 				name: "Checklist",
 			});
@@ -1284,9 +1286,11 @@ export class TrelloClient {
 			due?: string | null;
 			idMember?: string | null;
 			pos?: string | number;
+			idChecklist?: string;
 		},
 	): Promise<ChecklistItem> {
 		const params: Record<string, string | number | undefined> = {};
+		if (input.idChecklist !== undefined) params.idChecklist = input.idChecklist;
 		if (input.name !== undefined) params.name = input.name;
 		if (input.state !== undefined) params.state = input.state;
 		if (input.due !== undefined) params.due = input.due ?? "";

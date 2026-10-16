@@ -47,7 +47,7 @@ function fakeAE() {
 type Handler = (input: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }>;
 
 /**
- * Register all 102 tools against a stub server and hand back the handlers.
+ * Register all 103 tools against a stub server and hand back the handlers.
  * Runs in plain Node: McpServer is a type-only import in register-tools.ts, so
  * nothing in that module graph reaches for a Workers global.
  */
@@ -104,9 +104,9 @@ describe("allowlist enforcement on tool calls", () => {
 		expect(denials).toHaveLength(1);
 	});
 
-	it("refuses every one of the 102 tools, not just the read ones", async () => {
+	it("refuses every one of the 103 tools, not just the read ones", async () => {
 		const { handlers, d1 } = registerAs("mallory-attacker");
-		expect(handlers.size).toBe(102);
+		expect(handlers.size).toBe(103);
 		for (const [, fn] of handlers) {
 			const res = await fn({});
 			expect(res.isError).toBe(true);

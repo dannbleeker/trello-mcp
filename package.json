@@ -1,6 +1,6 @@
 {
 	"name": "trello-mcp",
-	"version": "1.23.1",
+	"version": "1.24.0",
 	"private": true,
 	"description": "Personal remote Trello MCP server for Claude \u2014 Cloudflare Workers + GitHub OAuth",
 	"author": "Dann Bleeker Pedersen",

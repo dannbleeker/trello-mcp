@@ -780,13 +780,18 @@ export async function add_comment(
 	return { ok: true, commentId: action.id };
 }
 
-/** add_checklist_item — append an item to the card's checklist (creates one if absent). */
+/**
+ * add_checklist_item — append an item to a checklist on the card. With
+ * `checklistId` it goes to that checklist (which must be on the card); without
+ * it, to the first checklist (created as "Checklist" if the card has none).
+ */
 export async function add_checklist_item(
 	client: TrelloClient,
-	input: { cardId: string; text: string },
+	input: { cardId: string; text: string; checklistId?: string },
 ): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete" } }> {
-	await assertCardWritable(client, input.cardId);
-	const item = await client.addChecklistItem(input.cardId, input.text);
+	if (input.checklistId) await assertChecklistOnCard(client, input.cardId, input.checklistId);
+	else await assertCardWritable(client, input.cardId);
+	const item = await client.addChecklistItem(input.cardId, input.text, input.checklistId);
 	return { item: { id: item.id, name: item.name, state: item.state } };
 }
 
@@ -2134,6 +2139,35 @@ export async function reorder_checklist_item(
 	}
 	const item = await client.updateChecklistItem(input.cardId, input.itemId, { pos: input.position });
 	return { item: { id: item.id, name: item.name, state: item.state, pos: item.pos } };
+}
+
+/**
+ * move_checklist_item — move an item to another checklist on the SAME card,
+ * keeping its id, state, due date and assignee. Both the item and the target
+ * checklist must belong to the card.
+ */
+export async function move_checklist_item(
+	client: TrelloClient,
+	input: { cardId: string; itemId: string; toChecklistId: string; position?: "top" | "bottom" | number },
+): Promise<{ item: { id: string; name: string; state: "complete" | "incomplete"; checklistId: string; pos: number } }> {
+	await assertChecklistOnCard(client, input.cardId, input.toChecklistId);
+	const checklists = await client.listChecklistsOnCard(input.cardId);
+	if (!checklists.some((cl) => cl.checkItems.some((it) => it.id === input.itemId))) {
+		throw new GuardError(
+			`Checklist item ${input.itemId} is not on card ${input.cardId}. Use list_checklist_items on the card you mean.`,
+		);
+	}
+	const p = input.position;
+	if (p !== undefined && p !== "top" && p !== "bottom" && (typeof p !== "number" || !Number.isFinite(p) || p < 0)) {
+		throw new GuardError(`position must be "top", "bottom", or a non-negative number; got ${JSON.stringify(p)}.`);
+	}
+	const item = await client.updateChecklistItem(input.cardId, input.itemId, {
+		idChecklist: input.toChecklistId,
+		pos: p,
+	});
+	return {
+		item: { id: item.id, name: item.name, state: item.state, checklistId: item.idChecklist, pos: item.pos },
+	};
 }
 
 // ---- Label edit ----

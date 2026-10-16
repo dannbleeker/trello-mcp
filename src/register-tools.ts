@@ -115,6 +115,7 @@ import {
 	mark_notification_read,
 	move_all_cards,
 	move_card,
+	move_checklist_item,
 	move_list,
 	read_comments,
 	remove_attachment,
@@ -516,12 +517,15 @@ export function registerTrelloTools(
 
 	server.tool(
 		"add_checklist_item",
-		"Append an item to the card's checklist. Creates a checklist named \"Checklist\" if the card doesn't have one yet.",
+		"Append an item to a checklist on the card. Pass checklistId (from list_checklist_items) to pick one; without it the item goes to the card's first checklist, which is created as \"Checklist\" if the card has none.",
 		{
 			cardId: z.string(),
 			text: z.string().min(1).describe("Item text."),
+			checklistId: z.string().optional().describe("Target checklist ID from list_checklist_items. Defaults to the first checklist."),
 		},
-		guarded("add_checklist_item", async (i: { cardId: string; text: string }) => add_checklist_item(client, i)),
+		guarded("add_checklist_item", async (i: { cardId: string; text: string; checklistId?: string }) =>
+			add_checklist_item(client, i),
+		),
 	);
 
 	server.tool(
@@ -1133,6 +1137,22 @@ export function registerTrelloTools(
 		},
 		guarded("reorder_checklist_item", async (i: { cardId: string; itemId: string; position: "top" | "bottom" | number }) =>
 			reorder_checklist_item(client, i),
+		),
+	);
+
+	server.tool(
+		"move_checklist_item",
+		"Move a checklist item to another checklist on the same card, keeping its state, due date and assignee. Use list_checklist_items to find the itemId and toChecklistId.",
+		{
+			cardId: z.string(),
+			itemId: z.string().describe("Checklist item ID from list_checklist_items."),
+			toChecklistId: z.string().describe("Destination checklist ID (must be on this card)."),
+			position: z.union([z.enum(["top", "bottom"]), z.number().nonnegative()]).optional().describe("Position in the destination. Defaults to the end."),
+		},
+		guarded(
+			"move_checklist_item",
+			async (i: { cardId: string; itemId: string; toChecklistId: string; position?: "top" | "bottom" | number }) =>
+				move_checklist_item(client, i),
 		),
 	);
 

@@ -76,7 +76,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `add_comment` | Append a comment to a card |
 | `update_comment` | Edit an existing comment (by action ID from `read_comments`) |
 | `delete_comment` | Delete an existing comment |
-| `add_checklist_item` | Append an item to the card's checklist |
+| `add_checklist_item` | Append an item to a checklist (optional `checklistId`; default first checklist) |
 | `remove_checklist_item` | Remove an item from a checklist |
 | `create_checklist` | Create a new named checklist (e.g. "Agenda", "Decisions") |
 | `rename_checklist` | Change a checklist's name |
@@ -99,6 +99,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `clear_card_cover` | Strip the card's cover |
 | `set_checklist_item_due` | Set or clear a due date on a checklist item |
 | `assign_checklist_item_member` | Assign or unassign a member on a checklist item |
+| `move_checklist_item` | Move an item to another checklist on the same card (keeps state, due, assignee) |
 | `reorder_checklist_item` | Move a checklist item within its checklist (top/bottom/number) |
 | `update_label` | Rename and/or recolor an existing label |
 | `subscribe_card` | Watch / unwatch a card |

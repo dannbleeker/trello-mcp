@@ -303,6 +303,14 @@ async function main() {
 		await trello("DELETE", `/checklists/${cl.id}/checkItems/${item.id}`);
 	});
 
+	await step("add to chosen checklist + move_checklist_item (idChecklist)", async () => {
+		const cl3 = await trello("POST", `/cards/${cardId}/checklists`, { name: "MoveTarget" });
+		const item = await trello("POST", `/checklists/${checklist2Id}/checkItems`, { name: "Will move" });
+		const moved = await trello("PUT", `/cards/${cardId}/checkItem/${item.id}`, { idChecklist: cl3.id });
+		if (moved.idChecklist !== cl3.id) throw new Error(`item not moved: ${JSON.stringify(moved).slice(0, 160)}`);
+		await trello("DELETE", `/checklists/${cl3.id}`);
+	});
+
 	let convertedCardId = "";
 	await step("convert_checklist_item_to_card", async () => {
 		// Need a fresh item on the same checklist since the previous one was removed.

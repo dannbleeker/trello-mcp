@@ -14,6 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1.2.2, `proxy-addr` 2.0.8, `nanoid` 3.3.20. Regenerated with pnpm 10 so the
   `undici` override stays in `pnpm-lock.yaml`. Dependabot's lockfiles dropped
   it, which is why every one of its PRs failed `pnpm install --frozen-lockfile`.
+- Moved the `undici` override from `package.json` (`pnpm.overrides`) to
+  `pnpm-workspace.yaml`, where pnpm 10 expects workspace settings. Dependabot
+  is expected to keep it when regenerating `pnpm-lock.yaml`, so its PRs stop
+  failing the frozen install. Lockfile unchanged.
 
 ## [1.25.0] — 2026-10-16
 

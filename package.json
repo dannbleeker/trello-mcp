@@ -38,9 +38,6 @@
 		"ignoredBuiltDependencies": [
 			"core-js-pure",
 			"sharp"
-		],
-		"overrides": {
-			"undici": "^7.29.0"
-		}
+		]
 	}
 }

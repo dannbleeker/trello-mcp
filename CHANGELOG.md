@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Dependency bumps, superseding Dependabot PRs #25, #27, #33, #34, #37, #38,
+  #39, #40, #41 and #42: `@modelcontextprotocol/sdk` 1.30.0 → 1.32.2, `hono`
+  4.13.0 → 4.13.16, `vitest` 4.1.10 → 4.1.12, and lockfile-only `vite` 8.3.5,
+  `body-parser` 2.4.0, `ip-address` 10.7.5, `fast-uri` 3.1.9, `source-map-js`
+  1.2.2, `proxy-addr` 2.0.8, `nanoid` 3.3.20. Regenerated with pnpm 10 so the
+  `undici` override stays in `pnpm-lock.yaml`. Dependabot's lockfiles dropped
+  it, which is why every one of its PRs failed `pnpm install --frozen-lockfile`.
+
 ## [1.25.0] — 2026-10-16
 
 ### Added

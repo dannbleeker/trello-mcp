@@ -34,6 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (inbox to clarify, WIP over, buried or drifting cards) and replaces the red
   alerts. Light and dark share one set of colour tokens. Layout and content are
   otherwise unchanged. Trello's own label colours are kept.
+- **App icon and PWA colours** follow the SSF palette: navy icon with an orange
+  check (was near-black with a green check), blue `theme_color`, white
+  `background_color`.
 - The email no longer renders a column for an empty context list; they are
   named in one "Empty lists:" line. The "Cards per list" tiles still show them.
 - `renderDigest` takes an optional previous snapshot and returns a `snapshot`;

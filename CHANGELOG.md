@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Digest and dashboard: how far over a WIP limit.** `@Computer 22/7` now
+  reads `22/7 · +15 over` in the pill, the column count and the "Cards per
+  list" tile.
+- **Snoozed Waiting-for items** are listed under the Waiting-for column (digest
+  and dashboard), so a short list no longer looks like nothing is pending.
+- **"Waking this week"**: the snoozed cards that return in the next 7 days, in
+  the digest and on the dashboard.
+- **"Wake did not fire" warning** for a snooze whose wake time passed without
+  the Power-Up firing (was a routine-looking "any moment" card). On the
+  dashboard it carries a **Wake now** button.
+- **Change since the last digest** under each of the five health figures in the
+  email. The 04:00 send stores its figures in KV (`digest:snapshot:<date>`, 4
+  day TTL, no new binding); a missing or malformed snapshot shows no change.
+  Not on the dashboard.
+- **"Cards per list" tiles are links.** On the dashboard they scroll to and
+  flash the list; in the email they open that list on the dashboard
+  (`/dashboard#list-computer`, `#list-waiting`, `#list-inbox`, …). The
+  dashboard honours the `#list-…` hash on load.
+
+### Changed
+- **SSF restyle** of the digest email and the dashboard to the
+  StruktureretSundFornuft design system: blue header/footer (email) and brand
+  band (dashboard), navy figures and titles, square cards, pill chips and
+  badges, Segoe UI first. Orange is reserved for things that need attention
+  (inbox to clarify, WIP over, buried or drifting cards) and replaces the red
+  alerts. Light and dark share one set of colour tokens. Layout and content are
+  otherwise unchanged. Trello's own label colours are kept.
+- **App icon and PWA colours** follow the SSF palette: navy icon with an orange
+  check (was near-black with a green check), blue `theme_color`, white
+  `background_color`.
+- The email no longer renders a column for an empty context list; they are
+  named in one "Empty lists:" line. The "Cards per list" tiles still show them.
+- `renderDigest` takes an optional previous snapshot and returns a `snapshot`;
+  `buildDigest` returns the full `Digest` and takes the same optional argument;
+  `readPrevSnapshot` is exported from the scheduler.
+
 ### Changed
 - Dependency bumps, superseding Dependabot PRs #25, #27, #33, #34, #37, #38,
   #39, #40, #41 and #42: `@modelcontextprotocol/sdk` 1.30.0 → 1.32.2, `hono`

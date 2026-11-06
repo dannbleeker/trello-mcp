@@ -43,7 +43,7 @@
 import { Hono } from "hono";
 import { Octokit } from "octokit";
 import { ALLOWED_LOGINS } from "../allowlist";
-import { buildDigest } from "../digest/scheduler";
+import { buildDigest, readPrevSnapshot } from "../digest/scheduler";
 import { TrelloClient } from "../trello/client";
 import { UsageRecorder } from "../usage";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
@@ -75,18 +75,18 @@ const app = new Hono<{ Bindings: DashboardEnv }>();
 
 app.get("/", (c) => c.redirect("/dashboard", 302));
 
-// PWA support (v1.16.0): manifest + icon are public — they contain nothing
+// PWA support (v1.16.0; SSF colours: navy icon with the orange tick, blue theme): manifest + icon are public — they contain nothing
 // sensitive and install-time fetches don't reliably carry cookies.
 app.get("/manifest.webmanifest", (c) =>
 	c.json(
 		{
-			background_color: "#f6f7f9",
+			background_color: "#ffffff",
 			display: "standalone",
 			icons: [{ purpose: "any", sizes: "any", src: "/icon.svg", type: "image/svg+xml" }],
 			name: "Dann — To-Do Dashboard",
 			short_name: "To-Do",
 			start_url: "/dashboard",
-			theme_color: "#1c2024",
+			theme_color: "#2B6CB0",
 		},
 		200,
 		{ "Cache-Control": "public, max-age=86400", "Content-Type": "application/manifest+json" },
@@ -95,7 +95,7 @@ app.get("/manifest.webmanifest", (c) =>
 
 app.get("/icon.svg", (c) =>
 	c.body(
-		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#1c2024"/><path d="M28 52 l16 16 l30 -34" fill="none" stroke="#4ade80" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#00254C"/><path d="M28 52 l16 16 l30 -34" fill="none" stroke="#ED8936" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 		200,
 		{ "Cache-Control": "public, max-age=86400", "Content-Type": "image/svg+xml" },
 	),
@@ -211,7 +211,8 @@ app.get("/digest/preview", async (c) => {
 		// definitions — so it rendered every card with no custom-field badge and
 		// showed a layout the real email never had. A preview that does not
 		// build the real email is worse than no preview. v1.22.0.
-		const { html } = await buildDigest(client, Date.now());
+		const now = Date.now();
+		const { html } = await buildDigest(client, now, await readPrevSnapshot(c.env, now));
 		return c.html(html, 200, { "Cache-Control": "no-store" });
 	} catch (_e) {
 		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);

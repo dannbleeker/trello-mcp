@@ -6,86 +6,111 @@
 <title>Dann — To-Do Dashboard</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#15171a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#2B6CB0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1620" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="To-Do">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
-:root { color-scheme: light dark; }
+/* SSF (StruktureretSundFornuft) theme: blue chrome, navy data, orange only where
+   something needs attention. Every colour is a token; dark mode only swaps the
+   tokens. Trello's own label colours (.badge.lbl-*) are data, so they stay. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;        --panel: #EDF2F7;     --card: #ffffff;
+  --text: #1A202C;      --data: #00254C;      --muted: #6B7280;
+  --line: #CBD5E0;      --pill: #ffffff;
+  --brand: #2B6CB0;     --brand-text: #2B6CB0; --brand-on: #DCE9F7;
+  --orange: #ED8936;    --orange-text: #C05621; --on-orange: #ffffff; --on-orange-sub: #FFF0E2;
+  --note: #FDEBDC;      --kort: #DDEBF7;
+  --chip-on-bg: #00254C; --chip-on-fg: #ffffff;
+  --font: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0E1620;      --panel: #16212E;     --card: #1C2A3A;
+    --text: #E2E8F0;    --data: #DCE9F7;      --muted: #A0AEC0;
+    --line: #2D3A4B;    --pill: #1C2A3A;
+    --brand-text: #7FB2E5;
+    --orange-text: #F6AD6B;
+    --note: #3A2410;    --kort: #14263A;
+    --chip-on-bg: #DCE9F7; --chip-on-fg: #00254C;
+  }
+}
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: #f6f7f9;
-  color: #1c2024;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
   font-size: 14px;
   line-height: 1.45;
 }
+a { color: inherit; }
 .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
 
+/* ---- Brand band ---- */
+.brand { background: var(--brand); color: #fff; padding: 14px 16px; }
+.brand-in { max-width: 1100px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.brand .wm { font-weight: 700; font-size: 16px; }
+.brand .tg { font-size: 11.5px; color: var(--brand-on); }
+.tick { width: 36px; height: 4px; background: var(--orange); margin: 6px 0 14px; }
+
 /* ---- Health bar ---- */
-.health {
-  background: #fff;
-  border: 1px solid #e4e7eb;
-  border-radius: 12px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04);
-}
-.health-top { display: flex; flex-wrap: wrap; gap: 22px; align-items: baseline; margin-bottom: 12px; }
-.stat { display: flex; flex-direction: column; }
-.stat .num { font-size: 26px; font-weight: 700; line-height: 1; }
-.stat .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin-top: 4px; }
-.stat .num.alert { color: #c0392b; }
+.health { background: var(--panel); padding: 14px 16px; margin-bottom: 16px; }
+.health-top { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; margin-bottom: 12px; }
+.stat { display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line); padding: 10px 14px 8px; min-width: 104px; }
+.stat .num { font-size: 26px; font-weight: 700; line-height: 1; color: var(--data); font-variant-numeric: tabular-nums; }
+.stat .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 5px; }
+.stat.hot { background: var(--orange); border-color: var(--orange); }
+.stat.hot .num { color: var(--on-orange); }
+.stat.hot .lbl { color: var(--on-orange-sub); }
 .wip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .wip {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; padding: 5px 10px; border-radius: 999px;
-  background: #eef1f4; border: 1px solid #e0e4e8;
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; padding: 5px 11px; border-radius: 999px;
+  background: var(--pill); color: var(--data); font-variant-numeric: tabular-nums;
 }
 .wip b { font-weight: 600; }
-.wip.ok { background: #ecf7ee; border-color: #cfe9d4; }
-.wip.over { background: #fdecea; border-color: #f5c6c0; color: #a5281c; }
-.wip .dot { width: 7px; height: 7px; border-radius: 50%; background: #16a34a; }
-.wip.over .dot { background: #c0392b; }
-.wip.none .dot { background: #9aa3ad; }
+.wip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); }
+.wip.over { background: var(--orange); color: var(--on-orange); }
+.wip.over .dot { background: var(--on-orange); }
+.wip.none .dot { background: var(--muted); }
 
 /* ---- Zones ---- */
-.zone-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #4b5563; margin: 22px 0 10px; }
-.zone-title small { font-weight: 500; text-transform: none; letter-spacing: 0; color: #9aa3ad; }
+.zone-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--data); margin: 26px 0 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zone-title::before { content: ""; width: 14px; height: 3px; background: var(--data); }
+.zone-title small { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 12.5px; }
 
 .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .chip {
-  font-size: 12px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
-  background: #fff; border: 1px solid #d7dbe0; color: #374151; user-select: none;
+  font-size: 12.5px; padding: 5px 13px; border-radius: 999px; cursor: pointer;
+  background: var(--card); border: 1px solid var(--line); color: var(--data); user-select: none;
 }
-.chip.active { background: #1c2024; color: #fff; border-color: #1c2024; }
+.chip.active { background: var(--chip-on-bg); color: var(--chip-on-fg); border-color: var(--chip-on-bg); }
 
 .cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
-.col {
-  background: #fff; border: 1px solid #e4e7eb; border-radius: 12px;
-  padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); min-width: 0;
-}
-.col-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.col-head .name { font-weight: 600; font-size: 13px; }
-.col-head .count { font-size: 11px; color: #6b7280; background:#eef1f4; border-radius:999px; padding:2px 8px; }
-.col-head .count.over { background:#fdecea; color:#a5281c; }
+.col { background: var(--panel); padding: 12px; min-width: 0; scroll-margin-top: 12px; }
+.col.flash { animation: flash 1.8s ease-out; }
+@keyframes flash { 0%, 55% { box-shadow: 0 0 0 3px var(--brand); } 100% { box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .col.flash { animation-duration: .01s; } }
+.col-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.col-head .name { font-weight: 600; font-size: 13.5px; color: var(--data); }
+.col-head .count { font-size: 11.5px; font-weight: 600; color: var(--data); background: var(--pill); border-radius: 999px; padding: 2px 9px; font-variant-numeric: tabular-nums; }
+.col-head .count.over { background: var(--orange); color: var(--on-orange); }
 
-.card {
-  border: 1px solid #eceef1; border-radius: 9px; padding: 9px 10px; margin-bottom: 8px;
-  background: #fcfcfd;
-}
+.card { border: 1px solid var(--line); padding: 9px 10px; margin-bottom: 8px; background: var(--card); }
 .card:last-child { margin-bottom: 0; }
-.card .ttl { font-size: 13px; font-weight: 500; }
+.card.snz { background: transparent; border-style: dashed; }
+.card .ttl { font-size: 13.5px; font-weight: 500; color: var(--data); }
 .card .ttl a { color: inherit; text-decoration: none; }
 .card .ttl a:hover { text-decoration: underline; }
-.card .desc { font-size: 11.5px; color: #6b7280; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .desc { font-size: 11.5px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-.badge { font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600; }
-.badge.bestseller { background:#1c2024; color:#fff; }
-.badge.invest { background:#2563eb; color:#fff; }
-.badge.clarify { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
+.badge { font-size: 10px; padding: 1px 8px; border-radius: 999px; font-weight: 600; }
+.badge.bestseller { background: var(--data); color: var(--bg); }
+.badge.invest { background: #2B6CB0; color: #fff; }
+.badge.clarify { background: var(--note); color: var(--data); }
 /* Every OTHER board label renders from its own Trello colour, so a label added
    in Trello appears here without a code change (the three above keep their
    hand-tuned look). Trello's palette also has _light / _dark variants of each
@@ -105,102 +130,110 @@ body {
 .badge.lbl-none   { background:#dcdfe4; color:#44546f; }
 /* Custom-field values: deliberately quieter than the label badges — they are
    data ABOUT the card, not a flag on it, so they must not outrank "overdue". */
-.badge.cfield { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
+.badge.cfield { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
 /* Big-rock age. A rock nobody has touched in months is the exact failure this
-   zone exists to prevent, so past a quarter it gets the same red as an overdue
-   card; a month is a nudge, not an alarm. */
-.badge.age { background:#eef1f4; color:#4b5563; border:1px solid #dde2e8; }
-.badge.age.drifting { background:#fef4e6; color:#8a5a00; border-color:#f5dcb3; }
-.badge.age.buried { background:#fdecea; color:#c0392b; border-color:#f5c6c0; }
+   zone exists to prevent, so past a quarter it gets the orange alert; a month
+   is a nudge, not an alarm. */
+.badge.age { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+.badge.age.drifting { background: var(--note); color: var(--data); border-color: var(--note); }
+.badge.age.buried { background: var(--orange); color: var(--on-orange); border-color: var(--orange); }
 .card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
 .btn {
-  font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
-  border: 1px solid #d7dbe0; background: #fff; color: #374151;
+  font-size: 11.5px; padding: 3px 11px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--card); color: var(--data);
 }
-.btn:hover { background: #f3f4f6; }
-.btn.done { border-color: #cfe9d4; color: #1a7f37; }
-.btn.done:hover { background: #ecf7ee; }
+.btn:hover { background: var(--panel); }
+.btn.done { border-color: var(--brand); color: var(--brand-text); }
+.btn.done:hover { background: var(--kort); }
 .btn:disabled { opacity: .5; cursor: default; }
-select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px solid #d7dbe0; background:#fff; color:#374151; max-width: 120px; }
+select.mv { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--data); max-width: 120px; }
 
-.empty { font-size: 12px; color: #9aa3ad; font-style: italic; padding: 4px 2px; }
+.empty { font-size: 12.5px; color: var(--muted); font-style: italic; padding: 4px 2px; }
 
 /* snoozed expandable panel */
 .stat.click { cursor: pointer; user-select: none; }
-.stat.click:hover .lbl { color: #1c2024; }
+.stat.click:hover .lbl { color: var(--data); }
 .snz-row {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
-  border: 1px solid #eceef1; border-radius: 9px; padding: 8px 10px; margin-bottom: 8px;
-  background: #fcfcfd; font-size: 13px;
+  border: 1px solid var(--line); padding: 8px 10px; margin-bottom: 8px;
+  background: var(--card); font-size: 13px;
 }
-.snz-row .meta { font-size: 11px; color: #6b7280; white-space: nowrap; }
-.snz-row .meta.overdue { color: #a5281c; font-weight: 600; }
+.snz-row .meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.snz-row .meta.overdue { color: var(--orange-text); font-weight: 600; }
+
+/* warning note (a wake that did not fire) and the 7-day wake strip */
+.note { background: var(--note); border-left: 4px solid var(--orange); padding: 12px 14px; margin-bottom: 12px; font-size: 13.5px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.note b { color: var(--data); }
+.wake-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; background: var(--card); border: 1px solid var(--line); margin-bottom: 6px; font-size: 13.5px; }
+.wake-row a { color: var(--data); text-decoration: none; font-weight: 500; }
+.wake-row span:last-child { color: var(--muted); font-size: 12px; text-align: right; }
+.subh { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 14px 0 8px; }
 
 /* list overview panel */
-.ov-panel {
-  background: #fff; border: 1px solid #e4e7eb; border-radius: 12px;
-  padding: 12px 14px 14px; margin: 18px 0 6px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
-}
-.ov-panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin-bottom: 10px; }
-.ov-panel-title small { font-weight: 500; text-transform: none; letter-spacing: 0; color: #9aa3ad; }
+.ov-panel { background: var(--panel); padding: 12px 14px 14px; margin: 18px 0 6px; }
+.ov-panel-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--data); margin-bottom: 10px; }
+.ov-panel-title small { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 12.5px; }
 .ov-panel-title.click { cursor: pointer; user-select: none; }
-.ov-panel-title.click:hover { color: #1c2024; }
-.rev-sub { font-size: 12px; font-weight: 600; color: #4b5563; margin: 12px 0 8px; }
+.ov-panel-title.click:hover { color: var(--brand-text); }
+.rev-sub { font-size: 12px; font-weight: 600; color: var(--data); margin: 12px 0 8px; }
 /* Usage panel (v1.21.0). A bar chart made of divs — the counts span orders of
    magnitude, so the bar is what makes the long tail readable at a glance. */
 .usg-row { display: grid; grid-template-columns: minmax(0,1fr) 46px; gap: 8px; align-items: center; padding: 3px 0; }
-.usg-bar { position: relative; height: 18px; border-radius: 4px; background: #f1f3f5; overflow: hidden; }
-.usg-bar i { position: absolute; inset: 0 auto 0 0; background: #dbe3ea; }
-.usg-bar.err i { background: #f7d4d0; }
+.usg-bar { position: relative; height: 18px; background: var(--card); overflow: hidden; }
+.usg-bar i { position: absolute; inset: 0 auto 0 0; background: var(--kort); }
+.usg-bar.err i { background: var(--note); }
 .usg-bar span { position: relative; display: block; padding: 2px 6px; font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.usg-n { font-size: 11px; text-align: right; color: #4b5563; font-variant-numeric: tabular-nums; }
+.usg-n { font-size: 11px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .usg-tabs { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
-.usg-tab { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid #e3e6ea; background: #fff; cursor: pointer; color: #4b5563; }
-.usg-tab.on { background: #1c2024; color: #fff; border-color: #1c2024; }
+.usg-tab { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); cursor: pointer; color: var(--muted); }
+.usg-tab.on { background: var(--chip-on-bg); color: var(--chip-on-fg); border-color: var(--chip-on-bg); }
 /* Collapsed, the panel is just its own title — don't reserve body space. */
 .ov-panel.collapsed { padding-bottom: 12px; }
 .ov-panel.collapsed .ov-panel-title { margin-bottom: 0; }
 /* A horizon holding nothing is information too — dimmed, not hidden. */
-.wip.zero { opacity: .5; }
-.overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.wip.zero { opacity: .55; }
+.overview { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
 .ov {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  background: #f6f7f9; border: 1px solid #eceef1; border-radius: 10px; padding: 10px 6px;
-  text-align: center;
+  background: var(--card); padding: 10px 6px; text-align: center; text-decoration: none; color: inherit;
 }
-.ov .ov-num { font-size: 22px; font-weight: 700; line-height: 1; color: #1c2024; }
-.ov .ov-name { font-size: 10.5px; color: #6b7280; margin-top: 5px; line-height: 1.2; }
-.ov.zero { opacity: .5; }
-.ov.alert { background: #fdecea; border-color: #f5c6c0; }
-.ov.alert .ov-num { color: #c0392b; }
-.chip-n { opacity: .55; font-weight: 700; margin-left: 3px; }
+a.ov { cursor: pointer; }
+a.ov:hover { box-shadow: inset 0 -3px 0 var(--brand); }
+a.ov:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.ov .ov-num { font-size: 22px; font-weight: 700; line-height: 1; color: var(--data); font-variant-numeric: tabular-nums; }
+.ov .ov-name { font-size: 10.5px; color: var(--muted); margin-top: 5px; line-height: 1.2; }
+.ov.zero { opacity: .55; }
+.ov.alert { background: var(--orange); }
+.ov.alert .ov-num { color: var(--on-orange); }
+.ov.alert .ov-name { color: var(--on-orange-sub); }
+.chip-n { opacity: .6; font-weight: 700; margin-left: 5px; }
 .chip.active .chip-n { opacity: .85; }
 
 /* capture */
 .capture { display: flex; gap: 8px; margin: 4px 0 4px; }
 .capture input {
-  flex: 1; font-size: 13px; padding: 8px 11px; border-radius: 8px; border: 1px solid #d7dbe0; background:#fff;
+  flex: 1; font: inherit; font-size: 13.5px; padding: 9px 12px; border: 1px solid var(--line); background: var(--card); color: var(--text);
 }
 .capture button {
-  font-size: 13px; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
-  background: #1c2024; color: #fff; font-weight: 600;
+  font: inherit; font-size: 13px; padding: 0 20px; border-radius: 999px; border: none; cursor: pointer;
+  background: var(--brand); color: #fff; font-weight: 600;
 }
 .capture button:disabled { opacity: .5; cursor: default; }
 
 #toast {
   position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-  background: #1c2024; color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 13px;
+  background: var(--data); color: var(--bg); padding: 9px 16px; border-radius: 999px; font-size: 13px;
   opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 50;
 }
 #toast.show { opacity: 1; }
-.loading { padding: 40px; text-align: center; color: #6b7280; }
-.errbox { background:#fdecea; border:1px solid #f5c6c0; color:#a5281c; padding:12px 14px; border-radius:10px; margin-bottom:14px; font-size:13px; }
+.loading { padding: 40px; text-align: center; color: var(--muted); }
+.errbox { background: var(--note); border-left: 4px solid var(--orange); color: var(--data); padding: 12px 14px; margin-bottom: 14px; font-size: 13px; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
 
 /* due badges */
-.badge.duover { background:#fdecea; color:#c0392b; border:1px solid #f5c6c0; }
-.badge.dueto  { background:#1c2024; color:#fff; }
+.badge.duover { background: var(--orange); color: var(--on-orange); }
+.badge.dueto  { background: var(--data); color: var(--bg); }
 
 /* ---- touch devices (v1.20.0) ----
    Dann travels ~30% and drives this from a phone as an installed PWA, where
@@ -224,59 +257,14 @@ select.mv { font-size: 11px; padding: 3px 6px; border-radius: 6px; border: 1px s
 
 /* Captures held back while offline — shown under the capture box so a queued
    thought is never silently invisible. */
-.cap-queued { font-size: 11.5px; color: #8a5a00; background: #fef4e6; border: 1px solid #f5dcb3;
-  border-radius: 8px; padding: 6px 10px; margin: -2px 0 8px; }
-
-/* ---- dark mode (v1.16.0) ---- */
-@media (prefers-color-scheme: dark) {
-  body { background: #15171a; color: #e5e7eb; }
-  .health, .col, .ov-panel { background: #1e2124; border-color: #2a2e33; box-shadow: none; }
-  .card, .snz-row { background: #24272b; border-color: #2e3237; }
-  .card .desc, .stat .lbl, .zone-title small, .ov .ov-name, .snz-row .meta, .col-head .count, .ov-panel-title { color: #9aa3ad; }
-  .zone-title { color: #9aa3ad; }
-  .stat .num.alert { color: #f87171; }
-  .chip { background: #1e2124; border-color: #3a3f45; color: #d1d5db; }
-  .chip.active { background: #e5e7eb; color: #15171a; border-color: #e5e7eb; }
-  .wip { background: #24272b; border-color: #2e3237; color: #d1d5db; }
-  .wip.ok { background: #14321c; border-color: #1d4a29; }
-  .wip.over { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
-  .col-head .count { background: #2a2e33; }
-  .col-head .count.over { background: #3b1512; color: #f2b8b5; }
-  .btn, select.mv { background: #24272b; border-color: #3a3f45; color: #d1d5db; }
-  .btn:hover { background: #2e3237; }
-  .btn.done { color: #4ade80; border-color: #1d4a29; }
-  .btn.done:hover { background: #14321c; }
-  .capture input { background: #1e2124; border-color: #3a3f45; color: #e5e7eb; }
-  .capture button { background: #e5e7eb; color: #15171a; }
-  .ov { background: #24272b; border-color: #2e3237; }
-  .ov .ov-num { color: #e5e7eb; }
-  .ov.alert { background: #3b1512; border-color: #5c221c; }
-  .ov.alert .ov-num { color: #f2b8b5; }
-  .badge.clarify, .badge.duover { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
-  .snz-row .meta.overdue { color: #f2b8b5; }
-  .badge.dueto { background: #e5e7eb; color: #15171a; }
-  .badge.bestseller { background: #e5e7eb; color: #15171a; }
-  .badge.cfield { background: #23262b; color: #9aa3ad; border-color: #33373d; }
-  .badge.age { background: #23262b; color: #9aa3ad; border-color: #33373d; }
-  .badge.age.drifting { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
-  .badge.age.buried { background: #3b1512; color: #f2b8b5; border-color: #5c221c; }
-  .ov-panel-title.click:hover { color: #e5e7eb; }
-  .rev-sub { color: #d1d5db; }
-  .usg-bar { background: #24272b; }
-  .usg-bar i { background: #33383f; }
-  .usg-bar.err i { background: #4a201c; }
-  .usg-n { color: #9aa3ad; }
-  .usg-tab { background: #1e2125; border-color: #2e3237; color: #9aa3ad; }
-  .usg-tab.on { background: #e5e7eb; color: #15171a; border-color: #e5e7eb; }
-  .cap-queued { background: #3a2a10; color: #f0c68a; border-color: #5c451c; }
-  #toast { background: #e5e7eb; color: #15171a; }
-  .errbox { background: #3b1512; border-color: #5c221c; color: #f2b8b5; }
-  .loading, .empty { color: #9aa3ad; }
-}
+.cap-queued { font-size: 11.5px; color: var(--data); background: var(--note); border-left: 4px solid var(--orange);
+  padding: 6px 10px; margin: -2px 0 8px; }
 </style>
 </head>
 <body>
+<header class="brand"><div class="brand-in"><span class="wm">StruktureretSundFornuft.dk</span><span class="tg">Fordi sund fornuft ikke er så udbredt i praksis</span></div></header>
 <div class="wrap">
+  <div class="tick"></div>
   <div id="content"><div class="loading">Loading your board…</div></div>
 </div>
 <div id="toast"></div>
@@ -640,11 +628,11 @@ function render(){
   let wipHtml = ctxCounts.map(({l,n}) => {
     if (l.wip == null) return '<span class="wip none"><span class="dot"></span><b>'+esc(l.name)+'</b> '+n+'</span>';
     const over = n > l.wip;
-    return '<span class="wip '+(over?'over':'ok')+'"><span class="dot"></span><b>'+esc(l.name)+'</b> '+n+'/'+l.wip+(over?' ⚠':'')+'</span>';
+    return '<span class="wip '+(over?'over':'ok')+'"><span class="dot"></span><b>'+esc(l.name)+'</b> '+n+'/'+l.wip+(over?' · +'+(n-l.wip)+' over':'')+'</span>';
   }).join("");
 
   let health = '<div class="health"><div class="health-top">'
-    + '<div class="stat"><span class="num'+(inboxCards.length?' alert':'')+'">'+inboxCards.length+'</span><span class="lbl">Inbox to clarify</span></div>'
+    + '<div class="stat'+(inboxCards.length?' hot':'')+'"><span class="num">'+inboxCards.length+'</span><span class="lbl">Inbox to clarify</span></div>'
     + '<div class="stat"><span class="num">'+totalNext+'</span><span class="lbl">Next actions</span></div>'
     + '<div class="stat"><span class="num">'+waitingCards.length+'</span><span class="lbl">Waiting for</span></div>'
     + '<div class="stat"><span class="num">'+rockCards.length+'</span><span class="lbl">Big rocks</span></div>'
@@ -767,7 +755,8 @@ function render(){
         const n = cardsIn(l.id).length;
         const over = (l.wip != null && n > l.wip) || (l.id === INBOX.id && n > 0);
         let cls = "ov"; if (n === 0) cls += " zero"; if (over) cls += " alert";
-        return '<div class="'+cls+'"><span class="ov-num">'+n+'</span><span class="ov-name">'+esc(l.name)+'</span></div>';
+        const overBy = (l.wip != null && n > l.wip) ? " · +"+(n-l.wip)+" over" : "";
+        return '<a class="'+cls+'" href="#list-'+listKey(l)+'"><span class="ov-num">'+n+'</span><span class="ov-name">'+esc(l.name+overBy)+'</span></a>';
       }).join("")
     + '</div></div>';
 
@@ -788,15 +777,15 @@ function render(){
     let body = shown.length
       ? shown.map(c => cardHtml(c, {age:"next"})).join("")
       : '<div class="empty">'+(all.length ? "nothing matches filter" : "clear")+'</div>';
-    return '<div class="col"><div class="col-head"><span class="name">'+esc(l.name)+'</span>'
-      + '<span class="count'+(over?' over':'')+'">'+all.length+(l.wip!=null?'/'+l.wip:'')+'</span></div>'
+    return '<div class="col" id="list-'+listKey(l)+'"><div class="col-head"><span class="name">'+esc(l.name)+'</span>'
+      + '<span class="count'+(over?' over':'')+'">'+all.length+(l.wip!=null?'/'+l.wip:'')+(over?' · +'+(all.length-l.wip):'')+'</span></div>'
       + body + '</div>';
   }).join("");
 
   // ---- Zone 3: needs attention ----
-  let waitingCol = '<div class="col"><div class="col-head"><span class="name">Waiting for…</span><span class="count">'+waitingCards.length+'</span></div>'
-    + (waitingCards.length ? waitingCards.map(c=>cardHtml(c, {age:"waiting"})).join("") : '<div class="empty">nothing pending on others</div>') + '</div>';
-  let inboxCol = '<div class="col"><div class="col-head"><span class="name">Inbox — clarify</span><span class="count'+(inboxCards.length?' over':'')+'">'+inboxCards.length+'</span></div>'
+  let waitingCol = '<div class="col" id="list-waiting"><div class="col-head"><span class="name">Waiting for…</span><span class="count">'+waitingCards.length+'</span></div>'
+    + (waitingCards.length ? waitingCards.map(c=>cardHtml(c, {age:"waiting"})).join("") : '<div class="empty">nothing pending on others</div>') + waitingSnoozedHtml() + '</div>';
+  let inboxCol = '<div class="col" id="list-inbox"><div class="col-head"><span class="name">Inbox — clarify</span><span class="count'+(inboxCards.length?' over':'')+'">'+inboxCards.length+'</span></div>'
     + (inboxCards.length ? inboxCards.map(c=>cardHtml(c, {age:"inbox"})).join("") : '<div class="empty">inbox zero 🎉</div>') + '</div>';
 
   // ---- Zone 4: big rocks ----
@@ -806,7 +795,9 @@ function render(){
 
   document.getElementById("content").innerHTML =
       health
+    + wakeNoteHtml()
     + snoozePanel
+    + wakeWeekHtml()
     + capture
     + overview
     + reviewPanel
@@ -839,6 +830,73 @@ function fmtWake(iso){
 }
 
 function toggleSnooze(){ SNOOZE_OPEN = !SNOOZE_OPEN; render(); }
+
+// ---- List anchors, wake warnings and the 7-day wake strip (SSF release) ----
+/** Stable anchor key for a list: "@Computer" -> "computer", plus "waiting" / "inbox". */
+function listKey(l){
+  if (l.id && l.id === WAITING.id) return "waiting";
+  if (l.id && l.id === INBOX.id) return "inbox";
+  return String(l.name || "").replace(/^@/, "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+function wakeDay(iso, withWeekday){
+  try {
+    const o = { timeZone: "Europe/Copenhagen", day: "numeric", month: "short" };
+    if (withWeekday) o.weekday = "short";
+    return new Date(iso).toLocaleDateString("en-GB", o).replace(",", "");
+  } catch(e){ return String(iso).slice(0, 10); }
+}
+function wakeHome(s){ return LIST_NAMES[s.homeListId] || s.homeListAlias || "?"; }
+function wakeLink(s){
+  return (s.url && /^https?:\/\//i.test(s.url))
+    ? '<a href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.name)+'</a>' : esc(s.name);
+}
+/** A snooze whose wake time passed without the Power-Up firing is a fault, not a routine wake. */
+function wakeNoteHtml(){
+  const stuck = (SNOOZED || []).filter(s => s.overdueWake);
+  if (!stuck.length) return "";
+  return '<div style="margin-bottom:16px;">' + stuck.map(s => {
+    const days = Math.floor((Date.now() - Date.parse(s.wakeUp)) / 86400000);
+    return '<div class="note"><span><b>Wake did not fire:</b> '+wakeLink(s)+' was due '+esc(wakeDay(s.wakeUp))
+      +' ('+(isNaN(days)?'?':days)+' day'+(days===1?'':'s')+' ago) and has not returned to '+esc(wakeHome(s))+'.</span>'
+      +'<button class="btn done" data-card="'+esc(s.id)+'" onclick="onWake(this)">Wake now</button></div>';
+  }).join("") + '</div>';
+}
+/** Cards the Snooze Power-Up brings back in the next 7 local days, after today. */
+function wakeWeekHtml(){
+  const from = new Date(); from.setHours(24, 0, 0, 0);
+  const start = from.getTime(), end = start + 6 * 86400000;
+  const soon = (SNOOZED || []).filter(s => { const t = Date.parse(s.wakeUp); return !s.overdueWake && t >= start && t < end; })
+    .sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+  if (!soon.length) return "";
+  return '<div class="ov-panel"><div class="ov-panel-title">Waking this week <small>next 7 days</small></div>'
+    + soon.map(s => '<div class="wake-row"><span>'+wakeLink(s)+'</span><span>'+esc(wakeDay(s.wakeUp, true))+' · → '+esc(wakeHome(s))+'</span></div>').join("")
+    + '</div>';
+}
+/** Snoozed Waiting-for items are still waiting — shown under the list so a short list does not look like nothing is pending. */
+function waitingSnoozedHtml(){
+  const w = (SNOOZED || []).filter(s => WAITING.id && s.homeListId === WAITING.id)
+    .sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+  if (!w.length) return "";
+  return '<div class="subh">Snoozed · '+w.length+'</div>' + w.map(s =>
+    '<div class="card snz"><div class="ttl">'+wakeLink(s)+'</div><div class="desc">waiting, '
+    + (s.overdueWake ? 'wake overdue' : 'wakes '+esc(wakeDay(s.wakeUp)))+'</div></div>').join("");
+}
+/** Scroll to (and flash) a list column; used by the overview tiles and by #list-… links from the email. */
+function goToList(id){
+  const t = document.getElementById(id);
+  if (!t || !t.scrollIntoView) return false;
+  const rm = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  t.scrollIntoView({ behavior: rm ? "auto" : "smooth", block: "start" });
+  t.classList.remove("flash"); void t.offsetWidth; t.classList.add("flash");
+  return true;
+}
+let HASH_DONE = false;
+function goToHashList(){
+  if (HASH_DONE) return;
+  const h = String((typeof location !== "undefined" && location.hash) || "");
+  if (!/^#list-[a-z0-9]+$/.test(h)) { HASH_DONE = true; return; }
+  if (goToList(h.slice(1))) HASH_DONE = true;
+}
 
 function toggleReview(){
   REVIEW_OPEN = !REVIEW_OPEN;
@@ -1065,6 +1123,7 @@ async function init(){
   try {
     CARDS = await loadCards();
     render();
+    goToHashList(); // a #list-… link from the digest email
     loadSnoozed(); // non-blocking; fills the Snoozed stat when ready
     if (REVIEW_OPEN) loadReview(); // Fridays: the panel is open, so fill it
     if (USAGE_OPEN) loadUsage();   // only if it was left open last visit
@@ -1075,6 +1134,14 @@ async function init(){
   }
 }
 init();
+
+// "Cards per list" tiles jump to their list on this page.
+document.addEventListener("click", (e) => {
+  const a = e.target && e.target.closest && e.target.closest("a.ov");
+  if (!a) return;
+  const id = String(a.getAttribute("href") || "").slice(1);
+  if (id && goToList(id)) e.preventDefault();
+});
 
 // Refresh when the tab/app regains focus after a while — otherwise an
 // overnight tab acts on a stale board. Throttled to once per minute. v1.16.0.

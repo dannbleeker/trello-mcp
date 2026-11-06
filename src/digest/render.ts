@@ -2,8 +2,8 @@
  * File: src/digest/render.ts
  * Author: Dann Bleeker Pedersen
  * Created: 2026-07-10
- * Last Updated: 2026-07-10
- * Version: 1.0.0
+ * Last Updated: 2026-11-06
+ * Version: 1.1.0
  * Description: Renders the daily "Todays Actions" email — a full, email-safe
  *              HTML replica of the web dashboard (src/dashboard/page.html)
  *              plus an "Overdue & due today" section the dashboard doesn't
@@ -13,6 +13,13 @@
  *              tables/divs, no scripts, no external assets.
  *
  * Change log:
+ *   1.1.0 (2026-11-06) — SSF (StruktureretSundFornuft) restyle: blue header and
+ *                         footer, navy figures, square cards, pill chips, orange
+ *                         only for alerts. New: how far a context is over its WIP
+ *                         limit, snoozed Waiting-for items, a "Waking this week"
+ *                         strip, a "wake did not fire" warning, change-since-
+ *                         yesterday under each figure, no empty lists, and list
+ *                         tiles that link to the list on the dashboard.
  *   1.19.3 (2026-07-30) — Every label on a card renders, coloured from Trello's
  *                         palette. badgesHtml() used to test for three label
  *                         names and drop the rest.
@@ -94,25 +101,57 @@ function formatDue(iso: string, tz: string, nowMs: number): string {
 
 // ---- inline styles (email-safe: no classes, no <style>) ----
 
-const S = {
-	badge: "display:inline-block;font-size:10px;padding:1px 7px;border-radius:999px;font-weight:600;margin-right:4px;",
-	body: "margin:0;padding:16px;background:#f6f7f9;color:#1c2024;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.45;",
-	card: "border:1px solid #eceef1;border-radius:9px;padding:9px 10px;margin-bottom:8px;background:#fcfcfd;",
-	col: "background:#ffffff;border:1px solid #e4e7eb;border-radius:12px;padding:12px;margin-bottom:14px;",
-	count: "font-size:11px;color:#6b7280;background:#eef1f4;border-radius:999px;padding:2px 8px;",
-	countOver: "font-size:11px;color:#a5281c;background:#fdecea;border-radius:999px;padding:2px 8px;",
-	desc: "font-size:11.5px;color:#6b7280;margin-top:3px;",
-	due: "font-size:11px;color:#a5281c;font-weight:600;margin-top:3px;",
-	empty: "font-size:12px;color:#9aa3ad;font-style:italic;padding:4px 2px;",
-	link: "color:#1c2024;text-decoration:none;",
-	stat: "display:inline-block;margin-right:22px;vertical-align:top;",
-	statLbl: "font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;",
-	statNum: "font-size:26px;font-weight:700;line-height:1;",
-	title: "font-size:13px;font-weight:500;",
-	wip: "display:inline-block;font-size:12px;padding:5px 10px;border-radius:999px;background:#eef1f4;border:1px solid #e0e4e8;margin:0 6px 6px 0;",
-	wipOver: "display:inline-block;font-size:12px;padding:5px 10px;border-radius:999px;background:#fdecea;border:1px solid #f5c6c0;color:#a5281c;margin:0 6px 6px 0;",
-	zone: "font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#4b5563;margin:22px 0 10px;",
+/** SSF palette. Blue chrome, navy data, orange only where something needs attention. */
+const C = {
+	navy: "#00254C",
+	blue: "#2B6CB0",
+	orange: "#ED8936",
+	orangeText: "#C05621", // orange dark enough to read as text on white / soft grey
+	ink: "#1A202C",
+	grey: "#6B7280",
+	line: "#CBD5E0",
+	soft: "#EDF2F7",
+	kort: "#DDEBF7",
+	fersken: "#FDEBDC",
+	sky: "#DCE9F7",
 } as const;
+
+const S = {
+	badge: "display:inline-block;font-size:10px;padding:1px 8px;border-radius:999px;font-weight:600;margin-right:4px;",
+	body: `margin:0;padding:0;background:#ffffff;color:${C.ink};font-family:'Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.45;`,
+	card: `border:1px solid ${C.line};padding:9px 10px;margin-bottom:8px;background:#ffffff;`,
+	cardSnz: `border:1px dashed ${C.line};padding:9px 10px;margin-bottom:8px;background:#ffffff;`,
+	col: `background:${C.soft};padding:12px;margin-bottom:14px;`,
+	count: `font-size:11px;font-weight:600;color:${C.navy};background:#ffffff;border-radius:999px;padding:2px 9px;`,
+	countOver: `font-size:11px;font-weight:600;color:#ffffff;background:${C.orange};border-radius:999px;padding:2px 9px;`,
+	delta: `display:block;font-size:11px;color:${C.grey};margin-top:4px;`,
+	deltaAlert: "display:block;font-size:11px;color:#FFF0E2;margin-top:4px;",
+	desc: `font-size:11.5px;color:${C.grey};margin-top:3px;`,
+	due: `font-size:11px;color:${C.orangeText};font-weight:600;margin-top:3px;`,
+	empty: `font-size:12px;color:${C.grey};font-style:italic;padding:4px 2px;`,
+	link: `color:${C.navy};text-decoration:none;`,
+	note: `background:${C.fersken};border-left:4px solid ${C.orange};padding:12px 14px;margin-bottom:12px;font-size:13.5px;`,
+	ovTile: `display:inline-block;text-align:center;padding:10px 14px;margin:0 8px 8px 0;text-decoration:none;`,
+	stat: `display:inline-block;margin:0 10px 10px 0;padding:10px 14px 8px;min-width:92px;vertical-align:top;background:#ffffff;border:1px solid ${C.line};`,
+	statAlert: `display:inline-block;margin:0 10px 10px 0;padding:10px 14px 8px;min-width:92px;vertical-align:top;background:${C.orange};border:1px solid ${C.orange};`,
+	statLbl: `font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${C.grey};`,
+	statLblAlert: "font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#FFF0E2;",
+	statNum: `font-size:26px;font-weight:700;line-height:1;color:${C.navy};`,
+	statNumAlert: "font-size:26px;font-weight:700;line-height:1;color:#ffffff;",
+	subh: `font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:${C.grey};margin:14px 0 8px;`,
+	title: "font-size:13.5px;font-weight:500;",
+	wip: `display:inline-block;font-size:12px;padding:4px 11px;border-radius:999px;background:#ffffff;color:${C.navy};margin:0 6px 6px 0;`,
+	wipOver: `display:inline-block;font-size:12px;padding:4px 11px;border-radius:999px;background:${C.orange};color:#ffffff;margin:0 6px 6px 0;`,
+	zone: `font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${C.navy};margin:26px 0 10px;`,
+	zoneSub: `font-weight:400;text-transform:none;letter-spacing:0;color:${C.grey};font-size:12.5px;`,
+} as const;
+
+/** Section heading: a short navy bar, the title, an optional grey sub-line. */
+function zoneTitle(title: string, sub = ""): string {
+	return `<div style="${S.zone}"><span style="width:14px;height:3px;background:${C.navy};display:inline-block;vertical-align:middle;margin-right:8px;"></span>${title}${
+		sub ? ` <span style="${S.zoneSub}">${esc(sub)}</span>` : ""
+	}</div>`;
+}
 
 /** Escaped card title, linked only when the URL passes the http(s) whitelist. */
 function titleLink(name: string, url: string | undefined): string {
@@ -144,7 +183,7 @@ function customFieldBadges(c: TrelloCard, defs: TrelloCustomField[]): string {
 			else if (it.value.date) v = it.value.date.slice(0, 10);
 		}
 		if (!v) continue;
-		h += `<span style="${S.badge}background:#eef1f4;color:#4b5563;border:1px solid #dde2e8;">${esc(f.name)} &middot; ${esc(v)}</span>`;
+		h += `<span style="${S.badge}background:${C.soft};color:${C.grey};border:1px solid ${C.line};">${esc(f.name)} &middot; ${esc(v)}</span>`;
 	}
 	return h;
 }
@@ -176,10 +215,10 @@ const LABEL_NO_HUE = "background:#dcdfe4;color:#44546f;";
  * other label a card carried.
  */
 const LABEL_OVERRIDES: Record<string, { style: string; text?: string }> = {
-	BESTSELLER: { style: "background:#1c2024;color:#ffffff;" },
-	"DBP Invest": { style: "background:#2563eb;color:#ffffff;" },
+	BESTSELLER: { style: `background:${C.navy};color:#ffffff;` },
+	"DBP Invest": { style: `background:${C.blue};color:#ffffff;` },
 	"Please Clarify and Organize": {
-		style: "background:#fdecea;color:#c0392b;border:1px solid #f5c6c0;",
+		style: `background:${C.fersken};color:${C.navy};`,
 		text: "clarify",
 	},
 };
@@ -231,26 +270,64 @@ function columnHtml(
 	emptyText: string,
 	forceOver = false,
 	customFields: TrelloCustomField[] = [],
+	extra = "",
 ): string {
 	// forceOver mirrors the dashboard's inbox rule: any card in the inbox is
-	// "over" (red badge), WIP limit or not (v1.14.1 fix).
+	// "over" (orange badge), WIP limit or not (v1.14.1 fix).
 	const over = forceOver || (wip !== null && cards.length > wip);
-	const count = `<span style="${over ? S.countOver : S.count}">${cards.length}${wip !== null ? `/${wip}` : ""}</span>`;
+	// How far over, not just that it is over: 22/7 and 8/7 are different problems.
+	const overBy = wip !== null && cards.length > wip ? ` · +${cards.length - wip}` : "";
+	const count = `<span style="${over ? S.countOver : S.count}">${cards.length}${wip !== null ? `/${wip}` : ""}${overBy}</span>`;
 	const body = cards.length
 		? cards.map((c) => cardHtml(c, tz, { customFields })).join("")
 		: `<div style="${S.empty}">${esc(emptyText)}</div>`;
-	return `<div style="${S.col}"><div style="margin-bottom:8px;"><span style="font-weight:600;font-size:13px;">${esc(name)}</span> ${count}</div>${body}</div>`;
+	return `<div style="${S.col}"><div style="margin-bottom:10px;"><span style="font-weight:600;font-size:13.5px;color:${C.navy};">${esc(name)}</span> ${count}</div>${body}${extra}</div>`;
+}
+
+/** What the five health figures were; stored once a day so the next digest can show the change. */
+export interface DigestSnapshot {
+	inbox: number;
+	next: number;
+	waiting: number;
+	rocks: number;
+	snoozed: number;
 }
 
 export interface Digest {
 	subject: string;
 	html: string;
+	snapshot: DigestSnapshot;
+}
+
+/** "Mon 9 Nov" / "11 Nov" in the local timezone. */
+function fmtWeekDay(iso: string, tz: string): string {
+	return new Intl.DateTimeFormat("en-GB", { timeZone: tz, weekday: "short", day: "numeric", month: "short" })
+		.format(new Date(Date.parse(iso)))
+		.replace(",", "");
+}
+function fmtDay(iso: string, tz: string): string {
+	return new Intl.DateTimeFormat("en-GB", { timeZone: tz, day: "numeric", month: "short" }).format(new Date(Date.parse(iso)));
+}
+
+/** A snoozed card's home list, as the board names it ("waiting" → "Waiting for…"). */
+function homeName(s: SnoozedCard): string {
+	const a = s.homeListAlias;
+	if (!a) return s.homeListId;
+	if (a === "waiting") return "Waiting for…";
+	if (a === "done") return "Done-do";
+	return a.replace(/^@(.)/, (_m, c: string) => `@${c.toUpperCase()}`);
+}
+
+/** Dashboard URL for one list — the "Cards per list" tiles link here. */
+function listLink(key: string): string {
+	return `${DASHBOARD_URL}/dashboard#list-${key}`;
 }
 
 /**
  * Render the full digest from a board snapshot. `nowMs` fixes the clock so
  * overdue/due-today bucketing (and tests) are deterministic; buckets use the
- * same DST-correct local-day boundary as list_cards_due.
+ * same DST-correct local-day boundary as list_cards_due. `prev` is yesterday's
+ * snapshot when there is one; without it the figures simply show no change.
  */
 export function renderDigest(
 	cards: TrelloCard[],
@@ -258,6 +335,7 @@ export function renderDigest(
 	tz: string = DEFAULT_TIMEZONE,
 	snoozed: SnoozedCard[] = [],
 	customFields: TrelloCustomField[] = [],
+	prev: DigestSnapshot | null = null,
 ): Digest {
 	const open = cards.filter((c) => !c.closed && !isDivider(c));
 	const inList = (id: string) => open.filter((c) => c.idList === id);
@@ -267,6 +345,13 @@ export function renderDigest(
 	const rocks = inList(ROLLING_BIG_ROCKS_ID);
 	const ctxCols = CONTEXTS.map((l) => ({ ...l, cards: inList(l.id) }));
 	const totalNext = ctxCols.reduce((s, l) => s + l.cards.length, 0);
+	const snapshot: DigestSnapshot = {
+		inbox: inbox.length,
+		next: totalNext,
+		waiting: waiting.length,
+		rocks: rocks.length,
+		snoozed: snoozed.length,
+	};
 
 	// Due buckets: actionable lists only (Done/Butler/etc. never nag).
 	const { start: dayStart, end: dayEnd } = dayWindowMsInTz(nowMs, tz);
@@ -288,16 +373,29 @@ export function renderDigest(
 		.map((l) => {
 			if (l.wip === null) return `<span style="${S.wip}"><b>${esc(l.name)}</b> ${l.cards.length}</span>`;
 			const over = l.cards.length > l.wip;
-			return `<span style="${over ? S.wipOver : S.wip}"><b>${esc(l.name)}</b> ${l.cards.length}/${l.wip}${over ? " ⚠" : ""}</span>`;
+			return `<span style="${over ? S.wipOver : S.wip}"><b>${esc(l.name)}</b> ${l.cards.length}/${l.wip}${over ? ` · +${l.cards.length - l.wip} over` : ""}</span>`;
 		})
 		.join("");
-	const stat = (num: number, label: string, alert = false) =>
-		`<span style="${S.stat}"><span style="${S.statNum}${alert ? "color:#c0392b;" : ""}">${num}</span><br><span style="${S.statLbl}">${esc(label)}</span></span>`;
-	const health = `<div style="${S.col}">${stat(inbox.length, "Inbox to clarify", inbox.length > 0)}${stat(totalNext, "Next actions")}${stat(waiting.length, "Waiting for")}${stat(rocks.length, "Big rocks")}${stat(snoozed.length, "Snoozed")}<div style="margin-top:12px;">${wipHtml}</div></div>`;
+	const deltaText = (key: keyof DigestSnapshot): string => {
+		if (!prev) return "";
+		const d = snapshot[key] - prev[key];
+		return d > 0 ? `+${d}` : d < 0 ? `−${-d}` : "±0";
+	};
+	const stat = (num: number, label: string, key: keyof DigestSnapshot, alert = false) => {
+		const d = deltaText(key);
+		return `<span style="${alert ? S.statAlert : S.stat}"><span style="${alert ? S.statNumAlert : S.statNum}">${num}</span>${
+			d ? `<span style="${alert ? S.deltaAlert : S.delta}">${d}</span>` : ""
+		}<span style="${alert ? S.statLblAlert : S.statLbl}">${esc(label)}</span></span>`;
+	};
+	const health = `<div style="${S.col}">${stat(inbox.length, "Inbox to clarify", "inbox", inbox.length > 0)}${stat(totalNext, "Next actions", "next")}${stat(waiting.length, "Waiting for", "waiting")}${stat(rocks.length, "Big rocks", "rocks")}${stat(snoozed.length, "Snoozed", "snoozed")}<div style="margin-top:6px;">${wipHtml}</div>${
+		prev ? `<div style="font-size:11px;color:${C.grey};">Small figures: change since the last digest</div>` : ""
+	}</div>`;
 
 	// ---- Waking today (Snooze Power-Up; email-only section, v1.15.0) ----
 	// Cards whose wake time falls inside the local day, plus overdue wakes
 	// (wake time passed but the Power-Up hasn't fired) — both reappear today.
+	// An overdue wake is a fault, not a normal wake, so it gets a warning box
+	// of its own instead of a card that reads like routine.
 	const wakingToday = snoozed
 		.filter((s) => {
 			const t = Date.parse(s.wakeUp);
@@ -308,25 +406,43 @@ export function renderDigest(
 	if (wakingToday.length) {
 		const rows = wakingToday
 			.map((s) => {
-				const title = titleLink(s.name, s.url);
-				const home = s.homeListAlias ?? s.homeListId;
-				const when = s.overdueWake ? "any moment (overdue wake)" : formatDue(s.wakeUp, tz, nowMs);
-				return `<div style="${S.card}"><div style="${S.title}">${title}</div><div style="${S.desc}">wakes ${esc(when)} · → ${esc(home)}</div></div>`;
+				if (s.overdueWake) {
+					const days = Math.floor((nowMs - Date.parse(s.wakeUp)) / (24 * 3600 * 1000));
+					return `<div style="${S.note}"><b style="color:${C.navy};">Wake did not fire:</b> ${titleLink(s.name, s.url)} was due ${esc(fmtDay(s.wakeUp, tz))} (${days} day${days === 1 ? "" : "s"} ago) and has not returned to ${esc(homeName(s))}. Wake it from the dashboard or archive it.</div>`;
+				}
+				return `<div style="${S.card}"><div style="${S.title}">${titleLink(s.name, s.url)}</div><div style="${S.desc}">wakes ${esc(formatDue(s.wakeUp, tz, nowMs))} · → ${esc(homeName(s))}</div></div>`;
 			})
 			.join("");
-		wakeSection = `<div style="${S.zone}">Waking today <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">snoozed cards returning to the board</span></div><div style="${S.col}">${rows}</div>`;
+		wakeSection = `${zoneTitle("Waking today", "snoozed cards returning to the board")}${rows}`;
 	}
+
+	// ---- Waking this week: the next 7 local days, after today ----
+	const weekEnd = dayEnd + 6 * 24 * 3600 * 1000;
+	const wakingWeek = snoozed
+		.filter((s) => {
+			const t = Date.parse(s.wakeUp);
+			return !s.overdueWake && t >= dayEnd && t < weekEnd;
+		})
+		.sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+	const weekSection = wakingWeek.length
+		? `${zoneTitle("Waking this week", "next 7 days")}${wakingWeek
+				.map(
+					(s) =>
+						`<div style="${S.card}"><span style="${S.title}">${titleLink(s.name, s.url)}</span> <span style="${S.desc}">&nbsp;${esc(fmtWeekDay(s.wakeUp, tz))} · → ${esc(homeName(s))}</span></div>`,
+				)
+				.join("")}`
+		: "";
 
 	// ---- Overdue & due today (email-only section) ----
 	let dueSection = "";
 	if (overdue.length || dueToday.length) {
 		const overdueHtml = overdue.length
-			? `<div style="font-weight:600;font-size:13px;color:#a5281c;margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;color:${C.orangeText};margin-bottom:8px;">Overdue (${overdue.length})</div>${overdue.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
 			: "";
 		const todayHtml = dueToday.length
-			? `<div style="font-weight:600;font-size:13px;margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
+			? `<div style="font-weight:600;font-size:13px;color:${C.navy};margin:${overdue.length ? "12px" : "0"} 0 8px;">Due today (${dueToday.length})</div>${dueToday.map((c) => cardHtml(c, tz, { nowMs, showDue: true, customFields })).join("")}`
 			: "";
-		dueSection = `<div style="${S.zone}">Overdue &amp; due today</div><div style="${S.col}border:1px solid #f5c6c0;">${overdueHtml}${todayHtml}</div>`;
+		dueSection = `${zoneTitle("Overdue &amp; due today")}<div style="${S.col}border-left:4px solid ${C.orange};">${overdueHtml}${todayHtml}</div>`;
 	}
 
 	// ---- Friday: weekly-review extras (v1.16.0) ----
@@ -349,42 +465,68 @@ export function renderDigest(
 		].map((h) => ({ ...h, count: inList(h.id).length }));
 
 		const staleHtml = staleWaiting.length
-			? `<div style="font-weight:600;font-size:13px;margin-bottom:8px;">Waiting-for items untouched 7+ days (${staleWaiting.length})</div>${staleWaiting
+			? `<div style="font-weight:600;font-size:13.5px;color:${C.navy};margin-bottom:8px;">Waiting-for items untouched 7+ days (${staleWaiting.length})</div>${staleWaiting
 					.map((c) => {
 						const days = Math.floor((nowMs - Date.parse(c.dateLastActivity)) / (24 * 3600 * 1000));
 						return `<div style="${S.card}"><div style="${S.title}">${titleLink(c.name, c.url)}</div><div style="${S.desc}">stale for ${days} days — chase or drop?</div></div>`;
 					})
 					.join("")}`
-			: `<div style="${S.empty}">no stale waiting-for items — clean week</div>`;
+			: `<div style="font-weight:600;font-size:13.5px;color:${C.navy};">no stale waiting-for items — clean week</div>`;
 		const horizonHtml = `<div style="margin-top:10px;">${horizons
 			.map(
 				(h) =>
-					`<span style="display:inline-block;font-size:12px;padding:5px 10px;border-radius:999px;background:#eef1f4;border:1px solid #e0e4e8;margin:0 6px 6px 0;"><b>${esc(h.name)}</b> ${h.count}</span>`,
+					`<span style="display:inline-block;font-size:12px;padding:4px 11px;border-radius:999px;background:#ffffff;color:${C.navy};margin:0 6px 6px 0;"><b>${esc(h.name)}</b> ${h.count}</span>`,
 			)
 			.join("")}</div>`;
-		reviewSection = `<div style="${S.zone}">Weekly review <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">it's Friday — worth a look</span></div><div style="${S.col}">${staleHtml}${horizonHtml}</div>`;
+		reviewSection = `${zoneTitle("Weekly review", "it's Friday — worth a look")}<div style="background:${C.kort};border-left:4px solid ${C.blue};padding:14px 16px;">${staleHtml}${horizonHtml}</div>`;
 	}
 
 	// ---- Cards per list overview (matches the dashboard's .ov-panel; v1.14.1) ----
+	// Each tile links to that list on the dashboard (an in-email anchor would be
+	// stripped by most mail clients).
 	const overviewEntries = [
-		...ctxCols.map((l) => ({ alert: l.wip !== null && l.cards.length > l.wip, count: l.cards.length, name: l.name })),
-		{ alert: false, count: waiting.length, name: "Waiting for…" },
-		{ alert: inbox.length > 0, count: inbox.length, name: "Inbox" },
+		...ctxCols.map((l) => ({
+			alert: l.wip !== null && l.cards.length > l.wip,
+			count: l.cards.length,
+			key: l.name.replace(/^@/, "").toLowerCase(),
+			name: l.wip !== null && l.cards.length > l.wip ? `${l.name} · +${l.cards.length - l.wip} over` : l.name,
+		})),
+		{ alert: false, count: waiting.length, key: "waiting", name: "Waiting for…" },
+		{ alert: inbox.length > 0, count: inbox.length, key: "inbox", name: "Inbox" },
 	];
-	const overviewHtml = `<div style="${S.col}"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#6b7280;margin-bottom:10px;">Cards per list</div>${overviewEntries
+	const overviewHtml = `<div style="${S.col}">${overviewEntries
 		.map(
 			(e) =>
-				`<span style="display:inline-block;text-align:center;border-radius:10px;padding:10px 14px;margin:0 8px 8px 0;${
-					e.alert ? "background:#fdecea;border:1px solid #f5c6c0;" : "background:#f6f7f9;border:1px solid #eceef1;"
-				}${e.count === 0 ? "opacity:.5;" : ""}"><span style="font-size:22px;font-weight:700;line-height:1;${e.alert ? "color:#c0392b;" : "color:#1c2024;"}">${e.count}</span><br><span style="font-size:10.5px;color:#6b7280;">${esc(e.name)}</span></span>`,
+				`<a href="${listLink(e.key)}" style="${S.ovTile}background:${e.alert ? C.orange : "#ffffff"};${
+					e.count === 0 ? "opacity:.55;" : ""
+				}"><span style="display:block;font-size:22px;font-weight:700;line-height:1;color:${e.alert ? "#ffffff" : C.navy};">${e.count}</span><span style="display:block;font-size:10.5px;margin-top:5px;color:${e.alert ? "#FFF0E2" : C.grey};">${esc(e.name)}</span></a>`,
 		)
 		.join("")}</div>`;
 
 	// ---- Zones (full replica) ----
-	const ctxHtml = ctxCols
-		.map((l) => columnHtml(l.name, l.cards, tz, l.wip, "clear", false, customFields))
-		.join("");
-	const waitingHtml = columnHtml("Waiting for…", waiting, tz, null, "nothing pending on others", false, customFields);
+	// Empty context lists are named in one line instead of getting a column each.
+	const filledCtx = ctxCols.filter((l) => l.cards.length > 0);
+	const emptyCtx = ctxCols.filter((l) => l.cards.length === 0);
+	const ctxHtml =
+		filledCtx.map((l) => columnHtml(l.name, l.cards, tz, l.wip, "clear", false, customFields)).join("") +
+		(emptyCtx.length
+			? `<div style="${S.empty}">Empty lists: ${emptyCtx.map((l) => esc(l.name)).join(", ")}</div>`
+			: "");
+
+	// Snoozed Waiting-for items are still waiting; show them under the list so a
+	// short Waiting-for does not look like nothing is pending on others.
+	const waitingSnoozed = snoozed
+		.filter((s) => s.homeListId === WAITING_ID)
+		.sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
+	const waitingExtra = waitingSnoozed.length
+		? `<div style="${S.subh}">Snoozed · ${waitingSnoozed.length}</div>${waitingSnoozed
+				.map(
+					(s) =>
+						`<div style="${S.cardSnz}"><div style="${S.title}">${titleLink(s.name, s.url)}</div><div style="${S.desc}">waiting, ${s.overdueWake ? "wake overdue" : `wakes ${esc(fmtDay(s.wakeUp, tz))}`}</div></div>`,
+				)
+				.join("")}`
+		: "";
+	const waitingHtml = columnHtml("Waiting for…", waiting, tz, null, "nothing pending on others", false, customFields, waitingExtra);
 	const inboxHtml = columnHtml("Inbox — clarify", inbox, tz, null, "inbox zero 🎉", inbox.length > 0, customFields);
 	const rocksHtml = rocks.length
 		? rocks.map((c) => cardHtml(c, tz, { customFields })).join("")
@@ -403,25 +545,31 @@ export function renderDigest(
 <head><meta charset="utf-8"><title>Todays Actions</title></head>
 <body style="${S.body}">
 <div style="max-width:680px;margin:0 auto;">
-<div style="margin-bottom:12px;"><span style="font-size:18px;font-weight:700;">Todays Actions</span>
-<span style="font-size:12px;color:#6b7280;"> — ${esc(dateLine)}</span><br>
-<a href="${DASHBOARD_URL}" style="font-size:12px;color:#2563eb;">Open the live dashboard →</a></div>
+<div style="background:${C.blue};padding:18px 24px;color:#ffffff;"><div style="font-weight:700;font-size:17px;">StruktureretSundFornuft.dk</div><div style="font-size:11.5px;color:${C.sky};margin-top:2px;">Fordi sund fornuft ikke er så udbredt i praksis</div></div>
+<div style="padding:24px;">
+<div style="width:36px;height:4px;background:${C.orange};margin-bottom:12px;"></div>
+<div style="margin-bottom:18px;"><span style="font-size:26px;line-height:1.2;font-weight:700;color:${C.navy};">Todays Actions</span>
+<span style="font-size:13px;color:${C.grey};"> — ${esc(dateLine)}</span><br>
+<a href="${DASHBOARD_URL}" style="font-size:13px;color:${C.blue};">Open the live dashboard →</a></div>
 ${health}
 ${dueSection}
 ${wakeSection}
+${weekSection}
 ${reviewSection}
+${zoneTitle("Cards per list")}
 ${overviewHtml}
-<div style="${S.zone}">Next actions <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">by context</span></div>
+${zoneTitle("Next actions", "by context")}
 ${ctxHtml}
-<div style="${S.zone}">Needs attention</div>
+${zoneTitle("Needs attention")}
 ${waitingHtml}
 ${inboxHtml}
-<div style="${S.zone}">Rolling big rocks <span style="font-weight:500;text-transform:none;letter-spacing:0;color:#9aa3ad;">your active projects</span></div>
+${zoneTitle("Rolling big rocks", "your active projects")}
 ${rocksHtml}
-<div style="margin-top:18px;font-size:11px;color:#9aa3ad;">Sent daily at 04:00 Copenhagen time by trello-mcp · <a href="${DASHBOARD_URL}" style="color:#9aa3ad;">${DASHBOARD_URL.replace("https://", "")}</a></div>
+</div>
+<div style="background:${C.blue};color:${C.sky};padding:16px 24px;font-size:12px;">Sent daily at 04:00 Copenhagen time by trello-mcp · <a href="${DASHBOARD_URL}" style="color:${C.sky};">${DASHBOARD_URL.replace("https://", "")}</a></div>
 </div>
 </body>
 </html>`;
 
-	return { html, subject: "Todays Actions" };
+	return { html, subject: "Todays Actions", snapshot };
 }

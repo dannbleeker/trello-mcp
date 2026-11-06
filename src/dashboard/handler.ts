@@ -43,7 +43,7 @@
 import { Hono } from "hono";
 import { Octokit } from "octokit";
 import { ALLOWED_LOGINS } from "../allowlist";
-import { buildDigest } from "../digest/scheduler";
+import { buildDigest, readPrevSnapshot } from "../digest/scheduler";
 import { TrelloClient } from "../trello/client";
 import { UsageRecorder } from "../usage";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl } from "../utils";
@@ -211,7 +211,8 @@ app.get("/digest/preview", async (c) => {
 		// definitions — so it rendered every card with no custom-field badge and
 		// showed a layout the real email never had. A preview that does not
 		// build the real email is worse than no preview. v1.22.0.
-		const { html } = await buildDigest(client, Date.now());
+		const now = Date.now();
+		const { html } = await buildDigest(client, now, await readPrevSnapshot(c.env, now));
 		return c.html(html, 200, { "Cache-Control": "no-store" });
 	} catch (_e) {
 		return c.text("Couldn't render the digest preview (Trello unreachable?).", 502);

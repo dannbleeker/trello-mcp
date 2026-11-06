@@ -38,7 +38,7 @@ import type { TrelloCustomField } from "../trello/client";
 import { type HttpUsageSink, UsageRecorder } from "../usage";
 import { BOARD_ALIASES, DEFAULT_BOARD, DEFAULT_TIMEZONE } from "../trello/constants";
 import { list_snoozed_cards } from "../trello/tools";
-import { renderDigest } from "./render";
+import { type Digest, type DigestSnapshot, renderDigest } from "./render";
 
 /** Bindings needed to render + send one digest. RESEND_API_KEY may be unset until Dann creates it. */
 export interface DigestSendEnv {
@@ -51,6 +51,12 @@ export interface DigestSendEnv {
 	// bindings are deployed; the recorder no-ops in both cases.
 	USAGE?: AnalyticsEngineDataset;
 	USAGE_DB?: D1Database;
+	/**
+	 * Optional here (required on DigestEnv): when present, each send stores that
+	 * day's health figures so the next digest can show the change. Without it
+	 * the figures simply show no change. v1.26.0.
+	 */
+	OAUTH_KV?: KVNamespace;
 }
 
 /** The cron path additionally needs KV for the once-per-day sent flag. */
@@ -73,6 +79,47 @@ const WINDOW_END_HOUR = 6;
 
 /** KV flag TTL — long enough to cover the whole window, short enough to self-clean. */
 const SENT_FLAG_TTL_SECONDS = 2 * 24 * 3600;
+
+/** Health-figure snapshots live a few days: only yesterday's is ever read. */
+const SNAPSHOT_TTL_SECONDS = 4 * 24 * 3600;
+
+function snapshotKey(nowMs: number): string {
+	return `digest:snapshot:${localDateInTz(nowMs)}`;
+}
+
+/**
+ * Yesterday's health figures, or null. Best-effort by design: the morning email
+ * must never die because a KV read failed or the figure shape changed.
+ */
+export async function readPrevSnapshot(
+	env: { OAUTH_KV?: KVNamespace },
+	nowMs: number,
+): Promise<DigestSnapshot | null> {
+	if (!env.OAUTH_KV) return null;
+	try {
+		const raw = await env.OAUTH_KV.get(snapshotKey(nowMs - 24 * 3600 * 1000));
+		if (!raw) return null;
+		const v = JSON.parse(raw) as Partial<DigestSnapshot>;
+		const keys: (keyof DigestSnapshot)[] = ["inbox", "next", "waiting", "rocks", "snoozed"];
+		return keys.every((k) => Number.isFinite(v[k])) ? (v as DigestSnapshot) : null;
+	} catch (e) {
+		console.error("digest snapshot read failed (no change shown):", e instanceof Error ? e.message : e);
+		return null;
+	}
+}
+
+async function writeSnapshot(
+	env: { OAUTH_KV?: KVNamespace },
+	nowMs: number,
+	snapshot: DigestSnapshot,
+): Promise<void> {
+	if (!env.OAUTH_KV) return;
+	try {
+		await env.OAUTH_KV.put(snapshotKey(nowMs), JSON.stringify(snapshot), { expirationTtl: SNAPSHOT_TTL_SECONDS });
+	} catch (e) {
+		console.error("digest snapshot write failed:", e instanceof Error ? e.message : e);
+	}
+}
 
 export type DigestRunResult =
 	| "sent"
@@ -112,7 +159,8 @@ export function localDateInTz(nowMs: number, tz: string = DEFAULT_TIMEZONE): str
 export async function buildDigest(
 	client: TrelloClient,
 	nowMs: number,
-): Promise<{ html: string; subject: string }> {
+	prev: DigestSnapshot | null = null,
+): Promise<Digest> {
 	const boardId = BOARD_ALIASES[DEFAULT_BOARD];
 	const cards = await client.listCardsOnBoard(boardId, { customFieldItems: true });
 	let customFields: TrelloCustomField[] = [];
@@ -127,7 +175,7 @@ export async function buildDigest(
 	} catch (e) {
 		console.error("digest snoozed-cards fetch failed (section omitted):", e instanceof Error ? e.message : e);
 	}
-	return renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed, customFields);
+	return renderDigest(cards, nowMs, DEFAULT_TIMEZONE, snoozed, customFields, prev);
 }
 
 /**
@@ -148,7 +196,7 @@ export async function sendDigestEmail(
 	// the dashboard button. Each owns its own recorder, so the digest's Trello
 	// calls are attributed to whichever surface actually triggered the send.
 	const client = new TrelloClient(env.TRELLO_KEY, env.TRELLO_TOKEN, usage);
-	const { html, subject } = await buildDigest(client, nowMs);
+	const { html, subject, snapshot } = await buildDigest(client, nowMs, await readPrevSnapshot(env, nowMs));
 
 	const resp = await fetch("https://api.resend.com/emails", {
 		body: JSON.stringify({
@@ -168,6 +216,7 @@ export async function sendDigestEmail(
 		// dashboard API does with Trello. Status is enough to diagnose.
 		throw new Error(`Resend rejected the send (HTTP ${resp.status}).`);
 	}
+	await writeSnapshot(env, nowMs, snapshot);
 }
 
 /**

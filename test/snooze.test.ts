@@ -212,11 +212,15 @@ describe("digest 'Waking today' section", () => {
 			snoozedCard({ id: "over", name: "OverdueWake", overdueWake: true, wakeUp: "2026-07-09T08:00:00.000Z" }),
 		]);
 		expect(html).toContain("Waking today");
-		const section = html.slice(html.indexOf("Waking today"), html.indexOf("Cards per list"));
+		const section = html.slice(html.indexOf("Waking today"), html.indexOf("Waking this week"));
 		expect(section).toContain("WakesToday");
 		expect(section).toContain("OverdueWake");
-		expect(section).toContain("any moment");
+		expect(section).toContain("Wake did not fire"); // an overdue wake is a fault, not a routine wake
 		expect(section).not.toContain("WakesTomorrow");
+		// Tomorrow's wake belongs to the 7-day strip instead.
+		const week = html.slice(html.indexOf("Waking this week"), html.indexOf("Cards per list"));
+		expect(week).toContain("WakesTomorrow");
+		expect(week).not.toContain("WakesToday");
 		expect(html).toContain("Snoozed"); // health-bar stat
 	});
 

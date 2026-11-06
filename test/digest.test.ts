@@ -8,11 +8,13 @@ import {
 	hourInTz,
 	localDateInTz,
 	noteManualSend,
+	readPrevSnapshot,
 	runScheduledDigest,
 	sendDigestEmail,
 	type DigestEnv,
 } from "../src/digest/scheduler";
 import type { TrelloCard } from "../src/trello/client";
+import type { SnoozedCard } from "../src/trello/tools";
 import { BOARD_ALIASES, LIST_ALIASES } from "../src/trello/constants";
 
 const BOARD_ID = BOARD_ALIASES["dann-to-do"];
@@ -101,7 +103,7 @@ describe("renderDigest", () => {
 		const cards = Array.from({ length: 8 }, (_, i) => card({ id: `c${i}`, name: `Card ${i}` }));
 		const { html } = renderDigest(cards, NOW_SUMMER);
 		expect(html).toContain("8/7");
-		expect(html).toContain("⚠");
+		expect(html).toContain("+1 over"); // how far over, not just that it is over
 	});
 });
 
@@ -230,10 +232,10 @@ describe("v1.14.1 bug-hunt regressions", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("render: inbox column count goes red (over style) whenever the inbox is non-empty", () => {
+	it("render: inbox column count goes orange (over style) whenever the inbox is non-empty", () => {
 		const { html } = renderDigest([card({ idList: LIST_ALIASES.inbox, name: "ClarifyMe" })], NOW_SUMMER);
 		const inboxCol = html.slice(html.indexOf("Inbox — clarify"), html.indexOf("Rolling big rocks"));
-		expect(inboxCol).toContain("#fdecea"); // the over-badge background, matching the dashboard
+		expect(inboxCol).toContain("background:#ED8936"); // the over-badge background, matching the dashboard
 	});
 
 	it("render: includes the 'Cards per list' overview panel (full-replica parity)", () => {
@@ -467,9 +469,9 @@ describe("v1.19.3 — every label on a card renders", () => {
 			NOW_SUMMER,
 		);
 		expect(badgeTexts(html)).toEqual(["BESTSELLER", "DBP Invest", "clarify"]);
-		expect(html).toContain("background:#1c2024;color:#ffffff;");
-		expect(html).toContain("background:#2563eb;color:#ffffff;");
-		expect(html).toContain("background:#fdecea;color:#c0392b;");
+		expect(html).toContain("background:#00254C;color:#ffffff;");
+		expect(html).toContain("background:#2B6CB0;color:#ffffff;");
+		expect(html).toContain("background:#FDEBDC;color:#00254C;");
 	});
 
 	it("renders a colour-only label rather than dropping it", () => {
@@ -488,5 +490,165 @@ describe("v1.19.3 — every label on a card renders", () => {
 		);
 		expect(html).not.toContain("<img src=x");
 		expect(html).toContain("&lt;img src=x");
+	});
+});
+
+describe("v1.26.0 — SSF restyle and new sections", () => {
+	function snoozed(overrides: Partial<SnoozedCard>): SnoozedCard {
+		return {
+			homeListAlias: "@computer",
+			homeListId: LIST_ALIASES["@computer"],
+			id: "s1",
+			name: "Snoozed thing",
+			overdueWake: false,
+			url: "https://trello.com/c/s",
+			wakeUp: "2026-07-10T16:00:00.000Z",
+			...overrides,
+		};
+	}
+
+	it("says how far over the WIP limit a context is, in the pill, the count and the tile", () => {
+		const cards = Array.from({ length: 12 }, (_, i) => card({ id: `c${i}`, name: `Card ${i}` }));
+		const { html } = renderDigest(cards, NOW_SUMMER);
+		expect(html).toContain("12/7 · +5 over"); // pill
+		expect(html).toContain("12/7 · +5<"); // column count
+		expect(html).toContain("@Computer · +5 over"); // overview tile
+	});
+
+	it("does not mention an overflow when the context is within its limit", () => {
+		const { html } = renderDigest([card()], NOW_SUMMER);
+		expect(html).not.toContain("over</span>");
+	});
+
+	it("lists snoozed Waiting-for items under the Waiting-for column", () => {
+		const { html } = renderDigest([], NOW_SUMMER, undefined, [
+			snoozed({
+				homeListAlias: "waiting",
+				homeListId: LIST_ALIASES.waiting,
+				name: "ChaseTheSupplier",
+				wakeUp: "2026-07-14T08:00:00.000Z",
+			}),
+			snoozed({ name: "NotWaiting" }),
+		]);
+		const waiting = html.slice(html.indexOf("Waiting for…</span>"), html.indexOf("Inbox — clarify"));
+		expect(waiting).toContain("Snoozed · 1");
+		expect(waiting).toContain("ChaseTheSupplier");
+		expect(waiting).toContain("waiting, wakes 14 Jul");
+		expect(waiting).not.toContain("NotWaiting");
+	});
+
+	it("names empty context lists in one line instead of rendering a column for each", () => {
+		const { html } = renderDigest([card()], NOW_SUMMER);
+		expect(html).toContain("Empty lists: @Home, @Phone, @Errands, @Lene");
+		const next = html.slice(html.indexOf("Next actions</div>") === -1 ? 0 : html.indexOf(">Next actions<"));
+		expect(next).not.toMatch(/font-weight:600;font-size:13\.5px;color:#00254C;">@Home/);
+	});
+
+	it("links every 'Cards per list' tile to its list on the dashboard", () => {
+		const { html } = renderDigest([card()], NOW_SUMMER);
+		for (const key of ["computer", "home", "phone", "errands", "lene", "waiting", "inbox"]) {
+			expect(html).toContain(`href="https://todo.bleeker-pedersen.dk/dashboard#list-${key}"`);
+		}
+	});
+
+	it("returns the five health figures as a snapshot", () => {
+		const { snapshot } = renderDigest(
+			[card(), card({ id: "w", idList: LIST_ALIASES.waiting }), card({ id: "i", idList: LIST_ALIASES.inbox })],
+			NOW_SUMMER,
+			undefined,
+			[snoozed({})],
+		);
+		expect(snapshot).toEqual({ inbox: 1, next: 1, rocks: 0, snoozed: 1, waiting: 1 });
+	});
+
+	it("shows the change since the previous snapshot under each figure", () => {
+		const cards = [card(), card({ id: "c2" }), card({ id: "i", idList: LIST_ALIASES.inbox })];
+		const prev = { inbox: 0, next: 3, rocks: 0, snoozed: 0, waiting: 0 };
+		const { html } = renderDigest(cards, NOW_SUMMER, undefined, [], [], prev);
+		expect(html).toContain(">+1<"); // inbox 0 → 1
+		expect(html).toContain(">−1<"); // next actions 3 → 2
+		expect(html).toContain(">±0<"); // unchanged
+		expect(html).toContain("change since the last digest");
+	});
+
+	it("shows no change figures without a previous snapshot", () => {
+		const { html } = renderDigest([card()], NOW_SUMMER);
+		expect(html).not.toContain("change since the last digest");
+		expect(html).not.toContain(">±0<");
+	});
+
+	it("an overdue wake is a warning, not a routine card", () => {
+		const { html } = renderDigest([], NOW_SUMMER, undefined, [
+			snoozed({
+				homeListAlias: "done",
+				homeListId: LIST_ALIASES.done,
+				name: "StuckWake",
+				overdueWake: true,
+				wakeUp: "2026-06-25T08:00:00.000Z",
+			}),
+		]);
+		expect(html).toContain("Wake did not fire:");
+		expect(html).toContain("was due 25 Jun (15 days ago)");
+		expect(html).toContain("has not returned to Done-do");
+	});
+});
+
+describe("digest health snapshots", () => {
+	function kvEnv(): { store: Map<string, string>; env: { OAUTH_KV: KVNamespace } } {
+		const store = new Map<string, string>();
+		return {
+			env: {
+				OAUTH_KV: {
+					get: async (k: string) => store.get(k) ?? null,
+					put: async (k: string, v: string) => {
+						store.set(k, v);
+					},
+				} as unknown as KVNamespace,
+			},
+			store,
+		};
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("reads yesterday's snapshot, by local date", async () => {
+		const { env, store } = kvEnv();
+		store.set("digest:snapshot:2026-07-09", JSON.stringify({ inbox: 2, next: 9, rocks: 6, snoozed: 4, waiting: 1 }));
+		expect(await readPrevSnapshot(env, NOW_SUMMER)).toEqual({ inbox: 2, next: 9, rocks: 6, snoozed: 4, waiting: 1 });
+	});
+
+	it("returns null when there is none, when it is malformed, or when KV is absent", async () => {
+		const { env, store } = kvEnv();
+		expect(await readPrevSnapshot(env, NOW_SUMMER)).toBeNull();
+		store.set("digest:snapshot:2026-07-09", "{not json");
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		expect(await readPrevSnapshot(env, NOW_SUMMER)).toBeNull();
+		store.set("digest:snapshot:2026-07-09", JSON.stringify({ inbox: "two" }));
+		expect(await readPrevSnapshot(env, NOW_SUMMER)).toBeNull();
+		expect(await readPrevSnapshot({}, NOW_SUMMER)).toBeNull();
+	});
+
+	it("a successful send stores today's snapshot; a failed send does not", async () => {
+		const { env, store } = kvEnv();
+		const upstream = (resendStatus: number) =>
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = new URL(typeof input === "string" ? input : (input as Request).url);
+				if (url.hostname === "api.trello.com") {
+					return new Response(JSON.stringify([card()]), { headers: { "Content-Type": "application/json" }, status: 200 });
+				}
+				return new Response("{}", { status: resendStatus });
+			});
+		const send = { ...env, RESEND_API_KEY: "re_x", TRELLO_KEY: "k", TRELLO_TOKEN: "t" };
+
+		upstream(500);
+		await expect(sendDigestEmail(send, NOW_SUMMER)).rejects.toThrow();
+		expect(store.size).toBe(0);
+
+		vi.restoreAllMocks();
+		upstream(200);
+		await sendDigestEmail(send, NOW_SUMMER);
+		expect(JSON.parse(store.get("digest:snapshot:2026-07-10") as string)).toMatchObject({ next: 1 });
 	});
 });

@@ -203,9 +203,11 @@ import {
 	SNOOZE_PLUGIN_ID,
 	boardAliasFor,
 	listAliasFor,
+	parseWipLimit,
 	resolveBoard,
 	resolveList,
 } from "./constants";
+import { localDate, recordAndCompare, type ReviewTrend } from "./review-history";
 import type {
 	Checklist,
 	TrelloAction,
@@ -1772,15 +1774,104 @@ const WEEKLY_REVIEW_CONTEXT_LISTS = CONTEXT_LIST_ALIASES;
 // v1.20.0: could-ssf was missing. SSF has had its own label and its own
 // Could-do list for a while, so the horizon bucket the weekly review reads
 // silently omitted a whole sphere.
-const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "could-ssf", "someday"] as const;
+export const WEEKLY_REVIEW_COULD_LISTS = ["could-personal", "could-bestseller", "could-dbp-invest", "could-ssf", "someday"] as const;
 const WAITING_LIST_ALIAS = "waiting";
 const INBOX_LIST_ALIAS = "inbox";
 // Rolling Big Rocks id imported from constants.ts (v1.10.0: was previously
 // hardcoded here with a misleading comment claiming it was imported).
 
+/**
+ * A list's WIP position now and once this week's snoozes come back. The
+ * Snooze Power-Up archives a card while it sleeps, so a context list's open
+ * count understates what will be on it in a few days. v1.26.0.
+ */
+export interface WipStatus {
+	listId: string;
+	alias: string | null;
+	name: string;
+	limit: number;
+	open: number;
+	/** open - limit, floored at 0. */
+	over: number;
+	/** Snoozed cards whose home is this list and whose wake falls in the next 7 days (or already passed). */
+	wakingNext7d: number;
+	/** open + wakingNext7d: what the list will hold in a week if nothing moves. */
+	forecast7d: number;
+	overAfterWakes: number;
+}
+
+/**
+ * Pure: WIP status for every open list carrying a "(WIP limit N)" suffix.
+ * Overdue wakes count as waking — the card is coming back whenever the
+ * Power-Up catches up (or wake_card runs).
+ */
+export function wipStatuses(
+	lists: TrelloList[],
+	openCards: { idList: string; closed?: boolean }[],
+	snoozed: SnoozedCard[],
+	nowMs: number,
+): WipStatus[] {
+	const horizon = nowMs + 7 * 24 * 3600 * 1000;
+	const out: WipStatus[] = [];
+	for (const list of lists) {
+		if (list.closed) continue;
+		const limit = parseWipLimit(list.name);
+		if (limit === null) continue;
+		const open = openCards.filter((c) => c.idList === list.id && !c.closed).length;
+		const waking = snoozed.filter((s) => s.homeListId === list.id && Date.parse(s.wakeUp) < horizon).length;
+		out.push({
+			alias: listAliasFor(list.id),
+			forecast7d: open + waking,
+			limit,
+			listId: list.id,
+			name: list.name,
+			open,
+			over: Math.max(0, open - limit),
+			overAfterWakes: Math.max(0, open + waking - limit),
+			wakingNext7d: waking,
+		});
+	}
+	return out;
+}
+
+/**
+ * Pure: the Snooze Power-Up section of the review — what it hides, what comes
+ * back soon, and wakes that should have fired but did not. Before v1.26.0 the
+ * pack's `snoozed.count` counted open cards with a `dueReminder` set, which is
+ * Trello's reminder offset, not a snooze; a board with 18 snoozed cards
+ * reported 0. That count lives on as `reminders`.
+ */
+export function snoozeSection(snoozed: SnoozedCard[], nowMs: number, cap: number) {
+	const day = 24 * 3600 * 1000;
+	const t = (s: SnoozedCard) => Date.parse(s.wakeUp);
+	const byHomeList: Record<string, number> = {};
+	for (const s of snoozed) {
+		const key = s.homeListAlias ?? s.homeListId;
+		byHomeList[key] = (byHomeList[key] ?? 0) + 1;
+	}
+	const overdueWake = snoozed.filter((s) => s.overdueWake);
+	const waking7 = snoozed.filter((s) => !s.overdueWake && t(s) < nowMs + 7 * day);
+	const waking14 = snoozed.filter((s) => !s.overdueWake && t(s) < nowMs + 14 * day);
+	return {
+		count: snoozed.length,
+		overdueWake: overdueWake.slice(0, cap),
+		waking_7d: waking7.slice(0, cap),
+		waking_14d_count: waking14.length,
+		/** Tickler-file depth: snoozes more than 90 days out. */
+		beyond_90d_count: snoozed.filter((s) => t(s) >= nowMs + 90 * day).length,
+		byHomeList,
+	};
+}
+
 export async function weekly_review_pack(
 	client: TrelloClient,
 	input: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean },
+	/**
+	 * `kv` turns on week-over-week memory (review-history.ts): the MCP tool
+	 * passes it, the dashboard's /api/review does not, so refreshing the panel
+	 * never overwrites the snapshot a review is compared against. v1.26.0.
+	 */
+	opts: { kv?: KVNamespace; nowMs?: number } = {},
 ): Promise<{
 	asOf: string;
 	board: BoardSummary;
@@ -1789,10 +1880,13 @@ export async function weekly_review_pack(
 	due_today: { count: number; cards: CardSummaryWithFields[] };
 	due_this_week: { count: number; cards: CardSummaryWithFields[] };
 	contexts: Record<string, number>;
-	waiting: { count: number; stale: CardSummaryWithFields[]; staleDays: number };
+	waiting: { count: number; stale: CardSummaryWithFields[]; staleDays: number; snoozed: number };
 	could_do: Record<string, number>;
 	big_rocks: { count: number };
-	snoozed: { count: number };
+	snoozed: ReturnType<typeof snoozeSection>;
+	reminders: { count: number };
+	wip: WipStatus[];
+	trend: ReviewTrend | null;
 }> {
 	const boardId = await resolveBoardRef(client, input.board);
 	// v1.9.0 fix: the whole composite is dann-to-do-shaped — its list aliases
@@ -1808,13 +1902,16 @@ export async function weekly_review_pack(
 	const staleDays = input.staleDays ?? 7;
 	const cap = Math.min(input.maxPerBucket ?? 25, MAX_RESULTS);
 
-	const [board, allCards] = await Promise.all([
+	const now = opts.nowMs ?? Date.now();
+	const [board, allCards, archived, lists] = await Promise.all([
 		client.getBoard(boardId),
 		client.listCardsOnBoard(boardId, { customFieldItems: input.customFields }),
+		client.listArchivedCardsWithPluginData(boardId),
+		client.listListsOnBoard(boardId),
 	]);
 	const open = allCards.filter((c) => !c.closed);
+	const snoozedCards = snoozedFromArchived(archived, now);
 
-	const now = Date.now();
 	// v1.9.0 fix: local-time day boundaries, so a Friday morning review
 	// doesn't classify Saturday 01:30 CEST as "due_today".
 	const { start: todayStart, end: todayEnd } = dayWindowMsInTz(now);
@@ -1856,7 +1953,7 @@ export async function weekly_review_pack(
 
 	const bigRocksCount = open.filter((c) => c.idList === ROLLING_BIG_ROCKS_ID).length;
 
-	const snoozedCount = open.filter(
+	const reminderCount = open.filter(
 		(c) => c.dueReminder !== null && c.dueReminder !== -1,
 	).length;
 
@@ -1870,6 +1967,19 @@ export async function weekly_review_pack(
 		waitingCards.filter((c) => Date.parse(c.dateLastActivity) <= staleCutoff).slice(0, cap),
 	);
 
+	const snoozed = snoozeSection(snoozedCards, now, cap);
+	const trend = opts.kv
+		? await recordAndCompare(opts.kv, {
+				big_rocks: bigRocksCount,
+				contexts,
+				could_do: couldDo,
+				date: localDate(now),
+				inbox: inboxCards.length,
+				snoozed: snoozedCards.length,
+				waiting: waitingCards.length,
+			})
+		: null;
+
 	return {
 		asOf: new Date(now).toISOString(),
 		board: summariseBoard(board, await workspaceMap(client, [board])),
@@ -1881,10 +1991,18 @@ export async function weekly_review_pack(
 			cards: await present(dueThisWeekCards.slice(0, cap)),
 		},
 		contexts,
-		waiting: { count: waitingCards.length, stale: waitingStale, staleDays },
+		waiting: {
+			count: waitingCards.length,
+			stale: waitingStale,
+			staleDays,
+			snoozed: snoozedCards.filter((s) => s.homeListId === waitingId).length,
+		},
 		could_do: couldDo,
 		big_rocks: { count: bigRocksCount },
-		snoozed: { count: snoozedCount },
+		snoozed,
+		reminders: { count: reminderCount },
+		wip: wipStatuses(lists, open, snoozedCards, now),
+		trend,
 	};
 }
 
@@ -2756,7 +2874,15 @@ async function resolveCustomField(
 	boardId: string,
 	key: string,
 ): Promise<TrelloCustomField> {
-	const fields = await customFieldDefs(client, boardId);
+	return pickCustomField(await customFieldDefs(client, boardId), boardId, key);
+}
+
+/**
+ * Pure half of resolveCustomField: pick a field out of already-fetched
+ * definitions. Split out in v1.26.0 so batch_set_card_custom_fields resolves
+ * many rows against ONE definitions fetch per board.
+ */
+function pickCustomField(fields: TrelloCustomField[], boardId: string, key: string): TrelloCustomField {
 	if (TRELLO_ID_RE.test(key)) {
 		const byId = fields.find((f) => f.id === key);
 		if (byId) return byId;
@@ -3427,6 +3553,108 @@ export async function batch_set_card_custom_field(
 	return { updated, skipped };
 }
 
+/** One row of batch_set_card_custom_fields. */
+export interface CustomFieldRow {
+	cardId: string;
+	customFieldId: string;
+	value: CustomFieldValue;
+}
+
+export interface CustomFieldRowResult {
+	index: number;
+	cardId: string;
+	/** Resolved field name, or null when the field could not be resolved. */
+	field: string | null;
+	ok: boolean;
+	reason?: string;
+}
+
+/**
+ * batch_set_card_custom_fields — set DIFFERENT fields to DIFFERENT values on
+ * many cards in one call: a table of {card, field, value} rows. The plural of
+ * set_card_custom_field; batch_set_card_custom_field (singular) stays the
+ * shape for "same value on many cards".
+ *
+ * Built for roadmap edits: on 3 Nov 2026 61 Start/End-month values landed on
+ * the TECH Retail board in one minute, one tool call per value. Here each
+ * card is fetched (and write-guarded) once however many rows name it, and each
+ * board's field definitions are fetched once.
+ *
+ * Validation runs for EVERY row before any write, and `dryRun` stops there —
+ * so a typo in row 40 is reported without rows 1–39 having been written.
+ * Without dryRun, a row that fails validation is skipped and the valid rows
+ * are still written (per-row results report which). Two rows for the same
+ * card+field are refused (the later one): which would win is ambiguous.
+ * v1.26.0.
+ */
+export async function batch_set_card_custom_fields(
+	client: TrelloClient,
+	input: { rows: CustomFieldRow[]; dryRun?: boolean },
+): Promise<{ dryRun: boolean; updated: number; failed: number; results: CustomFieldRowResult[] }> {
+	if (!Array.isArray(input.rows) || input.rows.length === 0) {
+		throw new GuardError("rows must be a non-empty array.");
+	}
+	if (input.rows.length > BATCH_MAX) {
+		throw new GuardError(`Batch size capped at ${BATCH_MAX} rows; got ${input.rows.length}.`);
+	}
+
+	const cards = new Map<string, Promise<TrelloCard>>();
+	const defs = new Map<string, Promise<TrelloCustomField[]>>();
+	const cardFor = (id: string) => {
+		if (!cards.has(id)) cards.set(id, assertCardWritable(client, id));
+		return cards.get(id) as Promise<TrelloCard>;
+	};
+	const defsFor = (boardId: string) => {
+		if (!defs.has(boardId)) defs.set(boardId, customFieldDefs(client, boardId));
+		return defs.get(boardId) as Promise<TrelloCustomField[]>;
+	};
+
+	// Phase 1: validate every row. Sequential on purpose — the caches above
+	// make repeats free, and parallel first-fetches of one card would race.
+	const planned: { result: CustomFieldRowResult; fieldId?: string; body?: Record<string, unknown> }[] = [];
+	const seen = new Set<string>();
+	for (const [index, row] of input.rows.entries()) {
+		const result: CustomFieldRowResult = { cardId: row.cardId, field: null, index, ok: false };
+		try {
+			const card = await cardFor(row.cardId);
+			const field = pickCustomField(await defsFor(card.idBoard), card.idBoard, row.customFieldId);
+			result.field = field.name;
+			const pair = `${card.id}:${field.id}`;
+			if (seen.has(pair)) {
+				throw new GuardError(
+					`Row ${index} sets "${field.name}" on card ${row.cardId} again; an earlier row already does. Keep one.`,
+				);
+			}
+			seen.add(pair);
+			planned.push({ body: customFieldBody(field, row.value), fieldId: field.id, result });
+		} catch (e) {
+			result.reason = e instanceof Error ? e.message : String(e);
+			planned.push({ result });
+		}
+	}
+
+	if (input.dryRun) {
+		for (const p of planned) if (p.body) p.result.ok = true;
+		const results = planned.map((p) => p.result);
+		return { dryRun: true, failed: results.filter((r) => !r.ok).length, results, updated: 0 };
+	}
+
+	// Phase 2: write the valid rows.
+	let updated = 0;
+	for (const p of planned) {
+		if (!p.body || !p.fieldId) continue;
+		try {
+			await client.setCardCustomFieldItem(p.result.cardId, p.fieldId, p.body);
+			p.result.ok = true;
+			updated += 1;
+		} catch (e) {
+			p.result.reason = e instanceof Error ? e.message : String(e);
+		}
+	}
+	const results = planned.map((p) => p.result);
+	return { dryRun: false, failed: results.filter((r) => !r.ok).length, results, updated };
+}
+
 /** Refuse a value whose shape doesn't match the field's declared type. */
 function assertFieldType(field: TrelloCustomField, expected: TrelloCustomField["type"]): void {
 	if (field.type === expected) return;
@@ -3764,7 +3992,17 @@ export async function list_snoozed_cards(
 ): Promise<{ snoozed: SnoozedCard[] }> {
 	const boardId = await resolveBoardRef(client, input.board);
 	const archived = await client.listArchivedCardsWithPluginData(boardId);
-	const snoozed = archived
+	return { snoozed: snoozedFromArchived(archived, nowMs) };
+}
+
+/**
+ * Pure: the Power-Up-snoozed subset of a board's archived cards (fetched WITH
+ * pluginData), soonest wake first. Shared by list_snoozed_cards and
+ * weekly_review_pack so the two cannot disagree on what counts as snoozed.
+ * v1.26.0 (extracted).
+ */
+export function snoozedFromArchived(archived: TrelloCard[], nowMs: number): SnoozedCard[] {
+	return archived
 		.flatMap((c): SnoozedCard[] => {
 			const wakeMs = parseSnoozeWakeMs(c);
 			if (wakeMs === null) return [];
@@ -3781,7 +4019,6 @@ export async function list_snoozed_cards(
 			];
 		})
 		.sort((a, b) => a.wakeUp.localeCompare(b.wakeUp));
-	return { snoozed };
 }
 
 /**

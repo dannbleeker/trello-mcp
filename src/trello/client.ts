@@ -1475,6 +1475,42 @@ export class TrelloClient {
 		return data as TrelloAction[];
 	}
 
+	/**
+	 * One page of the authenticated user's actions in a time window. `since` /
+	 * `before` take an ISO date or an action ID (Trello accepts either); pass the
+	 * oldest action's ID as `before` to page backwards. Newest-first, max 1000
+	 * per page. Used by week_recap, which needs a whole week, not the last N.
+	 * v1.26.0.
+	 */
+	async listMyActionsPage(input: {
+		filter?: string;
+		since?: string;
+		before?: string;
+		limit?: number;
+	}): Promise<TrelloAction[]> {
+		const data = await this.request("GET", "/members/me/actions", {
+			filter: input.filter ?? "all",
+			limit: clampLimit(input.limit ?? 1000),
+			since: input.since,
+			before: input.before,
+		});
+		return data as TrelloAction[];
+	}
+
+	/** One page of a board's actions in a time window. Same paging as listMyActionsPage. v1.26.0. */
+	async listBoardActionsPage(
+		boardId: string,
+		input: { filter?: string; since?: string; before?: string; limit?: number },
+	): Promise<TrelloAction[]> {
+		const data = await this.request("GET", `/boards/${boardId}/actions`, {
+			filter: input.filter ?? "all",
+			limit: clampLimit(input.limit ?? 1000),
+			since: input.since,
+			before: input.before,
+		});
+		return data as TrelloAction[];
+	}
+
 	// ---- Memberships + member lookup ----
 
 	/** Board memberships with role data (admin / normal / observer / virtual). */

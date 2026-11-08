@@ -3,8 +3,8 @@
 Per-tool and per-endpoint usage for the MCP connector, added in v1.21.0.
 
 The Cloudflare request count tells you the Worker was busy. It cannot tell you
-*which of the 102 tools Claude actually reaches for* — which is the number you
-need before deciding whether a 102-tool surface earns the context it costs on
+*which of the tools Claude actually reaches for* — which is the number you
+need before deciding whether a 100-plus-tool surface earns the context it costs on
 every conversation. That is what this records.
 
 ## What gets recorded
@@ -103,6 +103,15 @@ diagnostic, not part of the daily board); the open/closed state persists. Tabs
 switch between tools and Trello endpoints, over 7 / 30 / 90 days.
 
 Reads `GET /api/usage?days=N` behind the existing session + allowlist gate.
+
+### The `usage_report` MCP tool
+
+Since v1.26.0 the same D1 rollup is an MCP tool, so a review run in Claude can
+read it directly. Beyond the panel it reports **never-called tools**, computed
+against the tools actually registered on the connector (collected as each one
+is registered, so the list cannot drift), and **failing tools** (≥3 calls,
+≥20% non-ok). `surface` defaults to `mcp`; `all` drops the filter. Bounded by
+`ts` like every other query here.
 
 ### Analytics Engine SQL
 

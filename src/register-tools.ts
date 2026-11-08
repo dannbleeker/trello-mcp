@@ -62,6 +62,7 @@ import {
 	batch_get,
 	batch_move_cards,
 	batch_set_card_custom_field,
+	batch_set_card_custom_fields,
 	card_activity_log,
 	clear_card_cover,
 	convert_checklist_item_to_card,
@@ -150,7 +151,9 @@ import {
 	vote_card,
 	weekly_review_pack,
 } from "./trello/tools";
-import type { CustomFieldValue } from "./trello/tools";
+import type { CustomFieldRow, CustomFieldValue } from "./trello/tools";
+import { clarify_inbox, horizons_pack, repeater_report, week_recap, wip_triage } from "./trello/insights";
+import { usage_report } from "./usage-report";
 
 /**
  * Format a tool's result for an MCP response. Tools return JSON-safe objects;
@@ -254,7 +257,7 @@ const CUSTOM_FIELD_COLORS = z.enum([
 /**
  * Build the tool-handler wrapper: auth check, uniform error mapping, and usage
  * recording. A factory rather than a plain function so `login` and the recorder
- * are closed over — that keeps each of the 102 call sites at two arguments
+ * are closed over — that keeps each call site at two arguments
  * (`guarded("tool_name", handler)`) instead of four.
  *
  * The tool NAME is the whole point of the signature change. Every call already
@@ -268,7 +271,12 @@ function makeGuarded(login: string, usage: UsageRecorder) {
 	// rows, not one. Logged once per session instead: enough to see that someone
 	// knocked, bounded by session count rather than call count. v1.21.2.
 	let deniedLogged = false;
-	return function guarded<TIn>(name: string, fn: (input: TIn) => Promise<unknown>) {
+	// Every registration calls guarded(name, …) exactly once, so the names seen
+	// here ARE the registered tool surface — usage_report's "never called" list
+	// is computed against it rather than a hand-kept copy. v1.26.0.
+	const names: string[] = [];
+	const guarded = function guarded<TIn>(name: string, fn: (input: TIn) => Promise<unknown>) {
+		names.push(name);
 		return async (input: TIn) => {
 			// Checked FIRST, above any recording. Ordering is the fix.
 			if (!ALLOWED_LOGINS.has(login)) {
@@ -306,6 +314,7 @@ function makeGuarded(login: string, usage: UsageRecorder) {
 			}
 		};
 	};
+	return Object.assign(guarded, { names: names as readonly string[] });
 }
 
 
@@ -976,7 +985,7 @@ export function registerTrelloTools(
 
 	server.tool(
 		"weekly_review_pack",
-		"One-call GTD weekly-review snapshot: inbox sample, overdue, due-today, due-this-week, context-list counts (@computer/@home/@phone/@errands/@lene), waiting-list stale items, could-do horizon counts, snoozed count, big-rocks count. Defaults to dann-to-do.",
+		"One-call GTD weekly-review snapshot: inbox sample, overdue, due-today, due-this-week, context-list counts (@computer/@home/@phone/@errands/@lene), waiting-list stale items, could-do horizon counts, big-rocks count. `snoozed` reads the Snooze Power-Up (count, wakes that did not fire, what wakes in 7/14 days, per home list); `wip` gives each WIP-limited list's count now and after this week's wakes; `trend` compares against the previous review (stored per call, at least 5 days back) with up to four weekly points. `reminders` is the old dueReminder count. Defaults to dann-to-do.",
 		{
 			board: boardRef(),
 			staleDays: z.number().int().positive().optional().describe("Waiting-list stale threshold. Default 7."),
@@ -987,7 +996,79 @@ export function registerTrelloTools(
 				.describe("Attach each card's custom-field values, named and typed. Default false."),
 		},
 		guarded("weekly_review_pack", async (i: { board?: string; staleDays?: number; maxPerBucket?: number; customFields?: boolean }) =>
-			weekly_review_pack(client, i),
+			weekly_review_pack(client, i, { kv: env.OAUTH_KV }),
+		),
+	);
+
+	server.tool(
+		"week_recap",
+		"What got done in a window (default the last 7 days), aggregated server-side: completed / created / moved / archived / comments / checklist ticks / custom-field edits, by board and by day. Repeater spawns and Butler-style auto-moves to Done are split out under `automation` (both act in your name, so they are told apart by shape). Completed chores spawned by Repeater carry `recurring: true`. Use this instead of paging list_my_actions.",
+		{
+			days: z.number().int().min(1).max(90).optional().describe("Window length in days, ending now. Default 7. Ignored if `since` is given."),
+			since: z.string().optional().describe("Window start, ISO 8601."),
+			until: z.string().optional().describe("Window end, ISO 8601. Default now."),
+			board: z.string().optional().describe("Only count actions on this board (alias, name, ID, or URL). Default: every board."),
+			maxNames: z.number().int().min(1).max(200).optional().describe("Max card names listed per bucket. Default 30."),
+		},
+		guarded("week_recap", async (i: { days?: number; since?: string; until?: string; board?: string; maxNames?: number }) =>
+			week_recap(client, i),
+		),
+	);
+
+	server.tool(
+		"repeater_report",
+		"Health of every Repeater Power-Up template over the last N days (default 28): spawns, how many copies were completed / archived / snoozed / still open / deleted, done rate, and flags — copies stacking up open, chores never completed, templates that did not fire. Read-only; the Repeater Cards list stays write-protected.",
+		{
+			board: boardRef(),
+			days: z.number().int().min(1).max(90).optional().describe("Look-back window. Default 28."),
+		},
+		guarded("repeater_report", async (i: { board?: string; days?: number }) => repeater_report(client, i)),
+	);
+
+	server.tool(
+		"wip_triage",
+		"For each WIP-limited list over its limit (counting Snooze Power-Up cards waking in the next 7 days), the cards to thin, most idle first, each with a suggested action: clarify, waiting, snooze (Trello UI only — the API cannot create snoozes), someday, or its Could-do horizon by label. `moves` groups movable card IDs by target for batch_move_cards. Suggests only; moves nothing.",
+		{
+			board: boardRef(),
+			list: z.string().optional().describe("Triage this one WIP-limited list even if it is under its limit."),
+			staleDays: z.number().int().positive().optional().describe("Idle days before a card is suggested for Could-do (3× for Someday). Default 21."),
+			maxPerList: z.number().int().min(1).max(50).optional().describe("Max suggestions per list. Default 10."),
+		},
+		guarded("wip_triage", async (i: { board?: string; list?: string; staleDays?: number; maxPerList?: number }) =>
+			wip_triage(client, i),
+		),
+	);
+
+	server.tool(
+		"horizons_pack",
+		"Material for a GTD Higher Horizons review: every Rolling Big Rock with idle days and a stale flag, each Could-do horizon's size, median idle and oldest cards, open actions per label area, the snoozed long tail (waking 30+ days out) by month, and the horizon questions. dann-to-do only.",
+		{
+			board: boardRef(),
+			staleDays: z.number().int().positive().optional().describe("Idle days before a Big Rock counts as stale. Default 30."),
+			sample: z.number().int().min(1).max(25).optional().describe("Oldest cards listed per horizon. Default 3."),
+		},
+		guarded("horizons_pack", async (i: { board?: string; staleDays?: number; sample?: number }) => horizons_pack(client, i)),
+	);
+
+	server.tool(
+		"clarify_inbox",
+		"One row per Inbox card: age, a suggested context list with the reason, possible duplicates already on the board, and flags (garbled dictation, pasted email, question). Suggests only; never moves cards or changes labels.",
+		{
+			board: boardRef(),
+			limit: z.number().int().min(1).max(100).optional().describe("Max inbox cards. Default 25."),
+		},
+		guarded("clarify_inbox", async (i: { board?: string; limit?: number }) => clarify_inbox(client, i)),
+	);
+
+	server.tool(
+		"usage_report",
+		"This connector's own usage from the D1 mirror: calls per tool with outcome split (ok / guard / trello / internal), error rate, average latency, last use; registered tools never called in the window; failing tools; busiest Trello endpoints with retry counts. No argument values are ever stored.",
+		{
+			days: z.number().int().min(1).max(365).optional().describe("Window in days. Default 30."),
+			surface: z.enum(["mcp", "dashboard", "cron", "all"]).optional().describe("Which surface's traffic. Default mcp."),
+		},
+		guarded("usage_report", async (i: { days?: number; surface?: "mcp" | "dashboard" | "cron" | "all" }) =>
+			usage_report(env.USAGE_DB, guarded.names, i),
 		),
 	);
 
@@ -1538,6 +1619,29 @@ export function registerTrelloTools(
 			"batch_set_card_custom_field",
 			async (i: { cardIds: string[]; customFieldId: string; value: CustomFieldValue }) =>
 				batch_set_card_custom_field(client, i),
+		),
+	);
+
+	server.tool(
+		"batch_set_card_custom_fields",
+		"Set DIFFERENT custom fields to DIFFERENT values across cards in one call: a table of {cardId, customFieldId, value} rows (max 50). Every row is validated before any write; `dryRun: true` validates only. Each card is fetched once however many rows name it, and each board's field definitions once. Two rows for the same card+field are refused. Per-row results report what was written.",
+		{
+			rows: z
+				.array(
+					z
+						.object({
+							cardId: z.string().min(1),
+							customFieldId: CUSTOM_FIELD_REF,
+							value: CUSTOM_FIELD_VALUE,
+						})
+						.strict(),
+				)
+				.min(1)
+				.max(50),
+			dryRun: z.boolean().optional().describe("Validate every row, write nothing. Default false."),
+		},
+		guarded("batch_set_card_custom_fields", async (i: { rows: CustomFieldRow[]; dryRun?: boolean }) =>
+			batch_set_card_custom_fields(client, i),
 		),
 	);
 

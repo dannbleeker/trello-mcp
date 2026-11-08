@@ -8,7 +8,7 @@ Since v1.19.0 the connector is **multi-workspace**: every board in every workspa
 
 Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `/dashboard` — see [Web dashboard](#web-dashboard).
 
-## Tools (102)
+## Tools (111)
 
 **Reads**
 
@@ -36,7 +36,13 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `card_activity_log` | Recent actions on a card — moves, due-date edits, label/comment/attachment events |
 | `list_snoozed_cards` | Cards hidden by the Snooze Power-Up, with wake times (`overdueWake` flags a missed wake). Read via card pluginData |
 | `snooze_read` | Cards whose `dueReminder` is set, sorted by computed wake-up time. Note: `dueReminder` is the reminder-offset field, not a true snooze — Trello has no native snooze in its REST API |
-| `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, snoozed, big-rocks |
+| `weekly_review_pack` | One-call GTD snapshot: inbox, overdue, due-today, due-this-week, context-list counts, waiting stale, could-do horizons, big-rocks. `snoozed` reads the Snooze Power-Up (wakes that did not fire, waking in 7/14 days, per home list); `wip` forecasts each WIP-limited list after this week's wakes; `trend` compares with the previous review (KV, ≥5 days back) |
+| `week_recap` | What got done in a window (default 7 days), aggregated server-side: completed / created / moved / ticks / field edits, by board and day. Repeater spawns and Butler-style auto-moves to Done are split out as `automation` |
+| `repeater_report` | Per Repeater template: spawns, completed / archived / snoozed / open / deleted, done rate, flags (copies stacking, never completed); `quiet` lists templates that did not fire |
+| `wip_triage` | Over-limit lists (counting this week's wakes): cards to thin, most idle first, then oldest by creation, each with a suggested action; `moves` feeds `batch_move_cards`. Suggests only |
+| `horizons_pack` | Higher Horizons material: Big Rocks with idle days, Could-do horizon sizes and oldest cards, open actions per label area, snoozed long tail by month, horizon questions |
+| `clarify_inbox` | Per Inbox card: age, suggested context with reason, possible duplicates, flags (garbled dictation, pasted email, question). Suggests only |
+| `usage_report` | This connector's usage from D1: calls per tool by outcome, never-called tools, failing tools, busiest Trello endpoints |
 | `list_notifications` | Authenticated user's bell-icon feed; filter by type + read state |
 | `list_card_voters` | Members who have voted on a card |
 | `list_comment_reactions` | All emoji reactions on a comment |
@@ -120,6 +126,7 @@ Since v1.12.0 the same Worker also serves a private **web To-Do dashboard** at `
 | `delete_custom_field_option` | Remove an option from a list-type custom field |
 | `set_card_custom_field` | Set a custom-field value on a card (polymorphic: checkbox / date / number / text / list, or null to clear) — value is checked against the field's declared type |
 | `batch_set_card_custom_field` | Set the same custom field to the same value across many cards (resolves + type-checks once per board) |
+| `batch_set_card_custom_fields` | Set different fields to different values across cards: up to 50 `{cardId, customFieldId, value}` rows, all validated before any write, `dryRun` to validate only |
 | `rename_custom_field_option` | Rename a list-type option without losing the cards using it (Trello has no update-option endpoint) |
 | `enable_board_plugin` | Enable a Power-Up on a board by alias (custom-fields, card-aging, voting, calendar) or ID |
 | `disable_board_plugin` | Disable a Power-Up (takes the boardPlugin id from list_board_plugins, NOT the idPlugin — Trello REST quirk) |
@@ -355,7 +362,9 @@ src/
     constants.ts            — aliases, forbidden + read-only lists, WIP parser
     resolve.ts              — workspace / board / list reference resolution + directory cache
     guards.ts               — server-side safety guards
-    tools.ts                — 102 tool implementations (testable in plain Node)
+    tools.ts                — tool implementations (testable in plain Node)
+    insights.ts             — read-only review tools: week_recap, repeater_report, wip_triage, horizons_pack, clarify_inbox
+    review-history.ts       — weekly_review_pack's week-over-week snapshots (KV)
 test/                       — vitest unit tests (407; no real Trello calls)
 migrations/                 — D1 schema for the usage_events table
 docs/                       — usage-tracking.md, snooze-v2.md

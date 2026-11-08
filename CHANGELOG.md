@@ -6,7 +6,84 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.26.0] — 2026-11-08
+
+Built from a review of how the board is actually used: one week of activity
+(300 actions across Dann to-do, Zoo Leadership Meeting and TECH Retail), nine
+weekly reviews, and the Repeater / Snooze / Butler Power-Ups. Seven new tools
+(104 → 111); all but one are read-only.
+
+### Fixed
+- **`weekly_review_pack` reported `snoozed: 0` on a board with 18 snoozed
+  cards.** It counted open cards with a `dueReminder` set, which is Trello's
+  reminder offset, not a snooze; the Snooze Power-Up archives the cards it
+  hides, so the pack never saw them. `snoozed` now reads the Power-Up (via the
+  same parser as `list_snoozed_cards`, now shared as `snoozedFromArchived`).
+  The old figure is kept, honestly named, as `reminders.count`.
+
 ### Added
+- **`weekly_review_pack` — Snooze section**: `snoozed.overdueWake` (wakes that
+  did not fire, e.g. a card 10 days past its wake), `waking_7d`,
+  `waking_14d_count`, `beyond_90d_count` (tickler depth) and `byHomeList`;
+  `waiting.snoozed` for the Waiting-for items the Power-Up hides.
+- **`weekly_review_pack` — `wip`**: every "(WIP limit N)" list with its count
+  now and its forecast once this week's snoozes wake (`forecast7d`,
+  `overAfterWakes`).
+- **`weekly_review_pack` — `trend`**: each MCP call stores its headline figures
+  in KV (`review:snapshot:<local date>`, 140-day TTL); the next review gets the
+  delta against the most recent snapshot at least 5 days old, plus up to four
+  weekly points. The dashboard's `/api/review` passes no KV, so refreshing the
+  panel never overwrites what a review is compared against. Fail-soft: a KV
+  fault yields an empty trend, never a failed review.
+- **`week_recap`**: a window's activity (default 7 days) aggregated
+  server-side: completed, created, moved (top transitions), archived,
+  deleted, comments, checklist ticks, custom-field edits, by board and by
+  day. Repeater and Butler act in Dann's name, so they are told apart by shape:
+  a `copyCard` from a Repeater template is a spawn, and a move to a Done-like
+  list within 5 s of the same card's completion is an auto-move. Both are
+  reported under `automation` and kept out of the human counts; completed
+  Repeater chores carry `recurring: true`. Pages `/members/me/actions` by
+  `since`/`before` (up to 5000 actions). Replaces paging raw `list_my_actions`,
+  where 300 actions came to about 280k characters.
+- **`repeater_report`**: per Repeater template over N days (default 28):
+  spawns, and how many copies are now completed / archived / snoozed / open /
+  deleted (current state read via `/batch`), done rate, and flags (copies
+  stacking open, never completed, completed under half the time). Templates
+  that did not fire (yearly chores, mostly) are listed under `quiet`, not
+  flagged; `---` divider cards are skipped. Reads the Repeater Cards list; writes there stay
+  forbidden.
+- **`wip_triage`**: for each list over its limit after this week's wakes, the
+  cards to thin, each with an action: clarify, waiting, snooze (Trello UI only;
+  the API cannot create snoozes), someday, or its Could-do horizon by label.
+  Ranked by idleness first, then, because a weekly review touches every card,
+  by age from the card ID to fill up to the overflow. `moves` groups the
+  movable IDs by target for `batch_move_cards`. Suggests only.
+- **`horizons_pack`**: Big Rocks with idle days and a stale flag, each Could-do
+  horizon's size, median idle and oldest cards, open actions per label area,
+  the snoozed long tail by month, and the GTD horizon questions.
+- **`clarify_inbox`**: per Inbox card: age, suggested context with the reason,
+  possible duplicates elsewhere on the board, and flags (garbled dictation such
+  as "Lllmnstufio", pasted email, a question). Never moves cards or touches
+  labels.
+- **`usage_report`**: the D1 usage mirror as a tool: calls per tool split by
+  outcome, error rate, latency, last use; registered tools never called;
+  failing tools; busiest Trello endpoints with retry counts. "Never called" is
+  computed against the tools actually registered (`makeGuarded` now records
+  each name as it registers).
+- **`batch_set_card_custom_fields`** (plural): up to 50 `{cardId,
+  customFieldId, value}` rows with different fields and values. Every row is
+  validated before any write; `dryRun` stops there. Each card is fetched once
+  however many rows name it, and each board's definitions once. A second row
+  for the same card and field is refused.
+- Client: `listMyActionsPage` and `listBoardActionsPage` (windowed, pageable).
+  Constants: `BUTLER_LIST_ID`, `REPEATER_CARDS_LIST_ID`.
+
+### Changed
+- Word matching in the new heuristics is Unicode-aware. JavaScript's `\b` sees
+  no boundary after "å" or "ø", so an ASCII pattern for "venter på" never
+  matched.
+
+### Added — digest and dashboard (merged in #45, first released here)
 - **Digest and dashboard: how far over a WIP limit.** `@Computer 22/7` now
   reads `22/7 · +15 over` in the pill, the column count and the "Cards per
   list" tile.

@@ -227,6 +227,7 @@ describe("GET /api/review", () => {
 				method: "GET",
 				path: `/1/boards/${BOARD_ID}/cards`,
 			},
+			{ body: BOARD_LISTS, method: "GET", path: `/1/boards/${BOARD_ID}/lists` },
 		]);
 		const res = await DashboardApi.request("/api/review", { headers: { Cookie: cookie } }, ENV);
 		expect(res.status).toBe(200);
@@ -236,6 +237,10 @@ describe("GET /api/review", () => {
 		]);
 		expect(body.could_do["could-ssf"]).toBe(1);
 		expect(body.could_do["could-personal"]).toBe(1);
+		// The dashboard passes no KV, so a panel refresh never writes (or reads)
+		// the review snapshot a Friday review is compared against.
+		expect(body.trend).toBeNull();
+		expect(body.wip.map((w: { name: string }) => w.name)).toEqual(["@Computer (WIP limit 7)", "@Home (WIP limit 5)"]);
 	});
 });
 

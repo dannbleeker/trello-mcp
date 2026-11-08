@@ -106,9 +106,21 @@ export const ACTIONABLE_LIST_IDS: ReadonlySet<string> = new Set<string>([
  *   - Butler         (automation rules; modifying these breaks Trello workflows)
  *   - Repeater Cards (templates that spawn recurring instances elsewhere)
  */
+/** The Butler list on dann-to-do: Butler's rule cards. Forbidden for writes. */
+export const BUTLER_LIST_ID = "59be61509a1e3922fb72ddf7";
+
+/**
+ * The Repeater Cards list on dann-to-do: the Repeater Power-Up's TEMPLATES.
+ * Repeater copies a template into its context list on schedule, so a
+ * `copyCard` action whose `cardSource` is a card on this list is a Repeater
+ * spawn, not something Dann copied. Forbidden for writes; read freely
+ * (repeater_report, week_recap). v1.26.0.
+ */
+export const REPEATER_CARDS_LIST_ID = "59be5c3ee86b5cde2f6a5c92";
+
 export const FORBIDDEN_LISTS = new Set<string>([
-	"59be61509a1e3922fb72ddf7", // Butler
-	"59be5c3ee86b5cde2f6a5c92", // Repeater Cards
+	BUTLER_LIST_ID, // Butler
+	REPEATER_CARDS_LIST_ID, // Repeater Cards
 ]);
 
 /**

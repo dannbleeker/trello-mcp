@@ -1,5 +1,15 @@
 overrides:
   undici: ^7.29.0
+  # GHSA-866g-f22w-33x8 (low, @ai-sdk/provider-utils <4.0.33). `ai` is an
+  # auto-installed peer of `agents` (^6 || ^7) and was held at 6.0.201, which
+  # pins provider-utils 4.0.27. Same major. Drop once the lockfile resolves
+  # ai >=6.0.336 on its own.
+  ai: ^6.0.336
+  # GHSA-rgj7-g3m4-5g8c, GHSA-wq5f-xc86-pv6w (high, sharp <0.35.5). Dev-only:
+  # wrangler -> miniflare, whose newest release still pins 0.35.2, and sharp's
+  # build script is ignored here anyway. Same minor. Drop once miniflare
+  # declares sharp >=0.35.5.
+  sharp: ^0.35.5
 
 allowBuilds:
   core-js-pure: set this to true or false

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- `agents` 0.20.1 → 0.34.0, which moves its MCP v2 peers `@modelcontextprotocol/client`
+  and `@modelcontextprotocol/server` from 2.0.0 to 2.4.0 (GHSA-6qxp-vccf-f47h,
+  GHSA-jm63-cq47-j5jp, GHSA-46jr-4wx8-v453, GHSA-f897-62hf-6gxq, GHSA-rvq5-wwqv-78pq,
+  GHSA-6prh-2h8m-c8cw). agents 0.34 imports `@modelcontextprotocol/server` outright, so
+  both peers are now direct dependencies, pinned to the exact version agents asks for.
+- pnpm overrides for `ai` (^6.0.336, GHSA-866g-f22w-33x8 through `@ai-sdk/provider-utils`)
+  and `sharp` (^0.35.5, dev-only under wrangler → miniflare, GHSA-rgj7-g3m4-5g8c and
+  GHSA-wq5f-xc86-pv6w), each with its lift condition in `pnpm-workspace.yaml`.
+
 ## [1.26.0] — 2026-11-08
 
 Built from a review of how the board is actually used: one week of activity
